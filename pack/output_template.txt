@@ -1,0 +1,27 @@
+دستورالعمل حیاتی برای فرمت پاسخ (بسیار مهم):
+پاسخ شما قرار است توسط یک Agent خودکار روی سورس‌کد اصلی اعمال شود. بنابراین رعایت دقیق قوانین زیر الزامی است:
+۱. برای هر اصلاح، حتماً «مسیر دقیق فایل» (مثلاً handlers.py یا database.py) را با هدر مشخص کنید.
+۲. اصلاحات را دقیقاً در قالب بلوک‌های «SEARCH / REPLACE» بنویسید (نمونه زیر).
+۳. در بخش SEARCH، دقیقاً خطوط موجود در کد فعلی را همراه با ۳ تا ۵ خط کد ثابت قبل و بعد از آن (برای جلوگیری از تطابق اشتباه) بیاورید. فاصله و تورفتگی‌ها (Indentation) باید کاملاً دقیق و دست‌نخورده باشد.
+۴. در بخش REPLACE، کد اصلاح‌شده جایگزین را کامل بنویسید. هرگز از عبارات خلاصه مثل «# ... rest of code» داخل بلوک جایگزین استفاده نکنید.
+۵. قبل از هر بلوک اصلاحی، یک توضیح کوتاه ۲ خطی درباره اینکه باگ چه بود و اصلاح چطور کار می‌کند ارائه دهید.
+
+فرمت مورد انتظار برای هر اصلاح دقیقاً مانند این مثال باشد:
+
+### فایل: `database.py`
+**علت اصلاح:** عدم مدیریت بستن session در هنگام رخ دادن خطای اتصال.
+<<<<<<< SEARCH
+async def get_user_data(user_id: int):
+    session = AsyncSessionLocal()
+    user = await session.get(User, user_id)
+    return user
+=======
+async def get_user_data(user_id: int):
+    async with AsyncSessionLocal() as session:
+        try:
+            user = await session.get(User, user_id)
+            return user
+        except Exception as e:
+            logger.error(f"Error fetching user {user_id}: {e}")
+            return None
+>>>>>>> REPLACE

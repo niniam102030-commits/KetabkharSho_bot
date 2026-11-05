@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment and sensitive files
+.env
+
+# Databases and data
+*.db
+*.sqlite
+data/
+backups/
+code_backups/
+
+# Logs
+logs/
+*.log
+
+# Temporary fix files
+AAAFIX*.py
+
+# Graphify cache
+graphify-out/cache/
+*.tmp
+
+# IDE & OS files
+.idea/
+.vscode/
+Thumbs.db
