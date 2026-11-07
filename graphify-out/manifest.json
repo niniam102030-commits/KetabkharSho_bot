@@ -78,9 +78,9 @@
     "semantic_hash": ""
   },
   "pack/project_code.txt": {
-    "mtime": 1794058274.0152462,
-    "seen": 1794058745.014747,
-    "ast_hash": "ac43bea2398eed9c9c3c64dfafab24d7",
+    "mtime": 1794058754.8531747,
+    "seen": 1794062402.701793,
+    "ast_hash": "c354504d96783f2e9f4a59a021533f2c",
     "semantic_hash": ""
   },
   "pack/prompt.txt": {
@@ -93,6 +93,24 @@
     "mtime": 1794058256.7973156,
     "seen": 1794058266.2693477,
     "ast_hash": "a62f3d6ac33a8ead2ba3e77c8eda1718",
+    "semantic_hash": ""
+  },
+  "docker/deploy.sh": {
+    "mtime": 1794062385.8588417,
+    "seen": 1794062402.7017093,
+    "ast_hash": "d68ab5f38f055bfb205603a413aaaba2",
+    "semantic_hash": ""
+  },
+  "docker-compose.yml": {
+    "mtime": 1794062380.8661218,
+    "seen": 1794062402.7017736,
+    "ast_hash": "1fbb40aaba399bd1cca00693e1f91b55",
+    "semantic_hash": ""
+  },
+  "docker/README.md": {
+    "mtime": 1794062392.6101325,
+    "seen": 1794062402.7017796,
+    "ast_hash": "991ba915c50d3a3eab81ecca7c5d17dc",
     "semantic_hash": ""
   }
 }

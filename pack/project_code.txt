@@ -41,12 +41,19 @@ The content is organized as follows:
 </file_summary>
 
 <directory_structure>
+docker/
+  deploy.sh
+  Dockerfile
+  README.md
+.dockerignore
 .env.example
 .gitattributes
 .gitignore
 admin_handlers.py
 config.py
 database.py
+docker-compose.yml
+Dockerfile
 handlers.py
 keyboards.py
 main.py
@@ -63,48 +70,256 @@ weekly_report.py
 <files>
 This section contains the contents of the repository's files.
 
-<file path=".gitattributes">
-graphify-out/graph.json merge=graphify
+<file path="docker/deploy.sh">
+#!/usr/bin/env bash
+# ==============================================================================
+# اسکریپت بروزرسانی خودکار و دیپلوی نسخه جدید ربات کتابخوارشو روی سرور
+# نحوه اجرا روی سرور لینوکس:
+# chmod +x docker/deploy.sh
+# ./docker/deploy.sh
+# ==============================================================================
+
+set -e
+
+echo "=================================================="
+echo "🚀 1. دریافت آخرین تغییرات و کدهای جدید از گیت‌هاب..."
+echo "=================================================="
+git pull origin main
+
+echo ""
+echo "=================================================="
+echo "📦 2. بیلد مجدد کانتینر داکر و راه‌اندازی نسخه جدید..."
+echo "=================================================="
+docker compose up -d --build
+
+echo ""
+echo "=================================================="
+echo "🧹 3. پاکسازی ایمیج‌های موقت و بدون استفاده..."
+echo "=================================================="
+docker image prune -f
+
+echo ""
+echo "=================================================="
+echo "✅ نسخه جدید ربات با موفقیت فعال و اجرا شد!"
+echo "=================================================="
+docker compose ps
 </file>
 
-<file path=".gitignore">
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+<file path="docker/Dockerfile">
+# ==============================================================================
+# KetabKharsho Telegram/Bale Bot - Production Dockerfile
+# Base Image: Python 3.12 Slim (Debian Bookworm)
+# ==============================================================================
+FROM python:3.12-slim
 
-# Virtual environments
+# تنظیم متغیرهای سیستمی و پایتون
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TZ=Asia/Tehran \
+    DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+# تست اعتبارسنجی حین بیلد (Smoke Test):
+RUN python -c "\
+import aiogram; \
+from aiogram import Bot, Dispatcher; \
+from aiogram.client.default import DefaultBotProperties; \
+from aiogram.client.session.aiohttp import AiohttpSession; \
+from aiogram.client.telegram import TelegramAPIServer; \
+import sqlalchemy; \
+import apscheduler; \
+import openpyxl; \
+print(f'>>> تست موفق: aiogram نسخه {aiogram.__version__} و تمام وابستگی‌ها به درستی نصب شدند.'); \
+"
+
+COPY . .
+
+RUN mkdir -p /app/data /app/logs /app/data/backups /app/data/reports
+
+CMD ["python", "main.py"]
+</file>
+
+<file path="docker/README.md">
+# راهنمای استقرار و دیپلوی ربات کتابخوارشو با داکر (Docker)
+
+این پوشه و فایل‌های داکر پروژه برای اجرای ایزوله، پایدار و بروزرسانی خودکار ربات در سرور آماده شده‌اند.
+
+---
+
+## 🛠️ ۱. راه‌اندازی اولیه روی سرور (توسط مسئول سرور)
+
+۱. **کلون کردن ریپازیتوری:**
+```bash
+git clone https://github.com/niniam102030-commits/KetabkharSho_bot.git
+cd KetabkharSho_bot
+```
+
+۲. **ایجاد فایل تنظیمات `.env`:**
+فایل نمونه را کپی کرده و اطلاعات واقعی (توکن بله و شناسه‌های ادمین) را وارد نمایید:
+```bash
+cp .env.example .env
+nano .env
+```
+
+۳. **بیلد و اجرای کانتینر:**
+```bash
+docker compose up -d --build
+```
+
+۴. **مشاهده لاگ‌های زنده ربات:**
+```bash
+docker compose logs -f
+```
+
+---
+
+## 🔄 ۲. بروزرسانی خودکار ربات (پس از هر تغییر در کدهای گیت‌هاب)
+
+هر زمان که برنامه‌نویس کد جدیدی به برنچ `main` پوش کرد، مسئول سرور تنها کافی است اسکریپت دیپلوی را اجرا کند:
+
+```bash
+chmod +x docker/deploy.sh
+./docker/deploy.sh
+```
+
+یا دستورات زیر را دستی اجرا کند:
+```bash
+git pull origin main
+docker compose up -d --build
+```
+
+---
+
+## 💾 ۳. امنیت داده‌ها و دیتابیس (Volumes)
+- دایرکتوری `./data` روی دیسک اصلی سرور ذخیره می‌شود، بنابراین با ری‌استارت شدن، خاموش شدن سرور یا بیلد نسخه جدید داکر، دیتابیس کاربران و سوابق چله به هیچ وجه پاک نخواهد شد.
+- لاگ‌ها در `./logs/` ذخیره می‌گردند.
+</file>
+
+<file path=".dockerignore">
+.git/
+.gitignore
 .venv/
 venv/
 env/
-
-# Environment and sensitive files
-.env
-
-# Databases and data
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.vscode/
+.idea/
+data/
 *.db
 *.sqlite
-data/
+logs/
+*.log
 backups/
 code_backups/
 reports/
 *.xlsx
-
-# Logs
-logs/
-*.log
-
-# Temporary fix files
 AAAFIX*.py
-
-# Graphify cache
 graphify-out/cache/
 *.tmp
+</file>
 
-# IDE & OS files
-.idea/
-.vscode/
-Thumbs.db
+<file path="docker-compose.yml">
+services:
+  ketabkharsho-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ketabkharsho_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Tehran
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # ذخیره‌سازی پایدار دیتابیس، خروجی‌های اکسل و بکاپ‌ها روی دیسک سرور
+      - ./data:/app/data
+      # ذخیره‌سازی پایدار فایل‌های لاگ
+      - ./logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+</file>
+
+<file path="Dockerfile">
+# ==============================================================================
+# KetabKharsho Telegram/Bale Bot - Production Dockerfile
+# Base Image: Python 3.12 Slim (Debian Bookworm)
+# ==============================================================================
+FROM python:3.12-slim
+
+# تنظیم متغیرهای سیستمی و پایتون
+# PYTHONUNBUFFERED=1: خروجی لاگ‌ها بدون بافر فورا در docker logs نمایش داده می‌شود
+# PYTHONDONTWRITEBYTECODE=1: از تولید فایل‌های .pyc اضافی در کانتینر جلوگیری می‌کند
+# TZ=Asia/Tehran: تنظیم پیش‌فرض منطقه زمانی کانتینر به ایران
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TZ=Asia/Tehran \
+    DEBIAN_FRONTEND=noninteractive
+
+# تعیین دایرکتوری کاری در کانتینر
+WORKDIR /app
+
+# نصب ابزارهای پایه و داده‌های زمانی IANA
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ارتقای ابزارهای پکیج‌منیجر پایتون به آخرین نسخه
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# کپی requirements.txt به تنهایی (برای استفاده بهینه از کش داکر در هنگام بیلد مجدد)
+COPY requirements.txt .
+
+# نصب کلیه وابستگی‌های مورد نیاز با نسخه‌های دقیق و رسمی
+RUN pip install --no-cache-dir -r requirements.txt
+
+# تست اعتبارسنجی حین بیلد (Smoke Test):
+# اطمینان 100% از نصب aiogram نسخه 3 و ماژول‌های کلاینت آن (مانند DefaultBotProperties و AiohttpSession)
+RUN python -c "\
+import aiogram; \
+from aiogram import Bot, Dispatcher; \
+from aiogram.client.default import DefaultBotProperties; \
+from aiogram.client.session.aiohttp import AiohttpSession; \
+from aiogram.client.telegram import TelegramAPIServer; \
+import sqlalchemy; \
+import apscheduler; \
+import openpyxl; \
+print(f'>>> تست موفق: aiogram نسخه {aiogram.__version__} و تمام وابستگی‌ها به درستی نصب شدند.'); \
+"
+
+# کپی سورس کد پروژه به داخل کانتینر
+COPY . .
+
+# ایجاد دایرکتوری‌های داده و لاگ
+RUN mkdir -p /app/data /app/logs /app/data/backups /app/data/reports
+
+# دستور اجرای ربات
+CMD ["python", "main.py"]
+</file>
+
+<file path=".gitattributes">
+graphify-out/graph.json merge=graphify
 </file>
 
 <file path="run_bot.bat">
@@ -158,6 +373,46 @@ if %ERRORLEVEL% neq 0 (
 
 echo.
 pause
+</file>
+
+<file path=".gitignore">
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment and sensitive files
+.env
+
+# Databases and data
+*.db
+*.sqlite
+data/
+backups/
+code_backups/
+reports/
+*.xlsx
+
+# Logs
+logs/
+*.log
+
+# Temporary fix files
+AAAFIX*.py
+
+# Graphify cache
+graphify-out/cache/
+*.tmp
+
+# IDE & OS files
+.idea/
+.vscode/
+Thumbs.db
 </file>
 
 <file path="run_tests.py">
@@ -913,6 +1168,132 @@ if __name__ == "__main__":
                 pass
 </file>
 
+<file path="scheduler.py">
+import logging
+from aiogram import Bot
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+from config import settings
+from services import IRAN_TZ
+from handlers import (
+    midnight_job,
+    send_daily_admin_reports,
+    send_daily_user_reports,
+    send_study_reminders,
+)
+from weekly_report import send_weekly_reports
+
+logger = logging.getLogger(__name__)
+
+
+async def _run_safe_job(job_func, bot: Bot, job_name: str) -> None:
+    """اجرای ایمن جاب‌های زمان‌بندی‌شده بدون متوقف کردن کل زمان‌بند در صورت بروز استثنا"""
+    try:
+        await job_func(bot=bot)
+    except Exception as exc:
+        logger.error(f"خطای مدیریت‌شده در اجرای جاب «{job_name}»: {exc}", exc_info=True)
+
+
+def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
+    """
+    تنظیم و راه‌اندازی AsyncIOScheduler بر اساس منطقه زمانی Asia/Tehran
+    برای اجرای خودکار ۵ جاب اصلی باشگاه کتابخوارشو.
+    """
+    scheduler = AsyncIOScheduler(timezone=IRAN_TZ)
+
+    # ۱. ساعت 00:00 نیمه‌شب: ثبت غیبت‌ها، ترمیم زنجیره، صفر کردن آمار امروز و بروزرسانی روز چله
+    scheduler.add_job(
+        _run_safe_job,
+        trigger=CronTrigger(hour=0, minute=0, timezone=IRAN_TZ),
+        kwargs={"job_func": midnight_job, "bot": bot, "job_name": "midnight_daily_job"},
+        id="midnight_daily_job",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
+    )
+
+    # ۲. ساعت 01:00 بامداد (قابل تنظیم با ADMIN_REPORT_HOUR): ارسال جدول آرشیو روزانه به ادمین‌ها
+    scheduler.add_job(
+        _run_safe_job,
+        trigger=CronTrigger(hour=settings.ADMIN_REPORT_HOUR, minute=0, timezone=IRAN_TZ),
+        kwargs={
+            "job_func": send_daily_admin_reports,
+            "bot": bot,
+            "job_name": "daily_admin_report_job",
+        },
+        id="daily_admin_report_job",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
+    )
+
+    # ۳. ساعت 02:00 بامداد روزهای جمعه (قابل تنظیم با WEEKLY_REPORT_HOUR): گزارش هفتگی و اکسل
+    scheduler.add_job(
+        _run_safe_job,
+        trigger=CronTrigger(
+            day_of_week="fri",
+            hour=settings.WEEKLY_REPORT_HOUR,
+            minute=0,
+            timezone=IRAN_TZ,
+        ),
+        kwargs={
+            "job_func": send_weekly_reports,
+            "bot": bot,
+            "job_name": "friday_weekly_report_job",
+        },
+        id="friday_weekly_report_job",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
+    )
+
+    # ۴. ساعت 08:00 صبح (قابل تنظیم با DAILY_REPORT_HOUR): کارنامه صبحگاهی کاربران و بررسی پایان چله ۴۰ روزه
+    scheduler.add_job(
+        _run_safe_job,
+        trigger=CronTrigger(hour=settings.DAILY_REPORT_HOUR, minute=0, timezone=IRAN_TZ),
+        kwargs={
+            "job_func": send_daily_user_reports,
+            "bot": bot,
+            "job_name": "daily_user_morning_report_job",
+        },
+        id="daily_user_morning_report_job",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
+    )
+
+    # ۵. ساعت 22:00 شب (قابل تنظیم با REMINDER_HOUR): ارسال یادآوری شبانه به افراد ثبت‌نکرده
+    scheduler.add_job(
+        _run_safe_job,
+        trigger=CronTrigger(hour=settings.REMINDER_HOUR, minute=0, timezone=IRAN_TZ),
+        kwargs={
+            "job_func": send_study_reminders,
+            "bot": bot,
+            "job_name": "night_study_reminder_job",
+        },
+        id="night_study_reminder_job",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
+    )
+
+    scheduler.start()
+    logger.info(
+        "زمان‌بند (AsyncIOScheduler) با منطقه زمانی Asia/Tehran فعال شد: "
+        f"Midnight=00:00 | AdminReport={settings.ADMIN_REPORT_HOUR:02d}:00 | "
+        f"WeeklyFri={settings.WEEKLY_REPORT_HOUR:02d}:00 | "
+        f"MorningReport={settings.DAILY_REPORT_HOUR:02d}:00 | "
+        f"Reminder={settings.REMINDER_HOUR:02d}:00"
+    )
+    return scheduler
+</file>
+
 <file path=".env.example">
 # توکن بازوی پیام‌رسان بله (دریافتی از @BotFather در بله)
 BOT_TOKEN=123456789:ABCDEF1234567890abcdef1234567890
@@ -1557,6 +1938,511 @@ if __name__ == "__main__":
         logger.info("ربات به صورت دستی متوقف شد.")
 </file>
 
+<file path="message_service.py">
+import logging
+from typing import Dict, Optional
+from sqlalchemy.orm import Session
+
+from models import GroupMessage, GroupTerm
+
+logger = logging.getLogger(__name__)
+
+# ۵ اصطلاح پایه قابل شخصی‌سازی برای هر مجموعه
+DEFAULT_TERMS: Dict[str, str] = {
+    "meesaq": "میثاق",
+    "cheleh": "چله",
+    "half_coupon": "سهمیه نصف میثاق",
+    "golden_coupon": "سهمیه طلایی",
+    "league": "لیگ",
+}
+
+TERM_LABELS: Dict[str, str] = {
+    "meesaq": "میثاق (کف مطالعه)",
+    "cheleh": "چله (دوره ۴۰ روزه)",
+    "half_coupon": "سهمیه نصف میثاق",
+    "golden_coupon": "سهمیه طلایی",
+    "league": "لیگ",
+}
+
+# ۷ پیام اصلی قابل شخصی‌سازی برای هر مجموعه
+DEFAULT_MESSAGES: Dict[str, str] = {
+    "welcome": "به بازوی ثبت مطالعه خوش آمدید 👋",
+    "enter_pwd": "لطفا رمز ورود به بازو را وارد کنید",
+    "study_logged": "📝 *گزارش مطالعه امروز ثبت شد!*\n\n✨ به مسیرت ادامه بده! 📚",
+    "late_logged": "⏳ *گزارش مطالعه دیروز با موفقیت ثبت شد!*\n\n✨ آفرین به پشتکار شما! 📚",
+    "reminder_night": (
+        "⏰ *یادآوری مطالعه*\n\n"
+        "📚 شما هنوز ثبت مطالعه‌ی امروز خود را انجام نداده‌اید.\n\n"
+        "📝 لطفاً مطالعه خود را انجام داده و با ربات ثبت کنید."
+    ),
+    "cycle_finished": "🎉 چله لیگ به پایان رسید و نتایج نهایی ثبت شد. چله جدید از روز ۱ آغاز شد.",
+    "rules_help": (
+        "❓ *راهنمای کتابخوارشو*\n\n"
+        "📝 از گزینه ثبت مطالعه برای وارد کردن زمان و صفحات استفاده کنید.\n"
+        "🏆 جدول باشگاه رتبه شما و اعضای لیگ را نشان می‌دهد.\n"
+        "👤 در حساب کاربری، امتیازها و سهمیه‌های خود را ببینید.\n\n"
+        "⭐️ *نحوه امتیازدهی و سهمیه‌ها*\n"
+        "✅ با رسیدن به میثاق روزانه، ۱۰ امتیاز کامل می‌گیرید.\n"
+        "🌸 اگر حداقل نصف میثاق را مطالعه کنید، یک سهمیه «نصف میثاق» مصرف می‌شود و ۱۰ امتیاز می‌گیرید.\n"
+        "👑 اگر سهمیه نصف میثاق نداشته باشید و حداقل ۱ دقیقه مطالعه کنید، سهمیه طلایی یک دقیقه‌ای مصرف می‌شود و ۱۰ امتیاز می‌گیرید.\n"
+        "📉 اگر سهمیه‌ای باقی نمانده باشد، امتیاز شما متناسب با زمان مطالعه محاسبه می‌شود.\n"
+        "🎫 سهمیه‌های پیش‌فرض هر دوره: ۵ سهمیه نصف میثاق و ۱ سهمیه طلایی یک دقیقه‌ای.\n\n"
+        "⏳ *ثبت مطالعه با تاخیر (دیروز)*\n"
+        "اگر روز گذشته مطالعه خود را ثبت نکرده باشید، دکمه‌ی «ثبت مطالعه دیروز» برای شما فعال می‌شود.\n"
+        "با ثبت مطالعه از این طریق، نیمی (۵۰٪) از امتیازِ کسب شده کسر می‌شود، اما از ثبت غیبت کامل برای روز قبل جلوگیری می‌گردد."
+    ),
+}
+
+MESSAGE_LABELS: Dict[str, str] = {
+    "welcome": "پیام خوش‌آمدگویی اولیه",
+    "enter_pwd": "درخواست رمز ورود مجموعه",
+    "study_logged": "تایید ثبت مطالعه امروز",
+    "late_logged": "تایید ثبت مطالعه دیروز (با تاخیر)",
+    "reminder_night": "یادآوری مطالعه شبانه",
+    "cycle_finished": "پیام پایان چله ۴۰ روزه",
+    "rules_help": "متن راهنما و قوانین باشگاه",
+}
+
+
+class MessageService:
+    """سرویس مدیریت واژه‌نامه اختصاصی و پیام‌های سفارشی هر مجموعه"""
+
+    @classmethod
+    def get_terms(cls, db: Session, group_id: Optional[int]) -> Dict[str, str]:
+        """دریافت دیکشنری کامل اصطلاحات مجموعه (ترکیب پیش‌فرض و سفارشی)"""
+        terms = dict(DEFAULT_TERMS)
+        if not group_id:
+            return terms
+
+        custom_rows = (
+            db.query(GroupTerm).filter(GroupTerm.group_id == int(group_id)).all()
+        )
+        for row in custom_rows:
+            if row.term_key in terms and row.custom_term and row.custom_term.strip():
+                terms[row.term_key] = row.custom_term.strip()
+        return terms
+
+    @classmethod
+    def get_term(cls, db: Session, group_id: Optional[int], term_key: str) -> str:
+        """دریافت یک اصطلاح خاص برای مجموعه"""
+        terms = cls.get_terms(db, group_id)
+        return terms.get(term_key, DEFAULT_TERMS.get(term_key, term_key))
+
+    @classmethod
+    def set_term(cls, db: Session, group_id: int, term_key: str, custom_term: str) -> None:
+        """ذخیره یا ویرایش یک اصطلاح سفارشی برای مجموعه"""
+        if term_key not in DEFAULT_TERMS:
+            return
+        record = (
+            db.query(GroupTerm)
+            .filter(GroupTerm.group_id == int(group_id), GroupTerm.term_key == term_key)
+            .first()
+        )
+        if record:
+            record.custom_term = custom_term.strip()
+        else:
+            db.add(
+                GroupTerm(
+                    group_id=int(group_id),
+                    term_key=term_key,
+                    custom_term=custom_term.strip(),
+                )
+            )
+        db.commit()
+
+    @classmethod
+    def reset_term(cls, db: Session, group_id: int, term_key: str) -> None:
+        """بازنشانی یک اصطلاح مجموعه به مقدار پیش‌فرض"""
+        db.query(GroupTerm).filter(
+            GroupTerm.group_id == int(group_id), GroupTerm.term_key == term_key
+        ).delete()
+        db.commit()
+
+    @classmethod
+    def apply_terms(
+        cls,
+        db: Session,
+        group_id: Optional[int],
+        text: str,
+        terms: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """
+        جایگزینی هوشمند اصطلاحات پیش‌فرض در متن با معادل‌های اختصاصی مجموعه.
+        از توکن‌های میانی استفاده می‌شود تا جایگزینی عبارات طولانی‌تر مثل «سهمیه نصف میثاق»
+        با کلمه «میثاق» تداخل پیدا نکند.
+        پارامتر terms (اختیاری): واژه‌نامه از پیش‌خوانده‌شده برای جلوگیری از کوئری تکراری در ارسال انبوه.
+        """
+        if not text or not group_id:
+            return text
+
+        if terms is None:
+            terms = cls.get_terms(db, group_id)
+        if terms == DEFAULT_TERMS:
+            return text
+
+        # ترتیب جایگزینی از طولانی‌ترین عبارت به کوتاه‌ترین عبارت
+        ordered_keys = [
+            "half_coupon",
+            "golden_coupon",
+            "meesaq",
+            "cheleh",
+            "league",
+        ]
+        result = text
+        placeholders: Dict[str, str] = {}
+
+        for idx, key in enumerate(ordered_keys):
+            default_val = DEFAULT_TERMS[key]
+            custom_val = terms.get(key, default_val)
+            placeholder = f"%%TERM_PLACEHOLDER_{idx}%%"
+            placeholders[placeholder] = custom_val
+            result = result.replace(default_val, placeholder)
+
+            # پشتیبانی از حالت گیومه‌دار «سهمیه «نصف میثاق»» و حالت کوتاه «نصف میثاق»
+            if key == "half_coupon" and custom_val != default_val:
+                quoted_half_ph = "%%TERM_QUOTED_HALF%%"
+                placeholders[quoted_half_ph] = f"«{custom_val}»"
+                result = result.replace("سهمیه «نصف میثاق»", quoted_half_ph)
+
+                short_half_placeholder = "%%TERM_SHORT_HALF%%"
+                short_custom = (
+                    custom_val.replace("سهمیه ", "", 1)
+                    if custom_val.startswith("سهمیه ")
+                    else custom_val
+                )
+                placeholders[short_half_placeholder] = short_custom
+                result = result.replace("نصف میثاق", short_half_placeholder)
+
+        for ph, final_val in placeholders.items():
+            result = result.replace(ph, final_val)
+
+        return result
+
+    @classmethod
+    def get_message(
+        cls,
+        db: Session,
+        group_id: Optional[int],
+        msg_key: str,
+        apply_group_terms: bool = True,
+    ) -> str:
+        """دریافت متن پیام مجموعه (سفارشی یا پیش‌فرض) به همراه اعمال واژه‌نامه مجموعه"""
+        base_text = DEFAULT_MESSAGES.get(msg_key, "")
+        if group_id:
+            custom_row = (
+                db.query(GroupMessage)
+                .filter(
+                    GroupMessage.group_id == int(group_id),
+                    GroupMessage.msg_key == msg_key,
+                )
+                .first()
+            )
+            if custom_row and custom_row.custom_text and custom_row.custom_text.strip():
+                base_text = custom_row.custom_text.strip()
+
+        if apply_group_terms and group_id:
+            return cls.apply_terms(db, group_id, base_text)
+        return base_text
+
+    @classmethod
+    def set_message(cls, db: Session, group_id: int, msg_key: str, custom_text: str) -> None:
+        """ذخیره یا ویرایش یک پیام سفارشی برای مجموعه"""
+        if msg_key not in DEFAULT_MESSAGES:
+            return
+        record = (
+            db.query(GroupMessage)
+            .filter(
+                GroupMessage.group_id == int(group_id),
+                GroupMessage.msg_key == msg_key,
+            )
+            .first()
+        )
+        if record:
+            record.custom_text = custom_text.strip()
+        else:
+            db.add(
+                GroupMessage(
+                    group_id=int(group_id),
+                    msg_key=msg_key,
+                    custom_text=custom_text.strip(),
+                )
+            )
+        db.commit()
+
+    @classmethod
+    def reset_message(cls, db: Session, group_id: int, msg_key: str) -> None:
+        """بازنشانی یک پیام مجموعه به متن پیش‌فرض"""
+        db.query(GroupMessage).filter(
+            GroupMessage.group_id == int(group_id),
+            GroupMessage.msg_key == msg_key,
+        ).delete()
+        db.commit()
+</file>
+
+<file path="models.py">
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
+from sqlalchemy import (
+    Index,
+    Column,
+    Integer,
+    String,
+    Float,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Text,
+)
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+
+def generate_league_id() -> str:
+    """تولید شناسه ۸ کاراکتری یکتا برای لیگ‌ها"""
+    return str(uuid.uuid4())[:8]
+
+
+class Group(Base):
+    """مدل مجموعه‌ها (مدارس، مساجد، باشگاه‌ها)"""
+
+    __tablename__ = "groups"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False)
+    password = Column(String(8), nullable=False, index=True)
+    is_deleted = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class GroupAdmin(Base):
+    """مدل مدیران اختصاصی هر مجموعه"""
+
+    __tablename__ = "group_admins"
+    __table_args__ = (
+        Index("ix_group_admins_group_user", "group_id", "user_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(
+        Integer, ForeignKey("groups.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    user_id = Column(String(100), nullable=False, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class User(Base):
+    """
+    مدل کاربران (پشتیبانی از معماری چندپروفایلی Multi-Profile).
+    برای اولین پروفایل: id == telegram_id
+    برای پروفایل‌های بعدی: id == f"{telegram_id}_g{group_id}" یا f"{telegram_id}_{league_id}"
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (
+        Index("ix_users_league_active", "league_id", "is_active"),
+        Index("ix_users_tg_active", "telegram_id", "is_active"),
+        Index("ix_users_group_active", "group_id", "is_active"),
+    )
+
+    id = Column(String(100), primary_key=True, index=True)
+    telegram_id = Column(String(100), index=True, nullable=False)
+    group_id = Column(Integer, ForeignKey("groups.id"), index=True, nullable=True)
+    name = Column(String(255), nullable=False)
+    first_name = Column(String(255), nullable=True)
+    last_name = Column(String(255), nullable=True)
+    league_id = Column(String(50), nullable=True, index=True)
+
+    points = Column(Float, default=0.0, nullable=False)
+    total_minutes = Column(Integer, default=0, nullable=False)
+    total_pages = Column(Integer, default=0, nullable=False)
+    streak = Column(Integer, default=0, nullable=False)
+    no_study_days = Column(Integer, default=0, nullable=False)
+    absent_days_list = Column(String(500), default="", nullable=False)
+    late_days_list = Column(String(500), default="", nullable=False)
+
+    half_coupons = Column(Integer, default=5, nullable=False)
+    one_min_coupons = Column(Integer, default=1, nullable=False)
+    user_floor = Column(Integer, nullable=True)
+
+    last_log_date = Column(String(10), nullable=True)
+    today_minutes = Column(Integer, default=0, nullable=False)
+    today_pages = Column(Integer, default=0, nullable=False)
+    today_points = Column(Float, default=0.0, nullable=False)
+    today_half_used = Column(Integer, default=0, nullable=False)
+    today_one_min_used = Column(Integer, default=0, nullable=False)
+
+    is_active = Column(Boolean, default=True, nullable=False)
+    reminder_enabled = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def get_effective_floor(self, league_floor: int) -> int:
+        """برگرداندن میثاق اختصاصی کاربر در صورت وجود، در غیر این صورت کف لیگ"""
+        if self.user_floor is not None and self.user_floor > 0:
+            return int(self.user_floor)
+        return int(league_floor) if league_floor and league_floor > 0 else 10
+
+    def get_display_name(self) -> str:
+        """
+        نام نمایشی در جدول لیگ:
+        اگر first_name و last_name دارد: "{first_name[0]}. {last_name}"
+        اگر فقط last_name دارد: "{last_name}"
+        در غیر این صورت: "{name}"
+        """
+        fn = (self.first_name or "").strip()
+        ln = (self.last_name or "").strip()
+        if fn and ln:
+            return f"{fn[0]}. {ln}"
+        if ln:
+            return ln
+        return (self.name or "کاربر").strip()
+
+
+class League(Base):
+    """مدل لیگ‌های کتابخوانی هر مجموعه"""
+
+    __tablename__ = "leagues"
+    __table_args__ = (
+        Index("ix_leagues_group_flags", "group_id", "is_deleted", "is_active"),
+    )
+
+    id = Column(String(50), primary_key=True, default=generate_league_id)
+    telegram_id = Column(String(100), nullable=True)
+    group_id = Column(Integer, ForeignKey("groups.id"), index=True, nullable=True)
+    name = Column(String(255), nullable=False)
+    floor = Column(Integer, default=10, nullable=False)
+    start_shamsi = Column(String(10), nullable=True)
+    current_day = Column(Integer, default=1, nullable=False)
+
+    is_active = Column(Boolean, default=True, nullable=False)
+    is_finished = Column(Boolean, default=False, nullable=False)
+    is_deleted = Column(Boolean, default=False, nullable=False)
+    archive_enabled = Column(Boolean, default=True, nullable=False)
+    cycle_number = Column(Integer, default=1, nullable=False)
+
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class Cycle(Base):
+    """مدل چله‌های ۴۰ روزه هر لیگ"""
+
+    __tablename__ = "cycles"
+    __table_args__ = (
+        Index("ix_cycles_league_status", "league_id", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    league_id = Column(
+        String(50), ForeignKey("leagues.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    cycle_number = Column(Integer, nullable=False, default=1)
+    start_shamsi = Column(String(10), nullable=False)
+    end_shamsi = Column(String(10), nullable=True)
+    current_day = Column(Integer, default=1, nullable=False)
+    status = Column(String(20), default="active", nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    finished_at = Column(DateTime, nullable=True)
+
+
+class ActivityLog(Base):
+    """مدل لاگ‌های ثبت مطالعه روزانه کاربران"""
+
+    __tablename__ = "activity_logs"
+    __table_args__ = (
+        Index("ix_actlog_user_league_date", "user_id", "league_id", "log_date"),
+        Index("ix_actlog_league_cycle_day", "league_id", "cycle_id", "league_day"),
+        Index("ix_actlog_league_date", "league_id", "log_date"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(
+        String(100), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    league_id = Column(String(50), index=True, nullable=True)
+    cycle_id = Column(
+        Integer, ForeignKey("cycles.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    cycle_number = Column(Integer, index=True, nullable=True)
+    league_day = Column(Integer, nullable=True)
+
+    minutes = Column(Integer, nullable=False)
+    pages = Column(Integer, default=0, nullable=False)
+    points_earned = Column(Float, default=0.0, nullable=False)
+    half_coupon_used = Column(Integer, default=0, nullable=False)
+    one_min_coupon_used = Column(Integer, default=0, nullable=False)
+
+    log_date = Column(String(10), nullable=False, index=True)
+    log_hour = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class CycleResult(Base):
+    """مدل ذخیره کارنامه نهایی هر کاربر در پایان هر چله ۴۰ روزه"""
+
+    __tablename__ = "cycle_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    cycle_id = Column(
+        Integer, ForeignKey("cycles.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    user_id = Column(String(100), index=True, nullable=False)
+    user_name = Column(String(255), nullable=False)
+    final_rank = Column(Integer, nullable=False)
+    points = Column(Float, default=0.0, nullable=False)
+    total_minutes = Column(Integer, default=0, nullable=False)
+    total_pages = Column(Integer, default=0, nullable=False)
+    streak = Column(Integer, default=0, nullable=False)
+    no_study_days = Column(Integer, default=0, nullable=False)
+    absent_days_list = Column(String(500), default="", nullable=False)
+    late_days_list = Column(String(500), default="", nullable=False)
+    half_coupons_used = Column(Integer, default=0, nullable=False)
+    one_min_coupons_used = Column(Integer, default=0, nullable=False)
+    half_coupons_remaining = Column(Integer, default=0, nullable=False)
+    one_min_coupons_remaining = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class SystemState(Base):
+    """مدل نگهداری وضعیت‌های سیستمی و پروفایل فعال هر کاربر"""
+
+    __tablename__ = "system_state"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(String(255), nullable=True)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class GroupMessage(Base):
+    """مدل پیام‌های سفارشی هر مجموعه"""
+
+    __tablename__ = "group_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(
+        Integer, ForeignKey("groups.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    msg_key = Column(String(50), nullable=False, index=True)
+    custom_text = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class GroupTerm(Base):
+    """مدل اصطلاحات سفارشی واژه‌نامه هر مجموعه"""
+
+    __tablename__ = "group_terms"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(
+        Integer, ForeignKey("groups.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    term_key = Column(String(50), nullable=False, index=True)
+    custom_term = Column(String(100), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+</file>
+
 <file path="requirements.txt">
 # ==============================================================================
 # KetabKharsho Bot Requirements
@@ -1585,132 +2471,6 @@ APScheduler==3.10.4
 
 # پایگاه داده مناطق زمانی IANA (ضروری برای پشتیبانی پایدار Asia/Tehran در ویندوز/داکر)
 tzdata>=2024.1
-</file>
-
-<file path="scheduler.py">
-import logging
-from aiogram import Bot
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-
-from config import settings
-from services import IRAN_TZ
-from handlers import (
-    midnight_job,
-    send_daily_admin_reports,
-    send_daily_user_reports,
-    send_study_reminders,
-)
-from weekly_report import send_weekly_reports
-
-logger = logging.getLogger(__name__)
-
-
-async def _run_safe_job(job_func, bot: Bot, job_name: str) -> None:
-    """اجرای ایمن جاب‌های زمان‌بندی‌شده بدون متوقف کردن کل زمان‌بند در صورت بروز استثنا"""
-    try:
-        await job_func(bot=bot)
-    except Exception as exc:
-        logger.error(f"خطای مدیریت‌شده در اجرای جاب «{job_name}»: {exc}", exc_info=True)
-
-
-def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
-    """
-    تنظیم و راه‌اندازی AsyncIOScheduler بر اساس منطقه زمانی Asia/Tehran
-    برای اجرای خودکار ۵ جاب اصلی باشگاه کتابخوارشو.
-    """
-    scheduler = AsyncIOScheduler(timezone=IRAN_TZ)
-
-    # ۱. ساعت 00:00 نیمه‌شب: ثبت غیبت‌ها، ترمیم زنجیره، صفر کردن آمار امروز و بروزرسانی روز چله
-    scheduler.add_job(
-        _run_safe_job,
-        trigger=CronTrigger(hour=0, minute=0, timezone=IRAN_TZ),
-        kwargs={"job_func": midnight_job, "bot": bot, "job_name": "midnight_daily_job"},
-        id="midnight_daily_job",
-        replace_existing=True,
-        misfire_grace_time=3600,
-        coalesce=True,
-        max_instances=1,
-    )
-
-    # ۲. ساعت 01:00 بامداد (قابل تنظیم با ADMIN_REPORT_HOUR): ارسال جدول آرشیو روزانه به ادمین‌ها
-    scheduler.add_job(
-        _run_safe_job,
-        trigger=CronTrigger(hour=settings.ADMIN_REPORT_HOUR, minute=0, timezone=IRAN_TZ),
-        kwargs={
-            "job_func": send_daily_admin_reports,
-            "bot": bot,
-            "job_name": "daily_admin_report_job",
-        },
-        id="daily_admin_report_job",
-        replace_existing=True,
-        misfire_grace_time=3600,
-        coalesce=True,
-        max_instances=1,
-    )
-
-    # ۳. ساعت 02:00 بامداد روزهای جمعه (قابل تنظیم با WEEKLY_REPORT_HOUR): گزارش هفتگی و اکسل
-    scheduler.add_job(
-        _run_safe_job,
-        trigger=CronTrigger(
-            day_of_week="fri",
-            hour=settings.WEEKLY_REPORT_HOUR,
-            minute=0,
-            timezone=IRAN_TZ,
-        ),
-        kwargs={
-            "job_func": send_weekly_reports,
-            "bot": bot,
-            "job_name": "friday_weekly_report_job",
-        },
-        id="friday_weekly_report_job",
-        replace_existing=True,
-        misfire_grace_time=3600,
-        coalesce=True,
-        max_instances=1,
-    )
-
-    # ۴. ساعت 08:00 صبح (قابل تنظیم با DAILY_REPORT_HOUR): کارنامه صبحگاهی کاربران و بررسی پایان چله ۴۰ روزه
-    scheduler.add_job(
-        _run_safe_job,
-        trigger=CronTrigger(hour=settings.DAILY_REPORT_HOUR, minute=0, timezone=IRAN_TZ),
-        kwargs={
-            "job_func": send_daily_user_reports,
-            "bot": bot,
-            "job_name": "daily_user_morning_report_job",
-        },
-        id="daily_user_morning_report_job",
-        replace_existing=True,
-        misfire_grace_time=3600,
-        coalesce=True,
-        max_instances=1,
-    )
-
-    # ۵. ساعت 22:00 شب (قابل تنظیم با REMINDER_HOUR): ارسال یادآوری شبانه به افراد ثبت‌نکرده
-    scheduler.add_job(
-        _run_safe_job,
-        trigger=CronTrigger(hour=settings.REMINDER_HOUR, minute=0, timezone=IRAN_TZ),
-        kwargs={
-            "job_func": send_study_reminders,
-            "bot": bot,
-            "job_name": "night_study_reminder_job",
-        },
-        id="night_study_reminder_job",
-        replace_existing=True,
-        misfire_grace_time=3600,
-        coalesce=True,
-        max_instances=1,
-    )
-
-    scheduler.start()
-    logger.info(
-        "زمان‌بند (AsyncIOScheduler) با منطقه زمانی Asia/Tehran فعال شد: "
-        f"Midnight=00:00 | AdminReport={settings.ADMIN_REPORT_HOUR:02d}:00 | "
-        f"WeeklyFri={settings.WEEKLY_REPORT_HOUR:02d}:00 | "
-        f"MorningReport={settings.DAILY_REPORT_HOUR:02d}:00 | "
-        f"Reminder={settings.REMINDER_HOUR:02d}:00"
-    )
-    return scheduler
 </file>
 
 <file path="admin_handlers.py">
@@ -8954,511 +9714,6 @@ async def send_study_reminders(bot: Bot, force: bool = False) -> None:
     )
     if outbox:
         await dispatch_outbox(bot, outbox, BroadcastThrottle())
-</file>
-
-<file path="message_service.py">
-import logging
-from typing import Dict, Optional
-from sqlalchemy.orm import Session
-
-from models import GroupMessage, GroupTerm
-
-logger = logging.getLogger(__name__)
-
-# ۵ اصطلاح پایه قابل شخصی‌سازی برای هر مجموعه
-DEFAULT_TERMS: Dict[str, str] = {
-    "meesaq": "میثاق",
-    "cheleh": "چله",
-    "half_coupon": "سهمیه نصف میثاق",
-    "golden_coupon": "سهمیه طلایی",
-    "league": "لیگ",
-}
-
-TERM_LABELS: Dict[str, str] = {
-    "meesaq": "میثاق (کف مطالعه)",
-    "cheleh": "چله (دوره ۴۰ روزه)",
-    "half_coupon": "سهمیه نصف میثاق",
-    "golden_coupon": "سهمیه طلایی",
-    "league": "لیگ",
-}
-
-# ۷ پیام اصلی قابل شخصی‌سازی برای هر مجموعه
-DEFAULT_MESSAGES: Dict[str, str] = {
-    "welcome": "به بازوی ثبت مطالعه خوش آمدید 👋",
-    "enter_pwd": "لطفا رمز ورود به بازو را وارد کنید",
-    "study_logged": "📝 *گزارش مطالعه امروز ثبت شد!*\n\n✨ به مسیرت ادامه بده! 📚",
-    "late_logged": "⏳ *گزارش مطالعه دیروز با موفقیت ثبت شد!*\n\n✨ آفرین به پشتکار شما! 📚",
-    "reminder_night": (
-        "⏰ *یادآوری مطالعه*\n\n"
-        "📚 شما هنوز ثبت مطالعه‌ی امروز خود را انجام نداده‌اید.\n\n"
-        "📝 لطفاً مطالعه خود را انجام داده و با ربات ثبت کنید."
-    ),
-    "cycle_finished": "🎉 چله لیگ به پایان رسید و نتایج نهایی ثبت شد. چله جدید از روز ۱ آغاز شد.",
-    "rules_help": (
-        "❓ *راهنمای کتابخوارشو*\n\n"
-        "📝 از گزینه ثبت مطالعه برای وارد کردن زمان و صفحات استفاده کنید.\n"
-        "🏆 جدول باشگاه رتبه شما و اعضای لیگ را نشان می‌دهد.\n"
-        "👤 در حساب کاربری، امتیازها و سهمیه‌های خود را ببینید.\n\n"
-        "⭐️ *نحوه امتیازدهی و سهمیه‌ها*\n"
-        "✅ با رسیدن به میثاق روزانه، ۱۰ امتیاز کامل می‌گیرید.\n"
-        "🌸 اگر حداقل نصف میثاق را مطالعه کنید، یک سهمیه «نصف میثاق» مصرف می‌شود و ۱۰ امتیاز می‌گیرید.\n"
-        "👑 اگر سهمیه نصف میثاق نداشته باشید و حداقل ۱ دقیقه مطالعه کنید، سهمیه طلایی یک دقیقه‌ای مصرف می‌شود و ۱۰ امتیاز می‌گیرید.\n"
-        "📉 اگر سهمیه‌ای باقی نمانده باشد، امتیاز شما متناسب با زمان مطالعه محاسبه می‌شود.\n"
-        "🎫 سهمیه‌های پیش‌فرض هر دوره: ۵ سهمیه نصف میثاق و ۱ سهمیه طلایی یک دقیقه‌ای.\n\n"
-        "⏳ *ثبت مطالعه با تاخیر (دیروز)*\n"
-        "اگر روز گذشته مطالعه خود را ثبت نکرده باشید، دکمه‌ی «ثبت مطالعه دیروز» برای شما فعال می‌شود.\n"
-        "با ثبت مطالعه از این طریق، نیمی (۵۰٪) از امتیازِ کسب شده کسر می‌شود، اما از ثبت غیبت کامل برای روز قبل جلوگیری می‌گردد."
-    ),
-}
-
-MESSAGE_LABELS: Dict[str, str] = {
-    "welcome": "پیام خوش‌آمدگویی اولیه",
-    "enter_pwd": "درخواست رمز ورود مجموعه",
-    "study_logged": "تایید ثبت مطالعه امروز",
-    "late_logged": "تایید ثبت مطالعه دیروز (با تاخیر)",
-    "reminder_night": "یادآوری مطالعه شبانه",
-    "cycle_finished": "پیام پایان چله ۴۰ روزه",
-    "rules_help": "متن راهنما و قوانین باشگاه",
-}
-
-
-class MessageService:
-    """سرویس مدیریت واژه‌نامه اختصاصی و پیام‌های سفارشی هر مجموعه"""
-
-    @classmethod
-    def get_terms(cls, db: Session, group_id: Optional[int]) -> Dict[str, str]:
-        """دریافت دیکشنری کامل اصطلاحات مجموعه (ترکیب پیش‌فرض و سفارشی)"""
-        terms = dict(DEFAULT_TERMS)
-        if not group_id:
-            return terms
-
-        custom_rows = (
-            db.query(GroupTerm).filter(GroupTerm.group_id == int(group_id)).all()
-        )
-        for row in custom_rows:
-            if row.term_key in terms and row.custom_term and row.custom_term.strip():
-                terms[row.term_key] = row.custom_term.strip()
-        return terms
-
-    @classmethod
-    def get_term(cls, db: Session, group_id: Optional[int], term_key: str) -> str:
-        """دریافت یک اصطلاح خاص برای مجموعه"""
-        terms = cls.get_terms(db, group_id)
-        return terms.get(term_key, DEFAULT_TERMS.get(term_key, term_key))
-
-    @classmethod
-    def set_term(cls, db: Session, group_id: int, term_key: str, custom_term: str) -> None:
-        """ذخیره یا ویرایش یک اصطلاح سفارشی برای مجموعه"""
-        if term_key not in DEFAULT_TERMS:
-            return
-        record = (
-            db.query(GroupTerm)
-            .filter(GroupTerm.group_id == int(group_id), GroupTerm.term_key == term_key)
-            .first()
-        )
-        if record:
-            record.custom_term = custom_term.strip()
-        else:
-            db.add(
-                GroupTerm(
-                    group_id=int(group_id),
-                    term_key=term_key,
-                    custom_term=custom_term.strip(),
-                )
-            )
-        db.commit()
-
-    @classmethod
-    def reset_term(cls, db: Session, group_id: int, term_key: str) -> None:
-        """بازنشانی یک اصطلاح مجموعه به مقدار پیش‌فرض"""
-        db.query(GroupTerm).filter(
-            GroupTerm.group_id == int(group_id), GroupTerm.term_key == term_key
-        ).delete()
-        db.commit()
-
-    @classmethod
-    def apply_terms(
-        cls,
-        db: Session,
-        group_id: Optional[int],
-        text: str,
-        terms: Optional[Dict[str, str]] = None,
-    ) -> str:
-        """
-        جایگزینی هوشمند اصطلاحات پیش‌فرض در متن با معادل‌های اختصاصی مجموعه.
-        از توکن‌های میانی استفاده می‌شود تا جایگزینی عبارات طولانی‌تر مثل «سهمیه نصف میثاق»
-        با کلمه «میثاق» تداخل پیدا نکند.
-        پارامتر terms (اختیاری): واژه‌نامه از پیش‌خوانده‌شده برای جلوگیری از کوئری تکراری در ارسال انبوه.
-        """
-        if not text or not group_id:
-            return text
-
-        if terms is None:
-            terms = cls.get_terms(db, group_id)
-        if terms == DEFAULT_TERMS:
-            return text
-
-        # ترتیب جایگزینی از طولانی‌ترین عبارت به کوتاه‌ترین عبارت
-        ordered_keys = [
-            "half_coupon",
-            "golden_coupon",
-            "meesaq",
-            "cheleh",
-            "league",
-        ]
-        result = text
-        placeholders: Dict[str, str] = {}
-
-        for idx, key in enumerate(ordered_keys):
-            default_val = DEFAULT_TERMS[key]
-            custom_val = terms.get(key, default_val)
-            placeholder = f"%%TERM_PLACEHOLDER_{idx}%%"
-            placeholders[placeholder] = custom_val
-            result = result.replace(default_val, placeholder)
-
-            # پشتیبانی از حالت گیومه‌دار «سهمیه «نصف میثاق»» و حالت کوتاه «نصف میثاق»
-            if key == "half_coupon" and custom_val != default_val:
-                quoted_half_ph = "%%TERM_QUOTED_HALF%%"
-                placeholders[quoted_half_ph] = f"«{custom_val}»"
-                result = result.replace("سهمیه «نصف میثاق»", quoted_half_ph)
-
-                short_half_placeholder = "%%TERM_SHORT_HALF%%"
-                short_custom = (
-                    custom_val.replace("سهمیه ", "", 1)
-                    if custom_val.startswith("سهمیه ")
-                    else custom_val
-                )
-                placeholders[short_half_placeholder] = short_custom
-                result = result.replace("نصف میثاق", short_half_placeholder)
-
-        for ph, final_val in placeholders.items():
-            result = result.replace(ph, final_val)
-
-        return result
-
-    @classmethod
-    def get_message(
-        cls,
-        db: Session,
-        group_id: Optional[int],
-        msg_key: str,
-        apply_group_terms: bool = True,
-    ) -> str:
-        """دریافت متن پیام مجموعه (سفارشی یا پیش‌فرض) به همراه اعمال واژه‌نامه مجموعه"""
-        base_text = DEFAULT_MESSAGES.get(msg_key, "")
-        if group_id:
-            custom_row = (
-                db.query(GroupMessage)
-                .filter(
-                    GroupMessage.group_id == int(group_id),
-                    GroupMessage.msg_key == msg_key,
-                )
-                .first()
-            )
-            if custom_row and custom_row.custom_text and custom_row.custom_text.strip():
-                base_text = custom_row.custom_text.strip()
-
-        if apply_group_terms and group_id:
-            return cls.apply_terms(db, group_id, base_text)
-        return base_text
-
-    @classmethod
-    def set_message(cls, db: Session, group_id: int, msg_key: str, custom_text: str) -> None:
-        """ذخیره یا ویرایش یک پیام سفارشی برای مجموعه"""
-        if msg_key not in DEFAULT_MESSAGES:
-            return
-        record = (
-            db.query(GroupMessage)
-            .filter(
-                GroupMessage.group_id == int(group_id),
-                GroupMessage.msg_key == msg_key,
-            )
-            .first()
-        )
-        if record:
-            record.custom_text = custom_text.strip()
-        else:
-            db.add(
-                GroupMessage(
-                    group_id=int(group_id),
-                    msg_key=msg_key,
-                    custom_text=custom_text.strip(),
-                )
-            )
-        db.commit()
-
-    @classmethod
-    def reset_message(cls, db: Session, group_id: int, msg_key: str) -> None:
-        """بازنشانی یک پیام مجموعه به متن پیش‌فرض"""
-        db.query(GroupMessage).filter(
-            GroupMessage.group_id == int(group_id),
-            GroupMessage.msg_key == msg_key,
-        ).delete()
-        db.commit()
-</file>
-
-<file path="models.py">
-import uuid
-from datetime import datetime, timezone
-from typing import Optional
-from sqlalchemy import (
-    Index,
-    Column,
-    Integer,
-    String,
-    Float,
-    Boolean,
-    DateTime,
-    ForeignKey,
-    Text,
-)
-from sqlalchemy.orm import declarative_base
-
-Base = declarative_base()
-
-
-def generate_league_id() -> str:
-    """تولید شناسه ۸ کاراکتری یکتا برای لیگ‌ها"""
-    return str(uuid.uuid4())[:8]
-
-
-class Group(Base):
-    """مدل مجموعه‌ها (مدارس، مساجد، باشگاه‌ها)"""
-
-    __tablename__ = "groups"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(255), nullable=False)
-    password = Column(String(8), nullable=False, index=True)
-    is_deleted = Column(Boolean, default=False, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
-
-class GroupAdmin(Base):
-    """مدل مدیران اختصاصی هر مجموعه"""
-
-    __tablename__ = "group_admins"
-    __table_args__ = (
-        Index("ix_group_admins_group_user", "group_id", "user_id"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    group_id = Column(
-        Integer, ForeignKey("groups.id", ondelete="CASCADE"), index=True, nullable=False
-    )
-    user_id = Column(String(100), nullable=False, index=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
-
-class User(Base):
-    """
-    مدل کاربران (پشتیبانی از معماری چندپروفایلی Multi-Profile).
-    برای اولین پروفایل: id == telegram_id
-    برای پروفایل‌های بعدی: id == f"{telegram_id}_g{group_id}" یا f"{telegram_id}_{league_id}"
-    """
-
-    __tablename__ = "users"
-    __table_args__ = (
-        Index("ix_users_league_active", "league_id", "is_active"),
-        Index("ix_users_tg_active", "telegram_id", "is_active"),
-        Index("ix_users_group_active", "group_id", "is_active"),
-    )
-
-    id = Column(String(100), primary_key=True, index=True)
-    telegram_id = Column(String(100), index=True, nullable=False)
-    group_id = Column(Integer, ForeignKey("groups.id"), index=True, nullable=True)
-    name = Column(String(255), nullable=False)
-    first_name = Column(String(255), nullable=True)
-    last_name = Column(String(255), nullable=True)
-    league_id = Column(String(50), nullable=True, index=True)
-
-    points = Column(Float, default=0.0, nullable=False)
-    total_minutes = Column(Integer, default=0, nullable=False)
-    total_pages = Column(Integer, default=0, nullable=False)
-    streak = Column(Integer, default=0, nullable=False)
-    no_study_days = Column(Integer, default=0, nullable=False)
-    absent_days_list = Column(String(500), default="", nullable=False)
-    late_days_list = Column(String(500), default="", nullable=False)
-
-    half_coupons = Column(Integer, default=5, nullable=False)
-    one_min_coupons = Column(Integer, default=1, nullable=False)
-    user_floor = Column(Integer, nullable=True)
-
-    last_log_date = Column(String(10), nullable=True)
-    today_minutes = Column(Integer, default=0, nullable=False)
-    today_pages = Column(Integer, default=0, nullable=False)
-    today_points = Column(Float, default=0.0, nullable=False)
-    today_half_used = Column(Integer, default=0, nullable=False)
-    today_one_min_used = Column(Integer, default=0, nullable=False)
-
-    is_active = Column(Boolean, default=True, nullable=False)
-    reminder_enabled = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
-    def get_effective_floor(self, league_floor: int) -> int:
-        """برگرداندن میثاق اختصاصی کاربر در صورت وجود، در غیر این صورت کف لیگ"""
-        if self.user_floor is not None and self.user_floor > 0:
-            return int(self.user_floor)
-        return int(league_floor) if league_floor and league_floor > 0 else 10
-
-    def get_display_name(self) -> str:
-        """
-        نام نمایشی در جدول لیگ:
-        اگر first_name و last_name دارد: "{first_name[0]}. {last_name}"
-        اگر فقط last_name دارد: "{last_name}"
-        در غیر این صورت: "{name}"
-        """
-        fn = (self.first_name or "").strip()
-        ln = (self.last_name or "").strip()
-        if fn and ln:
-            return f"{fn[0]}. {ln}"
-        if ln:
-            return ln
-        return (self.name or "کاربر").strip()
-
-
-class League(Base):
-    """مدل لیگ‌های کتابخوانی هر مجموعه"""
-
-    __tablename__ = "leagues"
-    __table_args__ = (
-        Index("ix_leagues_group_flags", "group_id", "is_deleted", "is_active"),
-    )
-
-    id = Column(String(50), primary_key=True, default=generate_league_id)
-    telegram_id = Column(String(100), nullable=True)
-    group_id = Column(Integer, ForeignKey("groups.id"), index=True, nullable=True)
-    name = Column(String(255), nullable=False)
-    floor = Column(Integer, default=10, nullable=False)
-    start_shamsi = Column(String(10), nullable=True)
-    current_day = Column(Integer, default=1, nullable=False)
-
-    is_active = Column(Boolean, default=True, nullable=False)
-    is_finished = Column(Boolean, default=False, nullable=False)
-    is_deleted = Column(Boolean, default=False, nullable=False)
-    archive_enabled = Column(Boolean, default=True, nullable=False)
-    cycle_number = Column(Integer, default=1, nullable=False)
-
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
-
-class Cycle(Base):
-    """مدل چله‌های ۴۰ روزه هر لیگ"""
-
-    __tablename__ = "cycles"
-    __table_args__ = (
-        Index("ix_cycles_league_status", "league_id", "status"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    league_id = Column(
-        String(50), ForeignKey("leagues.id", ondelete="CASCADE"), index=True, nullable=False
-    )
-    cycle_number = Column(Integer, nullable=False, default=1)
-    start_shamsi = Column(String(10), nullable=False)
-    end_shamsi = Column(String(10), nullable=True)
-    current_day = Column(Integer, default=1, nullable=False)
-    status = Column(String(20), default="active", nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    finished_at = Column(DateTime, nullable=True)
-
-
-class ActivityLog(Base):
-    """مدل لاگ‌های ثبت مطالعه روزانه کاربران"""
-
-    __tablename__ = "activity_logs"
-    __table_args__ = (
-        Index("ix_actlog_user_league_date", "user_id", "league_id", "log_date"),
-        Index("ix_actlog_league_cycle_day", "league_id", "cycle_id", "league_day"),
-        Index("ix_actlog_league_date", "league_id", "log_date"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(
-        String(100), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
-    )
-    league_id = Column(String(50), index=True, nullable=True)
-    cycle_id = Column(
-        Integer, ForeignKey("cycles.id", ondelete="SET NULL"), index=True, nullable=True
-    )
-    cycle_number = Column(Integer, index=True, nullable=True)
-    league_day = Column(Integer, nullable=True)
-
-    minutes = Column(Integer, nullable=False)
-    pages = Column(Integer, default=0, nullable=False)
-    points_earned = Column(Float, default=0.0, nullable=False)
-    half_coupon_used = Column(Integer, default=0, nullable=False)
-    one_min_coupon_used = Column(Integer, default=0, nullable=False)
-
-    log_date = Column(String(10), nullable=False, index=True)
-    log_hour = Column(Integer, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
-
-class CycleResult(Base):
-    """مدل ذخیره کارنامه نهایی هر کاربر در پایان هر چله ۴۰ روزه"""
-
-    __tablename__ = "cycle_results"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    cycle_id = Column(
-        Integer, ForeignKey("cycles.id", ondelete="CASCADE"), index=True, nullable=False
-    )
-    user_id = Column(String(100), index=True, nullable=False)
-    user_name = Column(String(255), nullable=False)
-    final_rank = Column(Integer, nullable=False)
-    points = Column(Float, default=0.0, nullable=False)
-    total_minutes = Column(Integer, default=0, nullable=False)
-    total_pages = Column(Integer, default=0, nullable=False)
-    streak = Column(Integer, default=0, nullable=False)
-    no_study_days = Column(Integer, default=0, nullable=False)
-    absent_days_list = Column(String(500), default="", nullable=False)
-    late_days_list = Column(String(500), default="", nullable=False)
-    half_coupons_used = Column(Integer, default=0, nullable=False)
-    one_min_coupons_used = Column(Integer, default=0, nullable=False)
-    half_coupons_remaining = Column(Integer, default=0, nullable=False)
-    one_min_coupons_remaining = Column(Integer, default=0, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
-
-class SystemState(Base):
-    """مدل نگهداری وضعیت‌های سیستمی و پروفایل فعال هر کاربر"""
-
-    __tablename__ = "system_state"
-
-    key = Column(String(100), primary_key=True)
-    value = Column(String(255), nullable=True)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
-
-class GroupMessage(Base):
-    """مدل پیام‌های سفارشی هر مجموعه"""
-
-    __tablename__ = "group_messages"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    group_id = Column(
-        Integer, ForeignKey("groups.id", ondelete="CASCADE"), index=True, nullable=False
-    )
-    msg_key = Column(String(50), nullable=False, index=True)
-    custom_text = Column(Text, nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
-
-class GroupTerm(Base):
-    """مدل اصطلاحات سفارشی واژه‌نامه هر مجموعه"""
-
-    __tablename__ = "group_terms"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    group_id = Column(
-        Integer, ForeignKey("groups.id", ondelete="CASCADE"), index=True, nullable=False
-    )
-    term_key = Column(String(50), nullable=False, index=True)
-    custom_term = Column(String(100), nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 </file>
 
 <file path="services.py">

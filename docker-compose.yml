@@ -1,0 +1,22 @@
+services:
+  ketabkharsho-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ketabkharsho_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Tehran
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # ذخیره‌سازی پایدار دیتابیس، خروجی‌های اکسل و بکاپ‌ها روی دیسک سرور
+      - ./data:/app/data
+      # ذخیره‌سازی پایدار فایل‌های لاگ
+      - ./logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
