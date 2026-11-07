@@ -24,6 +24,7 @@ from handlers import (
     send_study_reminders,
     send_startup_notification,
 )
+from fine_handlers import fine_router
 from weekly_report import send_weekly_reports
 from scheduler import setup_scheduler
 
@@ -163,6 +164,7 @@ async def main() -> None:
     # ثبت روترهای مدیریت و کاربران
     dp.include_router(admin_router)
     dp.include_router(user_router)
+    dp.include_router(fine_router)
 
     # راه‌اندازی زمان‌بند خودکار و اجرای جبرانی جاب‌های جاافتاده
     scheduler = setup_scheduler(bot)

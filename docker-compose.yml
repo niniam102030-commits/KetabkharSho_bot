@@ -10,6 +10,8 @@ services:
     environment:
       - TZ=Asia/Tehran
       - PYTHONUNBUFFERED=1
+      - BACKUP_DIR=/app/data/backups
+      - REPORTS_DIR=/app/data/reports
     volumes:
       # ذخیره‌سازی پایدار دیتابیس، خروجی‌های اکسل و بکاپ‌ها روی دیسک سرور
       - ./data:/app/data

@@ -140,8 +140,80 @@ class League(Base):
     archive_enabled = Column(Boolean, default=True, nullable=False)
     cycle_number = Column(Integer, default=1, nullable=False)
 
+    # سیستم جریمه اختصاصی هر لیگ (مبالغ به تومان)
+    fines_enabled = Column(Boolean, default=False, nullable=False)
+    fine_absent_amount = Column(Integer, default=0, nullable=False)
+    fine_late_amount = Column(Integer, default=0, nullable=False)
+
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class LeagueFineManager(Base):
+    """مسئولین جریمه هر لیگ (چند نفر مجاز است؛ بر اساس telegram_id شخص)"""
+
+    __tablename__ = "league_fine_managers"
+    __table_args__ = (
+        Index("ix_lfm_league_tg", "league_id", "telegram_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    league_id = Column(
+        String(50), ForeignKey("leagues.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    telegram_id = Column(String(100), index=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class FineRecord(Base):
+    """دفتر جریمه‌ها: یک رکورد برای هر غیبت یا عدم‌اعلام (مبلغ در لحظه ثبت ثابت می‌ماند)"""
+
+    __tablename__ = "fine_records"
+    __table_args__ = (
+        Index("ix_fine_league_user", "league_id", "user_id"),
+        Index("ix_fine_user_cycle_kind", "user_id", "cycle_id", "kind", "league_day"),
+        Index(
+            "ux_fine_record_key",
+            "league_id",
+            "user_id",
+            "cycle_id",
+            "kind",
+            "league_day",
+            unique=True,
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    league_id = Column(
+        String(50), ForeignKey("leagues.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    user_id = Column(String(100), nullable=False, index=True)
+    cycle_id = Column(Integer, nullable=True, index=True)
+    kind = Column(String(10), nullable=False)  # absent | late
+    league_day = Column(Integer, nullable=False)
+    amount = Column(Integer, default=0, nullable=False)
+    is_waived = Column(Boolean, default=False, nullable=False)
+    is_frozen = Column(Boolean, default=False, nullable=False)
+    waived_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class FinePayment(Base):
+    """پرداخت‌های جریمه (کامل یا جزئی) که توسط مسئول جریمه ثبت می‌شود"""
+
+    __tablename__ = "fine_payments"
+    __table_args__ = (
+        Index("ix_finepay_league_user", "league_id", "user_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    league_id = Column(
+        String(50), ForeignKey("leagues.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    user_id = Column(String(100), nullable=False, index=True)
+    amount = Column(Integer, nullable=False)
+    recorded_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 class Cycle(Base):

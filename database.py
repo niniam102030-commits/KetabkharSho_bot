@@ -242,6 +242,12 @@ def _run_migrations() -> None:
             ("is_deleted", "BOOLEAN DEFAULT 0"),
             ("archive_enabled", "BOOLEAN DEFAULT 1 NOT NULL"),
             ("cycle_number", "INTEGER DEFAULT 1 NOT NULL"),
+            ("fines_enabled", "BOOLEAN DEFAULT 0 NOT NULL"),
+            ("fine_absent_amount", "INTEGER DEFAULT 0 NOT NULL"),
+            ("fine_late_amount", "INTEGER DEFAULT 0 NOT NULL"),
+        ],
+        "fine_records": [
+            ("is_frozen", "BOOLEAN DEFAULT 0 NOT NULL"),
         ],
         "activity_logs": [
             ("league_id", "VARCHAR(50)"),
@@ -276,6 +282,24 @@ def _run_migrations() -> None:
             conn.execute(
                 text("UPDATE users SET telegram_id = id WHERE telegram_id IS NULL OR telegram_id = ''")
             )
+
+
+def _run_postgres_fine_migrations() -> None:
+    """افزودن ستون‌های جریمه به جدول leagues در PostgreSQL (idempotent)"""
+    if IS_SQLITE:
+        return
+    statements = [
+        "ALTER TABLE leagues ADD COLUMN IF NOT EXISTS fines_enabled BOOLEAN DEFAULT FALSE NOT NULL",
+        "ALTER TABLE leagues ADD COLUMN IF NOT EXISTS fine_absent_amount INTEGER DEFAULT 0 NOT NULL",
+        "ALTER TABLE leagues ADD COLUMN IF NOT EXISTS fine_late_amount INTEGER DEFAULT 0 NOT NULL",
+        "ALTER TABLE fine_records ADD COLUMN IF NOT EXISTS is_frozen BOOLEAN DEFAULT FALSE NOT NULL",
+    ]
+    for stmt in statements:
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(stmt))
+        except Exception as exc:
+            logger.warning(f"عدم امکان اجرای مایگریشن جریمه ({stmt}): {exc}")
 
 
 def get_or_create_active_cycle(db: Session, league: League, default_start_shamsi: Optional[str] = None) -> Cycle:
@@ -350,6 +374,19 @@ def _ensure_indexes() -> None:
         except Exception as exc:
             logger.warning(f"عدم امکان ساخت ایندکس {idx_name}: {exc}")
 
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_fine_record_key ON fine_records "
+                    "(league_id, user_id, cycle_id, kind, league_day)"
+                )
+            )
+    except Exception as exc:
+        logger.warning(
+            f"عدم امکان ساخت ایندکس یکتای جریمه (احتمالاً رکورد تکراری وجود دارد): {exc}"
+        )
+
 
 def _sync_postgres_sequences(db: Session) -> None:
     """
@@ -366,6 +403,9 @@ def _sync_postgres_sequences(db: Session) -> None:
         "cycle_results",
         "group_messages",
         "group_terms",
+        "league_fine_managers",
+        "fine_records",
+        "fine_payments",
     ):
         try:
             db.execute(
@@ -385,6 +425,7 @@ def init_db() -> None:
     backup_database()
     Base.metadata.create_all(bind=engine)
     _run_migrations()
+    _run_postgres_fine_migrations()
     _ensure_indexes()
 
     from services import DateService

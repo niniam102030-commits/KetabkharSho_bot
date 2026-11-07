@@ -19,12 +19,18 @@ def get_start_menu() -> ReplyKeyboardMarkup:
     )
 
 
+VIEW_FINES_TEXT = "💰 مشاهده جریمه‌ها"
+PAY_FINES_TEXT = "💳 پرداخت جریمه"
+
+
 def get_main_menu(
     is_admin: bool = False,
     has_multiple_profiles: bool = False,
     can_log_late: bool = False,
+    has_fines: bool = False,
+    is_fine_manager: bool = False,
 ) -> ReplyKeyboardMarkup:
-    """۲. منوی اصلی کاربران (پویا بر اساس وضعیت ثبت با تاخیر، چندپروفایلی و دسترسی ادمین)"""
+    """۲. منوی اصلی کاربران (پویا بر اساس وضعیت ثبت با تاخیر، چندپروفایلی، جریمه و دسترسی ادمین)"""
     rows: List[List[KeyboardButton]] = [
         [
             KeyboardButton(text="📝 ثبت مطالعه امروز"),
@@ -34,6 +40,15 @@ def get_main_menu(
 
     if can_log_late:
         rows.append([KeyboardButton(text="⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)")])
+
+    if has_fines or is_fine_manager:
+        fine_row: List[KeyboardButton] = []
+        if has_fines:
+            fine_row.append(KeyboardButton(text=VIEW_FINES_TEXT))
+        if is_fine_manager:
+            fine_row.append(KeyboardButton(text=PAY_FINES_TEXT))
+        if fine_row:
+            rows.append(fine_row)
 
     rows.append([KeyboardButton(text="👤 حساب کاربری و سهمیه ها")])
     rows.append([KeyboardButton(text="راهنما")])

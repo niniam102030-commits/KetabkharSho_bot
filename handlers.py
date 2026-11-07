@@ -53,6 +53,7 @@ from services import (
     escape_md,
 )
 from message_service import MessageService
+import fine_service
 from keyboards import (
     get_start_menu,
     get_main_menu,
@@ -93,6 +94,8 @@ RESERVED_MENU_TEXTS = {
     "راهنما",
     "🔄 تغییر لیگ فعال",
     "⚙️ منوی مدیریت ادمین",
+    "💰 مشاهده جریمه‌ها",
+    "💳 پرداخت جریمه",
     "🔄 ویرایش مطالعه امروز",
     "➕ افزودن زمان به ثبت امروز",
     "🔙 بازگشت",
@@ -453,10 +456,16 @@ def build_user_main_menu(db: Session, telegram_id: str | int, active_user: Optio
     profiles = get_user_profiles(db, tg_id, only_active=True)
     is_adm = is_user_admin(db, tg_id)
     can_late = user_can_log_late(db, active_user) if active_user else False
+    has_fines = False
+    if active_user and active_user.league_id:
+        has_fines = fine_service.league_has_fines(db, active_user.league_id)
+    is_fmgr = bool(fine_service.get_managed_leagues(db, tg_id))
     return get_main_menu(
         is_admin=is_adm,
         has_multiple_profiles=(len(profiles) > 1),
         can_log_late=can_late,
+        has_fines=has_fines,
+        is_fine_manager=is_fmgr,
     )
 
 
@@ -865,6 +874,7 @@ async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> No
         active_user = get_active_user(db, tg_id)
         if active_user and not active_user.league_id:
             target_user = active_user
+            fine_service.freeze_user_fines(db, target_user.id, commit=False)
             target_user.group_id = league.group_id
             target_user.league_id = league.id
             target_user.points = float(gift_points)
@@ -1231,6 +1241,16 @@ async def _dispatch_menu_interruption(message: Message, state: FSMContext, text_
     if text_val == "🔄 تغییر لیگ فعال":
         await handle_switch_active_league_menu(message, state)
         return True
+    if text_val in ("💰 مشاهده جریمه‌ها", "💳 پرداخت جریمه"):
+        # خروج از وضعیت ثبت مطالعه؛ هندلر واقعی در fine_router همین متن را پردازش می‌کند
+        await state.clear()
+        from fine_handlers import handle_view_fines, handle_pay_fines_menu
+
+        if text_val == "💰 مشاهده جریمه‌ها":
+            await handle_view_fines(message, state)
+        else:
+            await handle_pay_fines_menu(message, state)
+        return True
     if text_val in ("/history", "history"):
         await state.clear()
         await handle_cycle_history(message)
@@ -1426,6 +1446,8 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                 # بازسازی شکاف‌های تاریخی و زنجیره استمرار بر اساس لاگ‌های روزهای قبل و امروز
                 AbsenceService.reconcile_historical_gaps(db, user=user, league=league)
                 AbsenceService.reconcile_streaks(db, user=user, league=league)
+                if league.fines_enabled:
+                    fine_service.sync_league_fines(db, league)
                 db.refresh(user)
 
                 cum_minutes = input_minutes
@@ -1908,6 +1930,9 @@ def _midnight_job_sync(today_str: str, yesterday_str: str, force: bool) -> bool:
 
         set_system_state(db, "last_daily_job_date", today_str)
         db.commit()
+
+        # هم‌گام‌سازی دفتر جریمه با غیبت‌های ثبت‌شده امشب
+        fine_service.sync_all_enabled_leagues(db)
     return True
 
 
@@ -2118,6 +2143,13 @@ def _complete_and_rollover_cycle(
     # بازسازی دقیق زنجیره و غیبت‌های ۴۰ روزه چله قدیم (بدون احتساب لاگ روز ۴۱)
     AbsenceService.reconcile_historical_gaps(db, league=league)
     AbsenceService.reconcile_streaks(db, league=league)
+
+    # ثبت قطعی جریمه‌های چله قدیم در دفتر جریمه پیش از ریست شمارنده‌ها
+    try:
+        fine_service.sync_league_fines(db, league)
+    except Exception as exc:
+        db.rollback()
+        logger.warning(f"خطا در ثبت جریمه‌های پایان چله لیگ {league.id}: {exc}")
 
     # ۲. آماده‌سازی جدول نهایی و اکسل نهایی چله قدیم
     old_cycle_number = active_cycle.cycle_number
@@ -2340,6 +2372,7 @@ def _build_morning_cards(
         y_logs.setdefault(uid, (mins, pts))
 
     outbox: List[Tuple[str, str, Any]] = []
+    fine_mgr_ids = fine_service.get_all_manager_tg_ids(db)
     chunk_size = max(50, int(settings.DB_CHUNK_SIZE))
     last_id = ""
     while True:
@@ -2397,10 +2430,13 @@ def _build_morning_cards(
             )
             tg_target = str(u.telegram_id or u.id)
             can_late = (not y_info) and current_day > 1 and joined_before
+            lg_has_fines = bool(getattr(lg, "fines_enabled", False))
             kb = get_main_menu(
                 is_admin=(tg_target in admin_ids),
                 has_multiple_profiles=(profile_counts.get(tg_target, 1) > 1),
                 can_log_late=can_late,
+                has_fines=lg_has_fines,
+                is_fine_manager=(tg_target in fine_mgr_ids),
             )
             outbox.append((tg_target, report_card, kb))
 

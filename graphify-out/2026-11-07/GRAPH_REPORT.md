@@ -1,149 +1,140 @@
 # Graph Report - ketabkharsho-argon  (2026-11-07)
 
 ## Corpus Check
-- 12 files · ~72,984 words
+- 16 files · ~85,603 words
 - Verdict: corpus is large enough that graph structure adds value.
-- Unclassified: 4 file(s) not represented in the graph (top: (none) 2, .example 1, .bat 1)
+- Unclassified: 7 file(s) not represented in the graph (top: (none) 5, .example 1, .bat 1)
 
 ## Summary
-- 582 nodes · 2618 edges · 23 communities (15 shown, 8 thin omitted)
-- Extraction: 87% EXTRACTED · 13% INFERRED · 0% AMBIGUOUS · INFERRED: 329 edges (avg confidence: 0.94)
+- 711 nodes · 3154 edges · 20 communities (13 shown, 7 thin omitted)
+- Extraction: 88% EXTRACTED · 12% INFERRED · 0% AMBIGUOUS · INFERRED: 393 edges (avg confidence: 0.94)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `c47b7bf4`
+- Built from commit: `afcbf947`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
-- process_study_pages
-- set_system_state
-- _complete_and_rollover_cycle
-- main.py
+- League
+- main
+- services.py
+- .today_str
 - run_db
 - database.py
-- User
-- get_db
+- safe_send
+- run_all_tests
 - AdminFlowInterruptMiddleware
-- DateService
-- escape_md
-- admin_handlers.py
+- set_system_state
+- deploy.sh
+- ReportService
+- MockBot
+- send_weekly_reports
 - run_tests.py
-- League
-- cb_user_add_second_league
-- _get_admin_profile_lock
-- AdminStates
-- FSMContext
-- StudyStates
+- admin_handlers.py
 - handlers.py
 - Config
 
 ## God Nodes (most connected - your core abstractions)
-1. `get_db()` - 133 edges
-2. `run_all_tests()` - 84 edges
-3. `User` - 83 edges
-4. `DateService` - 79 edges
-5. `League` - 78 edges
-6. `escape_md()` - 72 edges
-7. `is_user_admin()` - 68 edges
+1. `get_db()` - 158 edges
+2. `League` - 97 edges
+3. `User` - 96 edges
+4. `escape_md()` - 87 edges
+5. `run_all_tests()` - 84 edges
+6. `DateService` - 81 edges
+7. `is_user_admin()` - 70 edges
 8. `safe_send_message()` - 56 edges
 9. `MessageService` - 49 edges
 10. `safe_reply()` - 47 edges
 
 ## Surprising Connections (you probably didn't know these)
+- `🔄 ۲. بروزرسانی خودکار ربات (پس از هر تغییر در کدهای گیت‌هاب)` --references--> `main()`  [INFERRED]
+  docker/README.md → main.py
 - `run_all_tests()` --uses--> `AdminStates`  [INFERRED]
   run_tests.py → admin_handlers.py
+- `_get_user_past_days()` --uses--> `League`  [INFERRED]
+  admin_handlers.py → models.py
 - `_get_user_past_days()` --uses--> `User`  [INFERRED]
   admin_handlers.py → models.py
-- `_get_user_past_days()` --uses--> `DateService`  [INFERRED]
-  admin_handlers.py → services.py
 - `_format_user_admin_card()` --uses--> `Group`  [INFERRED]
-  admin_handlers.py → models.py
-- `_format_user_admin_card()` --uses--> `League`  [INFERRED]
   admin_handlers.py → models.py
 
 ## Import Cycles
 - None detected.
 
-## Communities (23 total, 8 thin omitted)
+## Communities (20 total, 7 thin omitted)
 
-### Community 0 - "process_study_pages"
+### Community 0 - "League"
+Cohesion: 0.05
+Nodes (88): _amounts_line(), _announce_new_manager(), _kb(), _auth_menu(), _btn(), _build_fines_text(), _build_refresh_outbox_sync(), cb_amount_ask() (+80 more)
+
+### Community 1 - "main"
+Cohesion: 0.12
+Nodes (6): راهنمای استقرار و دیپلوی ربات کتابخوارشو با داکر (Docker), 🛠️ ۱. راه‌اندازی اولیه روی سرور (توسط مسئول سرور), 🔄 ۲. بروزرسانی خودکار ربات (پس از هر تغییر در کدهای گیت‌هاب), 💾 ۳. امنیت داده‌ها و دیتابیس (Volumes), BaleAiohttpSession, main()
+
+### Community 2 - "services.py"
+Cohesion: 0.12
+Nodes (8): _build_global_stats_text_sync(), ActivityLog, Cycle, CycleResult, generate_league_id(), GroupMessage, GroupTerm, SystemState
+
+### Community 3 - ".today_str"
 Cohesion: 0.16
-Nodes (7): process_league_new_date(), process_user_new_no_study(), _build_morning_cards(), _midnight_job_sync(), process_study_pages(), ActivityLog, AbsenceService
-
-### Community 1 - "set_system_state"
-Cohesion: 0.24
-Nodes (7): get_system_state(), set_system_state(), _build_study_reminders_outbox_sync(), _base(), _init_daily_admin_reports_sync(), _init_morning_reports_sync(), SystemState
-
-### Community 2 - "_complete_and_rollover_cycle"
-Cohesion: 0.14
-Nodes (8): _complete_and_rollover_cycle(), _get_all_admin_recipients_sync(), Cycle, CycleResult, generate_league_id(), GroupAdmin, GroupMessage, GroupTerm
-
-### Community 3 - "main.py"
-Cohesion: 0.06
-Nodes (23): cmd_test_all_jobs(), BroadcastThrottle, _build_league_morning_cards_sync(), _dispatch_cycle_rollover(), dispatch_outbox(), midnight_job(), _rollover_league_cycle_sync(), safe_send() (+15 more)
+Nodes (8): cmd_test_all_jobs(), midnight_job(), send_daily_admin_reports(), send_daily_user_reports(), send_study_reminders(), run_startup_catchups(), _run_safe_job(), setup_scheduler()
 
 ### Community 6 - "database.py"
+Cohesion: 0.10
+Nodes (10): backup_database(), _backup_postgres(), _ensure_indexes(), init_db(), _run_migrations(), _run_postgres_fine_migrations(), set_sqlite_pragma(), _sync_postgres_sequences() (+2 more)
+
+### Community 7 - "safe_send"
+Cohesion: 0.16
+Nodes (9): BroadcastThrottle, _build_league_morning_cards_sync(), _dispatch_cycle_rollover(), dispatch_outbox(), _rollover_league_cycle_sync(), safe_send(), _send_daily_user_reports_impl(), send_startup_notification() (+1 more)
+
+### Community 8 - "run_all_tests"
+Cohesion: 0.05
+Nodes (44): cmd_add_league(), cmd_create_group(), cmd_datetest(), cmd_export_system_logs(), cmd_global_stats(), cmd_test_archive(), cmd_test_daily_user_report(), cmd_test_reminder() (+36 more)
+
+### Community 10 - "set_system_state"
+Cohesion: 0.24
+Nodes (7): get_system_state(), set_system_state(), _build_study_reminders_outbox_sync(), _base(), _init_daily_admin_reports_sync(), _init_morning_reports_sync(), _read_startup_states_and_cleanup_sync()
+
+### Community 13 - "MockBot"
+Cohesion: 0.15
+Nodes (5): MockBot, MockCallbackQuery, MockChat, MockMessage, MockUser
+
+### Community 14 - "send_weekly_reports"
+Cohesion: 0.33
+Nodes (4): cmd_export_cycle_history_excel(), safe_send_document(), send_weekly_reports(), _deliver()
+
+### Community 17 - "run_tests.py"
 Cohesion: 0.12
-Nodes (6): backup_database(), _backup_postgres(), _ensure_indexes(), _run_migrations(), set_sqlite_pragma(), _sync_postgres_sequences()
+Nodes (3): AdminStates, StudyStates, make_fsm()
 
-### Community 7 - "User"
-Cohesion: 0.10
-Nodes (4): User, ReportService, ScoringService, _build_weekly_task_sync()
-
-### Community 8 - "get_db"
-Cohesion: 0.13
-Nodes (40): _build_global_stats_text_sync(), cmd_add_group_admin(), cmd_add_league(), cmd_archive_exclude(), cmd_archive_include(), cmd_create_group(), cmd_global_stats(), cmd_remove_group_admin() (+32 more)
-
-### Community 10 - "DateService"
-Cohesion: 0.09
-Nodes (5): cmd_datetest(), cmd_export_system_logs(), _prepare_log_snapshot_sync(), user_can_log_late(), DateService
-
-### Community 11 - "escape_md"
-Cohesion: 0.16
-Nodes (24): cb_broadcast_pick_league(), cb_confirm_delete_league(), cb_delete_league_prompt(), cb_em_select_group(), cb_make_user_group_admin(), cb_user_delete(), cb_view_leagues_select(), cmd_change_group_name() (+16 more)
-
-### Community 12 - "admin_handlers.py"
-Cohesion: 0.11
-Nodes (20): _build_admin_help_text(), _build_cycle_history_excel_sync(), _cancel_flow(), cb_em_reset_msg(), cb_menu_excel(), cb_menu_stats(), cmd_broadcast(), cmd_edit_or_delete_leagues() (+12 more)
-
-### Community 13 - "run_tests.py"
-Cohesion: 0.10
-Nodes (6): make_fsm(), MockBot, MockCallbackQuery, MockChat, MockMessage, MockUser
-
-### Community 14 - "League"
-Cohesion: 0.16
-Nodes (11): cb_execute_user_move_league(), cb_view_single_league_table(), _collect_league_export_sync(), _execute_user_add_second_league_impl(), _get_user_past_days(), get_or_create_active_cycle(), init_db(), _build_single_admin_report_sync() (+3 more)
-
-### Community 15 - "cb_user_add_second_league"
-Cohesion: 0.15
-Nodes (7): cb_em_reset_term(), cb_user_add_second_league(), cb_user_move_league(), _get_em_msgs_keyboard(), _get_em_terms_keyboard(), _get_league_edit_keyboard(), _get_profile_league_ids()
-
-### Community 18 - "FSMContext"
-Cohesion: 0.15
-Nodes (42): cb_admin_cancel(), cb_broadcast_confirm_send(), cb_broadcast_pick_group(), cb_broadcast_target_all(), cb_broadcast_target_group(), cb_broadcast_target_league(), cb_cancel_delete_league(), cb_cancel_user_delete() (+34 more)
+### Community 18 - "admin_handlers.py"
+Cohesion: 0.07
+Nodes (103): _build_admin_help_text(), _cancel_flow(), cb_admin_cancel(), cb_broadcast_confirm_send(), cb_broadcast_pick_group(), cb_broadcast_pick_league(), cb_broadcast_target_all(), cb_broadcast_target_group() (+95 more)
 
 ### Community 21 - "handlers.py"
-Cohesion: 0.08
-Nodes (44): generate_new_profile_id(), get_active_user(), get_user_profiles(), set_active_user_id(), _terms(), build_user_main_menu(), cb_confirm_cancel_league(), cb_join_league() (+36 more)
+Cohesion: 0.05
+Nodes (53): generate_new_profile_id(), get_active_user(), get_user_profiles(), set_active_user_id(), _build_morning_cards(), _terms(), build_user_main_menu(), cb_confirm_cancel_league() (+45 more)
 
 ## Knowledge Gaps
-- **8 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **3 isolated node(s):** `deploy.sh script`, `🛠️ ۱. راه‌اندازی اولیه روی سرور (توسط مسئول سرور)`, `💾 ۳. امنیت داده‌ها و دیتابیس (Volumes)`
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 227 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **7 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `DateService` connect `DateService` to `process_study_pages`, `_complete_and_rollover_cycle`, `main.py`, `services.py`, `database.py`, `User`, `get_db`, `escape_md`, `admin_handlers.py`, `run_tests.py`, `League`, `handlers.py`?**
-  _High betweenness centrality (0.085) - this node is a cross-community bridge._
-- **Are the 12 inferred relationships involving `run_all_tests()` (e.g. with `AdminStates` and `StudyStates`) actually correct?**
-  _`run_all_tests()` has 12 INFERRED edges - model-reasoned connections that need verification._
-- **Should `_complete_and_rollover_cycle` be split into smaller, more focused modules?**
-  _Cohesion score 0.1368421052631579 - nodes in this community are weakly interconnected._
-- **Why does `get_db()` connect `get_db` to `process_study_pages`, `set_system_state`, `_complete_and_rollover_cycle`, `main.py`, `run_db`, `database.py`, `User`, `DateService`, `escape_md`, `admin_handlers.py`, `run_tests.py`, `League`, `cb_user_add_second_league`, `_get_admin_profile_lock`, `FSMContext`, `handlers.py`?**
-  _High betweenness centrality (0.080) - this node is a cross-community bridge._
-- **Are the 57 inferred relationships involving `User` (e.g. with `_build_global_stats_text_sync()` and `cb_broadcast_confirm_send()`) actually correct?**
-  _`User` has 57 INFERRED edges - model-reasoned connections that need verification._
-- **Should `main.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.06012176560121765 - nodes in this community are weakly interconnected._
-- **Why does `run_all_tests()` connect `get_db` to `process_study_pages`, `_complete_and_rollover_cycle`, `main.py`, `User`, `Config`, `escape_md`, `DateService`, `run_tests.py`, `League`, `AdminStates`, `FSMContext`, `StudyStates`, `.get_term`, `handlers.py`?**
-  _High betweenness centrality (0.077) - this node is a cross-community bridge._
+- **Why does `get_db()` connect `admin_handlers.py` to `League`, `services.py`, `.today_str`, `run_db`, `main.py`, `database.py`, `safe_send`, `run_all_tests`, `set_system_state`, `ReportService`, `send_weekly_reports`, `run_tests.py`, `handlers.py`?**
+  _High betweenness centrality (0.118) - this node is a cross-community bridge._
+- **Are the 82 inferred relationships involving `League` (e.g. with `_build_global_stats_text_sync()` and `cb_broadcast_confirm_send()`) actually correct?**
+  _`League` has 82 INFERRED edges - model-reasoned connections that need verification._
+- **What connects `deploy.sh script`, `🛠️ ۱. راه‌اندازی اولیه روی سرور (توسط مسئول سرور)`, `💾 ۳. امنیت داده‌ها و دیتابیس (Volumes)` to the rest of the system?**
+  _3 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Should `League` be split into smaller, more focused modules?**
+  _Cohesion score 0.05212903225806451 - nodes in this community are weakly interconnected._
+- **Why does `User` connect `handlers.py` to `League`, `services.py`, `main.py`, `database.py`, `run_all_tests`, `set_system_state`, `ReportService`, `run_tests.py`, `admin_handlers.py`?**
+  _High betweenness centrality (0.083) - this node is a cross-community bridge._
+- **Are the 68 inferred relationships involving `User` (e.g. with `_build_global_stats_text_sync()` and `cb_broadcast_confirm_send()`) actually correct?**
+  _`User` has 68 INFERRED edges - model-reasoned connections that need verification._
+- **Should `main` be split into smaller, more focused modules?**
+  _Cohesion score 0.125 - nodes in this community are weakly interconnected._

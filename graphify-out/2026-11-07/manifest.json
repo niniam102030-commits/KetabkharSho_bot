@@ -1,8 +1,8 @@
 {
   "admin_handlers.py": {
-    "mtime": 1794056621.4937935,
-    "seen": 1794057051.6379383,
-    "ast_hash": "3e3f4e8cb8f541fb1bba3d68cd4770f9",
+    "mtime": 1794080556.174044,
+    "seen": 1794081093.899422,
+    "ast_hash": "cf5e587ed6c48f31cdac2016ea7a818b",
     "semantic_hash": ""
   },
   "config.py": {
@@ -12,27 +12,27 @@
     "semantic_hash": ""
   },
   "database.py": {
-    "mtime": 1794056575.5434692,
-    "seen": 1794057051.637951,
-    "ast_hash": "50deb97a9e4588ef715c2df85fdf3ba6",
+    "mtime": 1794080411.5838645,
+    "seen": 1794081093.899443,
+    "ast_hash": "0d7baea8e0fc7dd6a5c2d4330a4545db",
     "semantic_hash": ""
   },
   "handlers.py": {
-    "mtime": 1794056986.8126173,
-    "seen": 1794057051.6379533,
-    "ast_hash": "f6d521865359b65ccc51fec5d0afd2db",
+    "mtime": 1794081403.3330407,
+    "seen": 1794081503.789838,
+    "ast_hash": "4c3b71543645c995df2f8a70cb3ba741",
     "semantic_hash": ""
   },
   "keyboards.py": {
-    "mtime": 1794052520.811158,
-    "seen": 1794052726.6461232,
-    "ast_hash": "bd55c007f9ebaa874e93fa9f758ccebf",
+    "mtime": 1794080478.465129,
+    "seen": 1794081093.8994658,
+    "ast_hash": "da716bb30889041040788c09cad0f7f4",
     "semantic_hash": ""
   },
   "main.py": {
-    "mtime": 1794052132.685671,
-    "seen": 1794052193.0436563,
-    "ast_hash": "a7dd6e9026c8966310f21cb8fdfe6771",
+    "mtime": 1794080565.2861855,
+    "seen": 1794081093.8994696,
+    "ast_hash": "571127745cf08608766faa2976a640da",
     "semantic_hash": ""
   },
   "message_service.py": {
@@ -42,15 +42,15 @@
     "semantic_hash": ""
   },
   "models.py": {
-    "mtime": 1794013669.273903,
-    "seen": 1794014264.5472424,
-    "ast_hash": "3cf0b6e1805a6e132fc64ff291f12208",
+    "mtime": 1794080407.5581443,
+    "seen": 1794081093.899478,
+    "ast_hash": "ba71a7efd9308aa4075e046b8ee73189",
     "semantic_hash": ""
   },
   "run_tests.py": {
-    "mtime": 1794052647.5344927,
-    "seen": 1794052726.6461322,
-    "ast_hash": "7d183f178db7cfa814da81b0d1124329",
+    "mtime": 1794081476.5747256,
+    "seen": 1794081503.7898483,
+    "ast_hash": "aee1b49c8f37be31ccafc5eef7a5d722",
     "semantic_hash": ""
   },
   "scheduler.py": {
@@ -78,9 +78,9 @@
     "semantic_hash": ""
   },
   "pack/project_code.txt": {
-    "mtime": 1794058274.0152462,
-    "seen": 1794058745.014747,
-    "ast_hash": "ac43bea2398eed9c9c3c64dfafab24d7",
+    "mtime": 1794081106.774068,
+    "seen": 1794081503.7898624,
+    "ast_hash": "4c0e6e355769a6722fdcb7f24bd9e5ec",
     "semantic_hash": ""
   },
   "pack/prompt.txt": {
@@ -93,6 +93,36 @@
     "mtime": 1794058256.7973156,
     "seen": 1794058266.2693477,
     "ast_hash": "a62f3d6ac33a8ead2ba3e77c8eda1718",
+    "semantic_hash": ""
+  },
+  "docker/deploy.sh": {
+    "mtime": 1794062385.8588417,
+    "seen": 1794062402.7017093,
+    "ast_hash": "d68ab5f38f055bfb205603a413aaaba2",
+    "semantic_hash": ""
+  },
+  "docker-compose.yml": {
+    "mtime": 1794062380.8661218,
+    "seen": 1794062402.7017736,
+    "ast_hash": "1fbb40aaba399bd1cca00693e1f91b55",
+    "semantic_hash": ""
+  },
+  "docker/README.md": {
+    "mtime": 1794062392.6101325,
+    "seen": 1794062402.7017796,
+    "ast_hash": "991ba915c50d3a3eab81ecca7c5d17dc",
+    "semantic_hash": ""
+  },
+  "fine_handlers.py": {
+    "mtime": 1794080775.5279348,
+    "seen": 1794081093.8994536,
+    "ast_hash": "8e0340340fb1e0a56a89b8821507c231",
+    "semantic_hash": ""
+  },
+  "fine_service.py": {
+    "mtime": 1794080470.451608,
+    "seen": 1794081093.8994577,
+    "ast_hash": "beba84de12675b5c4eee2b434b7e4947",
     "semantic_hash": ""
   }
 }

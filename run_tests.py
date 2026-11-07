@@ -731,6 +731,123 @@ async def run_all_tests() -> None:
 
     print("✅ [PASS] Scenario 10: 40-day cycle rollover on Day 41 and early-riser log migration verified.")
 
+    # -------------------------------------------------------------------------
+    # Scenario 11: سیستم جریمه و تبدیل خودکار جریمه غیبت به عدم اعلام پس از ثبت دیرهنگام
+    # -------------------------------------------------------------------------
+    with get_db() as db:
+        import fine_service
+        from models import FineRecord
+
+        # فعال‌سازی سیستم جریمه روی لیگ ۱
+        lg1 = db.query(League).filter(League.id == lg1_id).first()
+        lg1.fines_enabled = True
+        lg1.fine_absent_amount = 10000  # ۱۰ هزار تومان غیبت
+        lg1.fine_late_amount = 4000     # ۴ هزار تومان عدم اعلام
+        fine_service.add_manager(db, lg1_id, SUPER_ADMIN_ID)
+        assert fine_service.is_fine_manager(db, lg1_id, SUPER_ADMIN_ID)
+
+        # تنظیم روز ۲ به عنوان غیبت برای کاربر ۱
+        u1 = db.query(User).filter(User.id == str(USER_1_ID)).first()
+        u1.absent_days_list = "2"
+        u1.late_days_list = ""
+        u1.no_study_days = 1
+        db.commit()
+
+        # همگام‌سازی جریمه‌ها (همانند اتفاقی که در جاب نیمه‌شب رخ می‌دهد)
+        fine_service.sync_league_fines(db, lg1)
+
+        # بررسی ایجاد جریمه غیبت ۱۰ هزار تومانی
+        bal_before = fine_service.get_user_balance(db, lg1_id, u1.id)
+        assert bal_before["fines"] == 10000 and bal_before["owed"] == 10000
+        records = fine_service.get_user_fine_records(db, lg1_id, u1.id)
+        assert len(records) == 1
+        assert records[0].kind == "absent" and records[0].league_day == 2 and records[0].amount == 10000
+
+        # شبیه‌سازی ثبت مطالعه دیروز (روز ۲) و تبدیل غیبت به اعلام دیرهنگام
+        u1.absent_days_list = ""
+        u1.late_days_list = "2"
+        u1.no_study_days = 0
+        db.commit()
+
+        # همگام‌سازی مجدد جریمه‌ها (که در ثبت دیروز یا مشاهده پنل جریمه خودکار فراخوانی می‌شود)
+        fine_service.sync_league_fines(db, lg1)
+
+        # بررسی تبدیل جریمه غیبت به جریمه عدم اعلام ۴ هزار تومانی
+        bal_after = fine_service.get_user_balance(db, lg1_id, u1.id)
+        assert bal_after["fines"] == 4000 and bal_after["owed"] == 4000
+        records_after = fine_service.get_user_fine_records(db, lg1_id, u1.id)
+        assert len(records_after) == 1
+        assert records_after[0].kind == "late" and records_after[0].league_day == 2 and records_after[0].amount == 4000
+
+        # تسویه بدهی توسط مسئول
+        paid_res = fine_service.record_payment(db, lg1_id, u1.id, 4000, SUPER_ADMIN_ID)
+        assert paid_res == 4000
+        bal_final = fine_service.get_user_balance(db, lg1_id, u1.id)
+        assert bal_final["owed"] == 0
+
+    print("✅ [PASS] Scenario 11: Fine system and automatic conversion of absence penalty to late penalty verified.")
+
+    # -------------------------------------------------------------------------
+    # Scenario 12: انتساب ادمین به عنوان مسئول جریمه گروه و نمایش شیشه‌ای لیگ‌ها در پرداخت
+    # -------------------------------------------------------------------------
+    with get_db() as db:
+        from fine_handlers import _managed_leagues_picker, _debtors_screen
+
+        # فعال‌سازی جریمه روی لیگ ۲ از گروه ۱
+        lg2 = db.query(League).filter(League.id == lg2_id).first()
+        lg2.fines_enabled = True
+        lg2.fine_absent_amount = 8000
+        lg2.fine_late_amount = 3000
+        db.commit()
+
+        # ادمین خودش را به عنوان مسئول جریمه تمام لیگ‌های گروه ۱ تعیین می‌کند
+        assigned_count = fine_service.set_group_fine_manager(db, 1, GROUP_ADMIN_ID, auto_enable=False)
+        assert assigned_count >= 1
+
+        # بررسی اینکه ادمین اکنون مسئول چندین لیگ است
+        admin_managed = fine_service.get_managed_leagues(db, GROUP_ADMIN_ID)
+        assert len(admin_managed) >= 2
+        managed_ids = [l.id for l in admin_managed]
+        assert lg1_id in managed_ids and lg2_id in managed_ids
+
+        # بررسی باز شدن منوی پرداخت جریمه: باید ابتدا لیست لیگ‌ها به صورت کلید شیشه‌ای بیاید
+        err, text, kb = _managed_leagues_picker(db, str(GROUP_ADMIN_ID))
+        assert err is None
+        assert "لیست لیگ‌هایی که شما مسئول جریمه آنها هستید" in text
+        # دکمه‌های شیشه‌ای باید شامل هر دو لیگ باشند
+        button_callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert f"fp:{lg1_id}:0" in button_callbacks
+        assert f"fp:{lg2_id}:0" in button_callbacks
+
+        # انتخاب لیگ ۱: نمایش صفحه بدهکاران با دکمه بازگشت به لیست لیگ‌ها
+        text_d, kb_d = _debtors_screen(db, lg1, 0)
+        debtor_callbacks = [btn.callback_data for row in kb_d.inline_keyboard for btn in row]
+        assert "fl:list" in debtor_callbacks
+
+        # سناریوی ادمینی که در جدول User وجود ندارد:
+        NON_USER_ADMIN_ID = "9988776655"
+        db.add(GroupAdmin(group_id=1, user_id=NON_USER_ADMIN_ID))
+        db.commit()
+        fine_service.add_manager(db, lg1_id, NON_USER_ADMIN_ID)
+        from fine_handlers import _manager_names, _menu_screen
+        names = _manager_names(db, lg1_id)
+        mgr_dict = dict(names)
+        assert NON_USER_ADMIN_ID in mgr_dict
+        assert "ادمین" in mgr_dict[NON_USER_ADMIN_ID]
+
+        # بررسی باز شدن منوی مدیریت جریمه توسط ادمینی که کاربر نیست
+        menu_text, menu_kb = _menu_screen(db, lg1, is_adm=True)
+        assert "مدیریت جریمه" in menu_text
+
+        # بررسی تابع get_all_manager_tg_ids
+        all_mgr_ids = fine_service.get_all_manager_tg_ids(db)
+        assert NON_USER_ADMIN_ID in all_mgr_ids
+        assert str(GROUP_ADMIN_ID) in all_mgr_ids
+
+    print("✅ [PASS] Scenario 12: Admin self-assignment to group fine management & inline league picker verified.")
+
+
+
 
 if __name__ == "__main__":
     try:

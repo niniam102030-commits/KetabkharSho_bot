@@ -79,6 +79,11 @@ _ADMIN_FLOW_INTERRUPT_TEXTS = {
     "👤 حساب کاربری و سهمیه ها",
     "راهنما",
     "🔄 تغییر لیگ فعال",
+    "💰 مشاهده جریمه‌ها",
+    "💰 مشاهده جریمهها",
+    "💳 پرداخت جریمه",
+    "💳 پرداخت جریمه‌ها",
+    "💳 پرداخت جریمهها",
     "🔄 ویرایش مطالعه امروز",
     "➕ افزودن زمان به ثبت امروز",
     "🔙 بازگشت",
@@ -292,6 +297,12 @@ def _get_league_edit_keyboard(league_id: str) -> InlineKeyboardMarkup:
                     text="📅 تاریخ شروع",
                     callback_data=f"leagedit_date_{league_id}",
                 ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💰 مدیریت جریمه‌ها",
+                    callback_data=f"fa:m:{league_id}",
+                )
             ],
             [
                 InlineKeyboardButton(
@@ -2251,6 +2262,8 @@ async def cb_execute_user_move_league(callback: CallbackQuery) -> None:
                 )
                 gift_points = float(max(0, (current_day - 1) * 10))
 
+                import fine_service as _fine_service
+                _fine_service.freeze_user_fines(db, u.id, commit=False)
                 # ریست کامل آمار دوره؛ لاگ‌های قبلی متعلق به لیگ/چله قبلی باقی می‌مانند
                 u.league_id = lg.id
                 u.group_id = lg.group_id
