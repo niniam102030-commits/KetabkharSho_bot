@@ -13,8 +13,8 @@ from aiogram.methods import TelegramMethod
 from aiogram.types import InputFile, ErrorEvent
 
 from config import settings
-from database import init_db, get_db, get_system_state
-from services import DateService
+from database import init_db, get_db, get_system_state, engine
+from services import DateService, ReportService
 from admin_handlers import admin_router
 from handlers import (
     user_router,
@@ -67,6 +67,18 @@ class BaleAiohttpSession(AiohttpSession):
         return form
 
 
+def _read_startup_states_and_cleanup_sync() -> tuple:
+    ReportService.cleanup_old_reports(max_age_hours=24)
+    with get_db() as db:
+        return (
+            get_system_state(db, "last_daily_job_date"),
+            get_system_state(db, "last_daily_admin_report_date"),
+            get_system_state(db, "last_weekly_report_date"),
+            get_system_state(db, "last_daily_user_report_date"),
+            get_system_state(db, "last_reminder_date"),
+        )
+
+
 async def run_startup_catchups(bot: Bot) -> None:
     """
     بررسی و اجرای جبرانی جاب‌های جاافتاده در بدو روشن شدن ربات (در صورت خاموشی سرور در ساعات اجرای جاب).
@@ -75,12 +87,13 @@ async def run_startup_catchups(bot: Bot) -> None:
     today_str = DateService.today_str()
     current_hour = now_ir.hour
 
-    with get_db() as db:
-        last_midnight = get_system_state(db, "last_daily_job_date")
-        last_admin_rep = get_system_state(db, "last_daily_admin_report_date")
-        last_weekly_rep = get_system_state(db, "last_weekly_report_date")
-        last_user_rep = get_system_state(db, "last_daily_user_report_date")
-        last_reminder = get_system_state(db, "last_reminder_date")
+    (
+        last_midnight,
+        last_admin_rep,
+        last_weekly_rep,
+        last_user_rep,
+        last_reminder,
+    ) = await asyncio.to_thread(_read_startup_states_and_cleanup_sync)
 
     # ۱. جبران جاب نیمه‌شب (ثبت غیبت روزهای گذشته و بروزرسانی روز چله)
     if last_midnight != today_str:
@@ -170,6 +183,7 @@ async def main() -> None:
         if scheduler.running:
             scheduler.shutdown(wait=False)
         await bot.session.close()
+        engine.dispose()
 
 
 if __name__ == "__main__":

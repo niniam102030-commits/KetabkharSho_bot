@@ -1,5 +1,6 @@
 import os
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import List
 from dotenv import load_dotenv
@@ -13,7 +14,9 @@ class Config:
 
     def __init__(self) -> None:
         self.BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
-        self.API_URL: str = os.getenv("API_URL", "https://tapi.bale.ai").strip().rstrip("/")
+        bale_api = os.getenv("BALE_API_URL") or os.getenv("API_URL", "https://tapi.bale.ai")
+        self.API_URL: str = bale_api.strip().rstrip("/")
+        self.BALE_API_URL: str = self.API_URL
 
         raw_admin_ids: str = os.getenv("ADMIN_IDS", "").strip()
         self.ADMIN_IDS: List[str] = [
@@ -32,8 +35,9 @@ class Config:
         self.DB_POOL_TIMEOUT: int = self._get_int("DB_POOL_TIMEOUT", 30)
         self.DB_POOL_RECYCLE: int = self._get_int("DB_POOL_RECYCLE", 1800)
 
-        # پشتیبان‌گیری
+        # پشتیبان‌گیری و گزارش‌ها
         self.BACKUP_DIR: str = os.getenv("BACKUP_DIR", "./backups").strip() or "./backups"
+        self.REPORTS_DIR: str = os.getenv("REPORTS_DIR", "./reports").strip() or "./reports"
         self.PG_DUMP_ENABLED: bool = os.getenv("PG_DUMP_ENABLED", "false").strip().lower() in (
             "true",
             "1",
@@ -47,8 +51,16 @@ class Config:
         self.BROADCAST_BATCH_PAUSE: float = max(0.0, self._get_float("BROADCAST_BATCH_PAUSE", 1.0))
         self.DB_CHUNK_SIZE: int = max(50, self._get_int("DB_CHUNK_SIZE", 500))
 
-        self.DEFAULT_FLOOR: int = self._get_int("DEFAULT_FLOOR", 10)
-        self.LEAGUE_DURATION: int = self._get_int("LEAGUE_DURATION", 40)
+        # کف پیش‌فرض لیگ و طول چله (پشتیبانی هماهنگ از نام‌های متغیرهای محیطی)
+        self.DEFAULT_FLOOR: int = self._get_int(
+            "DEFAULT_LEAGUE_FLOOR", self._get_int("DEFAULT_FLOOR", 10)
+        )
+        self.DEFAULT_LEAGUE_FLOOR: int = self.DEFAULT_FLOOR
+
+        self.LEAGUE_DURATION: int = self._get_int(
+            "CYCLE_DAYS", self._get_int("LEAGUE_DURATION", 40)
+        )
+        self.CYCLE_DAYS: int = self.LEAGUE_DURATION
         self.DEFAULT_HALF_COUPONS: int = self._get_int("DEFAULT_HALF_COUPONS", 5)
         self.DEFAULT_ONE_MIN_COUPONS: int = self._get_int("DEFAULT_ONE_MIN_COUPONS", 1)
 
@@ -64,6 +76,14 @@ class Config:
             "on",
         )
         self.LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+        self.LOG_FILE: str = (
+            os.getenv("LOG_FILE", "./logs/ketabkharsho.log").strip()
+            or "./logs/ketabkharsho.log"
+        )
+        self.LOG_MAX_BYTES: int = max(
+            256 * 1024, self._get_int("LOG_MAX_BYTES", 2 * 1024 * 1024)
+        )
+        self.LOG_BACKUP_COUNT: int = max(1, self._get_int("LOG_BACKUP_COUNT", 3))
 
         # ساخت پوشه‌های موردنیاز پروژه
         self._ensure_directories()
@@ -75,6 +95,10 @@ class Config:
             return "postgresql+psycopg2://" + url[len("postgres://"):]
         if url.startswith("postgresql://"):
             return "postgresql+psycopg2://" + url[len("postgresql://"):]
+        if url.startswith("postgresql+asyncpg://"):
+            return "postgresql+psycopg2://" + url[len("postgresql+asyncpg://"):]
+        if url.startswith("sqlite+aiosqlite:///"):
+            return "sqlite:///" + url[len("sqlite+aiosqlite:///"):]
         return url
 
     @property
@@ -103,9 +127,12 @@ class Config:
             return default
 
     def _ensure_directories(self) -> None:
-        """ایجاد دایرکتوری‌های داده، بکاپ و گزارش‌های اکسل"""
-        for folder in ("./data", "./backups", "./reports"):
+        """ایجاد دایرکتوری‌های داده، بکاپ، گزارش‌های اکسل و لاگ‌ها"""
+        for folder in ("./data", "./backups", "./reports", "./logs", self.BACKUP_DIR, self.REPORTS_DIR):
             Path(folder).mkdir(parents=True, exist_ok=True)
+
+        log_parent = Path(self.LOG_FILE).parent
+        log_parent.mkdir(parents=True, exist_ok=True)
 
         if self.DATABASE_URL.startswith("sqlite:///"):
             db_file_path = self.DATABASE_URL.replace("sqlite:///", "", 1)
@@ -138,8 +165,29 @@ class Config:
 
 settings = Config()
 
-# تنظیمات پایه لاگینگ
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL, logging.INFO),
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+# تنظیمات پایه لاگینگ (کنسول + فایل چرخشی با محدودیت حجم)
+_log_level = getattr(logging, settings.LOG_LEVEL, logging.INFO)
+_log_formatter = logging.Formatter(
+    "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 )
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_formatter)
+
+_file_handler = RotatingFileHandler(
+    settings.LOG_FILE,
+    maxBytes=settings.LOG_MAX_BYTES,
+    backupCount=settings.LOG_BACKUP_COUNT,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(_log_formatter)
+
+logging.basicConfig(
+    level=_log_level,
+    handlers=[_console_handler, _file_handler],
+)
+
+# جلوگیری از حجیم شدن فایل لاگ توسط پیام‌های روتین کتابخانه‌های جانبی
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
+logging.getLogger("aiohttp.access").setLevel(logging.WARNING)

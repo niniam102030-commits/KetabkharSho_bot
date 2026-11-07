@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 async def send_weekly_reports(bot: Bot, force: bool = False) -> None:
     """
     جاب ساعت 02:00 بامداد روزهای جمعه:
-    تولید فایل اکسل هر لیگ فعال و ارسال آن به همراه معرفی ۳ نفر برتر هفته
+    تولید فایل اکسل وضعیت چله هر لیگ فعال و ارسال گزارش هفتگی از وضعیت جدول چله (تا پایان هفته جاری)
     به صورت پلکانی و لیگ به لیگ، با حداقل مصرف حافظه RAM.
     """
     today_str = DateService.today_str()
@@ -142,9 +142,10 @@ def _build_weekly_task_sync(
         ranked_users = ScoringService.rank_users(users, lg.floor)
 
         top_lines: List[str] = [
-            f"🏆 *۳ نفر برتر این هفته - لیگ {escape_md(lg.name)}*",
+            f"📊 *گزارش هفتگی جمعه - لیگ {escape_md(lg.name)}*",
             f"🏢 مجموعه: *{escape_md(group_name)}*",
             f"🔄 چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION}",
+            f"🏆 *۳ نفر برتر جدول چله (تا پایان این هفته):*",
             "───────────────────",
         ]
 
@@ -163,7 +164,7 @@ def _build_weekly_task_sync(
                 pgs = int(u.total_pages or 0)
                 top_lines.append(
                     f"{medal_label}: *{escape_md(u.name)}*\n"
-                    f"   ⭐️ امتیاز: *{pts}* | ⏱ زمان: *{mins}* دقیقه | 📄 صفحات: *{pgs}*"
+                    f"   ⭐️ امتیاز کل: *{pts}* | ⏱ زمان کل: *{mins}* دقیقه | 📄 صفحات کل: *{pgs}*"
                 )
 
         base_report_text = MessageService.apply_terms(
@@ -174,13 +175,13 @@ def _build_weekly_task_sync(
         base_caption = MessageService.apply_terms(
             db,
             lg.group_id,
-            f"📥 اکسل گزارش هفتگی لیگ «{lg.name}» (چله {cyc.cycle_number} - روز {current_day})",
+            f"📥 اکسل گزارش هفتگی وضعیت چله - لیگ «{lg.name}» (چله {cyc.cycle_number} - روز {current_day})",
         )
         super_caption = f"👑 [گزارش مدیر کل]\n{base_caption}"
         archive_caption = MessageService.apply_terms(
             db,
             lg.group_id,
-            f"📥 اکسل گزارش هفتگی لیگ «{lg.name}»",
+            f"📥 اکسل گزارش هفتگی وضعیت چله - لیگ «{lg.name}»",
         )
 
         group_admin_rows = (

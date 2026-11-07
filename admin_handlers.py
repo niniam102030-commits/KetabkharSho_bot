@@ -1,10 +1,11 @@
 import os
+import re
 import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
-from aiogram import Router, F, Bot
+from aiogram import Router, F, Bot, BaseMiddleware
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -64,6 +65,42 @@ logger = logging.getLogger(__name__)
 
 admin_router = Router(name="admin_router")
 
+# متنهایی که اگر وسط یک فلوی ادمین ارسال شوند، باید فلو را قطع کنند (نه اینکه بهعنوان ورودی ذخیره شوند)
+_ADMIN_FLOW_INTERRUPT_TEXTS = {
+    "/start",
+    "/help",
+    "/history",
+    "/join_group",
+    "/cancel_my_league",
+    "🚀 شروع ثبت نام",
+    "📝 ثبت مطالعه امروز",
+    "🏆 جدول لیگ",
+    "⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)",
+    "👤 حساب کاربری و سهمیه ها",
+    "راهنما",
+    "🔄 تغییر لیگ فعال",
+    "🔄 ویرایش مطالعه امروز",
+    "➕ افزودن زمان به ثبت امروز",
+    "🔙 بازگشت",
+}
+
+
+class AdminFlowInterruptMiddleware(BaseMiddleware):
+    """پاککردن استیت AdminStates هنگام ارسال دستور /start یا دکمههای منوی کاربر"""
+
+    async def __call__(self, handler, event, data):
+        text = (getattr(event, "text", None) or "").strip()
+        state = data.get("state")
+        if state is not None and text in _ADMIN_FLOW_INTERRUPT_TEXTS:
+            current = await state.get_state()
+            if current and current.startswith("AdminStates:"):
+                await state.clear()
+                data["raw_state"] = None
+        return await handler(event, data)
+
+
+admin_router.message.outer_middleware(AdminFlowInterruptMiddleware())
+
 
 class AdminStates(StatesGroup):
     """استیت‌های ماشین وضعیت پنل مدیریت (سوپرادمین و ادمین مجموعه)"""
@@ -90,10 +127,14 @@ class AdminStates(StatesGroup):
     usr_waiting_no_study = State()
     usr_waiting_late = State()
     usr_waiting_floor = State()
+    usr_waiting_search = State()
 
     # ویرایش واژه‌نامه و پیام‌های مجموعه (em)
     em_waiting_term_value = State()
     em_waiting_msg_value = State()
+
+    # ارسال پیام همگانی (bc)
+    bc_waiting_text = State()
 
 
 # ===========================================================================
@@ -201,7 +242,8 @@ def _build_admin_help_text(is_super: bool) -> str:
                 "🔹 `ng` : تغییر نام مجموعه",
                 "🔹 `ag` یا `aa` : افزودن ادمین به مجموعه",
                 "🔹 `rg` : حذف ادمین از مجموعه",
-                "🔹 `gs` : مشاهده آمار کلان کل سیستم\n",
+                "🔹 `gs` : مشاهده آمار کلان کل سیستم",
+                "🔹 `lg` : دریافت فایل لاگ سیستم\n",
             ]
         )
     else:
@@ -221,6 +263,7 @@ def _build_admin_help_text(is_super: bool) -> str:
             "🔸 `el` یا `dl` : ویرایش و حذف لیگ‌ها",
             "🔸 `us` یا `eu` : مدیریت کاربران و پروفایل‌ها",
             "🔸 `st` : آمار کلی مجموعه",
+            "🔸 `bc` : ارسال پیام همگانی (اطلاعیه / انگیزشی)",
             "🔸 `ex` : دریافت خروجی اکسل لیگ‌های فعال",
             "🔸 `sr` : دریافت اکسل آرشیو تاریخچه چله‌ها",
             "🔸 `em` : مدیریت لحن، واژه‌نامه و پیام‌های مجموعه\n",
@@ -1117,15 +1160,7 @@ async def cb_confirm_remove_group_admin(callback: CallbackQuery) -> None:
     await callback.answer("حذف شد.")
 
 
-# --- دستور gs (مشاهده آمار کلان سیستم - ویژه سوپرادمین) ---
-@admin_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "gs"))
-async def cmd_global_stats(message: Message) -> None:
-    user_id = str(message.from_user.id)
-    if not settings.is_super_admin(user_id):
-        await safe_reply(message, "⛔️ این دستور فقط مخصوص مدیر ارشد است.")
-        return
-
-    today_str = DateService.today_str()
+def _build_global_stats_text_sync(today_str: str) -> str:
     with get_db() as db:
         total_profiles = db.query(User).filter(User.is_active == True).count()
         total_groups = db.query(Group).filter(Group.is_deleted == False).count()
@@ -1154,7 +1189,7 @@ async def cmd_global_stats(message: Message) -> None:
             db.query(Cycle).filter(Cycle.status == "finished").count()
         )
 
-    text = (
+    return (
         "🌐 *آمار کلان کل سیستم کتابخوارشو*\n"
         "───────────────────\n"
         f"🏢 مجموعه‌های فعال: *{total_groups}*\n"
@@ -1166,6 +1201,18 @@ async def cmd_global_stats(message: Message) -> None:
         f"📝 مطالعات ثبت‌شده امروز: *{today_logs}*\n"
         f"🏁 کل چله‌های تکمیل‌شده: *{finished_cycles}*"
     )
+
+
+# --- دستور gs (مشاهده آمار کلان سیستم - ویژه سوپرادمین) ---
+@admin_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "gs"))
+async def cmd_global_stats(message: Message) -> None:
+    user_id = str(message.from_user.id)
+    if not settings.is_super_admin(user_id):
+        await safe_reply(message, "⛔️ این دستور فقط مخصوص مدیر ارشد است.")
+        return
+
+    today_str = DateService.today_str()
+    text = await asyncio.to_thread(_build_global_stats_text_sync, today_str)
     await safe_reply(message, text)
 
 
@@ -1591,10 +1638,11 @@ async def process_league_new_date(message: Message, state: FSMContext) -> None:
             await state.clear()
             await safe_reply(message, "❌ لیگ یافت نشد.")
             return
+        active_cycle = get_or_create_active_cycle(db, lg)
+        old_start_shamsi = active_cycle.start_shamsi or lg.start_shamsi
         new_day = DateService.calculate_league_day(norm_shamsi)
         lg.start_shamsi = norm_shamsi
         lg.current_day = new_day
-        active_cycle = get_or_create_active_cycle(db, lg)
         active_cycle.start_shamsi = norm_shamsi
         active_cycle.current_day = new_day
 
@@ -1618,6 +1666,24 @@ async def process_league_new_date(message: Message, state: FSMContext) -> None:
                             c_log.league_day = calc_day
                     except ValueError:
                         pass
+
+        # بازنگری و اصلاح امتیاز هدیه همگام‌سازی کاربران متناسب با تاریخ شروع جدید
+        if old_start_shamsi and old_start_shamsi != norm_shamsi:
+            league_users = (
+                db.query(User)
+                .filter(User.league_id == lg.id, User.is_active == True)
+                .all()
+            )
+            for u in league_users:
+                join_date = DateService.get_user_join_date(u)
+                old_join_day = DateService.calculate_league_day(old_start_shamsi, target_date=join_date)
+                new_join_day = DateService.calculate_league_day(norm_shamsi, target_date=join_date)
+
+                old_gift = float(max(0, (old_join_day - 1) * 10))
+                new_gift = float(max(0, (new_join_day - 1) * 10))
+                delta = new_gift - old_gift
+                if delta != 0.0:
+                    u.points = max(0.0, round(float(u.points or 0.0) + delta, 1))
 
         db.commit()
         AbsenceService.reconcile_historical_gaps(db, league=lg)
@@ -1800,6 +1866,160 @@ async def cb_menu_users_list(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
+
+
+# --- جستجوی سریع کاربر بر اساس نام، نام‌خانوادگی یا آیدی عددی ---
+async def _perform_user_search(bot: Bot, chat_id: int | str, admin_id: str, query_str: str) -> None:
+    norm_query = DateService.normalize_digits(query_str.strip())
+    if not norm_query:
+        await safe_send_message(bot, chat_id, "❌ لطفاً نام، نام‌خانوادگی یا آیدی عددی کاربر را وارد کنید.")
+        return
+
+    with get_db() as db:
+        if not is_user_admin(db, admin_id):
+            await safe_send_message(bot, chat_id, "⛔️ شما دسترسی به پنل مدیریت ندارید.")
+            return
+
+        is_super = settings.is_super_admin(admin_id)
+        admin_group_ids = get_admin_group_ids(db, admin_id)
+
+        # ساخت کوئری جستجو بر اساس سطح دسترسی
+        q = db.query(User).filter(User.is_active == True)
+        if not is_super:
+            q = q.filter(User.group_id.in_(admin_group_ids))
+
+        # جستجو بر اساس آیدی تلگرام یا تطابق نام/نام‌خانوادگی
+        if norm_query.isdigit():
+            # آیدی عددی تلگرام یا کد پروفایل
+            users = q.filter(
+                (User.telegram_id == norm_query) | (User.id == norm_query)
+            ).all()
+        else:
+            search_pattern = f"%{norm_query}%"
+            users = q.filter(
+                (User.name.ilike(search_pattern))
+                | (User.first_name.ilike(search_pattern))
+                | (User.last_name.ilike(search_pattern))
+            ).all()
+
+        if not users:
+            scope_txt = "در تمامی مجموعه‌ها" if is_super else "در مجموعه‌های تحت مدیریت شما"
+            await safe_send_message(
+                bot,
+                chat_id,
+                f"🔍 کاربری با مشخصات «{escape_md(norm_query)}» {scope_txt} یافت نشد.",
+            )
+            return
+
+        # گروه‌بندی پروفایل‌ها بر اساس شخص (telegram_id)
+        by_person: dict[str, list[User]] = {}
+        for u in users:
+            tg_key = u.telegram_id or u.id
+            by_person.setdefault(tg_key, []).append(u)
+
+        # اگر دقیقاً یک کاربر با یک پروفایل پیدا شد، مستقیماً پنل مدیریت او را باز کن
+        if len(users) == 1:
+            u_single = users[0]
+            card_text = _format_user_admin_card(db, u_single)
+            await safe_send_message(
+                bot,
+                chat_id,
+                card_text,
+                reply_markup=_get_user_manage_keyboard(u_single.id),
+            )
+            return
+
+        # اگر یک شخص با چند پروفایل (چند لیگ) یا چندین کاربر مختلف پیدا شدند:
+        rows: list[list[InlineKeyboardButton]] = []
+        msg_lines = [f"🔍 نتایج جستجو برای «{escape_md(norm_query)}»:"]
+
+        for tg_key, prof_list in by_person.items():
+            first_u = prof_list[0]
+            person_name = escape_md(first_u.name)
+
+            tg_short = f" [آیدی: {tg_key[-4:]}]" if len(str(tg_key)) >= 4 else f" [آیدی: {tg_key}]"
+            if len(prof_list) == 1:
+                u = prof_list[0]
+                lg = db.query(League).filter(League.id == u.league_id).first() if u.league_id else None
+                grp = db.query(Group).filter(Group.id == u.group_id).first() if u.group_id else None
+                lg_name = lg.name if lg else "بدون لیگ"
+                grp_txt = f" [{grp.name}]" if (is_super and grp) else ""
+                btn_txt = f"👤 {u.name}{tg_short} (لیگ: {lg_name}){grp_txt}"
+                rows.append([InlineKeyboardButton(text=btn_txt, callback_data=f"adm_manage_{u.id}")])
+            else:
+                msg_lines.append(f"👤 *{person_name}*{tg_short} (دارای {len(prof_list)} پروفایل/لیگ فعال):")
+                for u in prof_list:
+                    lg = db.query(League).filter(League.id == u.league_id).first() if u.league_id else None
+                    grp = db.query(Group).filter(Group.id == u.group_id).first() if u.group_id else None
+                    lg_name = lg.name if lg else "بدون لیگ"
+                    grp_txt = f" - مجموعه {grp.name}" if (is_super and grp) else ""
+                    btn_txt = f"🏆 لیگ {lg_name}{grp_txt}"
+                    rows.append([InlineKeyboardButton(text=btn_txt, callback_data=f"adm_manage_{u.id}")])
+
+        msg_lines.append("جهت مدیریت، روی پروفایل و لیگ موردنظر کلیک کنید:")
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        await safe_send_message(bot, chat_id, "\n".join(msg_lines), reply_markup=kb)
+
+
+@admin_router.callback_query(F.data == "adm_menu_search_user")
+async def cb_menu_search_user(callback: CallbackQuery, state: FSMContext) -> None:
+    admin_id = str(callback.from_user.id)
+    with get_db() as db:
+        if not is_user_admin(db, admin_id):
+            await callback.answer("عدم دسترسی", show_alert=True)
+            return
+
+    await state.set_state(AdminStates.usr_waiting_search)
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        "🔍 لطفاً *نام*، *نام خانوادگی* یا *آیدی عددی تلگرام* کاربر موردنظر را ارسال کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@admin_router.message(AdminStates.usr_waiting_search)
+async def process_user_search_query(message: Message, state: FSMContext) -> None:
+    query_str = (message.text or "").strip()
+    await state.clear()
+    await _perform_user_search(message.bot, message.chat.id, str(message.from_user.id), query_str)
+
+
+@admin_router.message(
+    StateFilter(None),
+    F.text.func(
+        lambda t: t
+        and (
+            t.strip().lower() in ("search", "find", "جستجو", "سرچ")
+            or t.strip().lower().startswith("search ")
+            or t.strip().lower().startswith("find ")
+            or t.strip().lower().startswith("جستجو ")
+            or t.strip().lower().startswith("سرچ ")
+        )
+    ),
+)
+async def cmd_quick_user_search(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    admin_id = str(message.from_user.id)
+    with get_db() as db:
+        if not is_user_admin(db, admin_id):
+            return
+
+    # بررسی اگر پارامتر جستجو در همان پیام ارسال شده
+    parts = text.split(maxsplit=1)
+    if len(parts) > 1 and parts[1].strip():
+        await state.clear()
+        await _perform_user_search(message.bot, message.chat.id, admin_id, parts[1].strip())
+    else:
+        await state.set_state(AdminStates.usr_waiting_search)
+        await safe_send_message(
+            message.bot,
+            message.chat.id,
+            "🔍 لطفاً *نام*، *نام خانوادگی* یا *آیدی عددی تلگرام* کاربر موردنظر را ارسال کنید:",
+            reply_markup=get_inline_cancel_keyboard(),
+        )
+
 @admin_router.callback_query(F.data.startswith("adm_manage_"))
 async def cb_open_user_manage_panel(callback: CallbackQuery, state: FSMContext) -> None:
     target_uid = callback.data.replace("adm_manage_", "")
@@ -1823,6 +2043,29 @@ async def cb_open_user_manage_panel(callback: CallbackQuery, state: FSMContext) 
         reply_markup=_get_user_manage_keyboard(target_uid),
     )
     await callback.answer()
+
+
+# --- گارد دسترسی برای تمام کالبکهای ویرایش فیلدهای کاربر ---
+_USER_EDIT_CB_RE = re.compile(
+    r"^(?:adm_editname_|adm_edit_(?:points|streak|minutes|pages|no_study|late)_|adm_userfloor_)(.+)$"
+)
+
+
+def _is_unauthorized_user_edit(callback: CallbackQuery) -> bool:
+    """True یعنی کالبک ویرایش کاربر است ولی فرستنده به گروه آن کاربر دسترسی ادمین ندارد"""
+    m = _USER_EDIT_CB_RE.match(callback.data or "")
+    if not m:
+        return False
+    with get_db() as db:
+        target = db.query(User).filter(User.id == m.group(1)).first()
+        return not (
+            target and is_user_admin(db, str(callback.from_user.id), target.group_id)
+        )
+
+
+@admin_router.callback_query(F.func(_is_unauthorized_user_edit))
+async def deny_unauthorized_user_edit(callback: CallbackQuery) -> None:
+    await callback.answer("عدم دسترسی به این کاربر", show_alert=True)
 
 
 # --- ویرایش فیلدهای کاربر در پنل مدیریت ---
@@ -1860,9 +2103,12 @@ async def process_user_new_name(message: Message, state: FSMContext) -> None:
             await state.clear()
             await safe_reply(message, "❌ کاربر یافت نشد.")
             return
-        u.name = new_name
-        u.first_name = first_n
-        u.last_name = last_n
+        tg_id = u.telegram_id or u.id
+        all_profiles = db.query(User).filter(User.telegram_id == tg_id).all()
+        for prof in all_profiles:
+            prof.name = new_name
+            prof.first_name = first_n
+            prof.last_name = last_n
         db.commit()
         card = _format_user_admin_card(db, u)
 
@@ -1905,11 +2151,10 @@ async def cb_user_move_league(callback: CallbackQuery) -> None:
         if not u or not is_user_admin(db, admin_id, u.group_id):
             await callback.answer("عدم دسترسی", show_alert=True)
             return
-        group_ids = get_admin_group_ids(db, admin_id)
         all_leagues = (
             db.query(League)
             .filter(
-                League.group_id.in_(group_ids),
+                League.group_id == u.group_id,
                 League.is_deleted == False,
                 League.is_active == True,
             )
@@ -2203,6 +2448,8 @@ async def _execute_user_add_second_league_impl(callback: CallbackQuery) -> None:
         set_active_user_id(db, tg_id, new_prof_id)
         u_name = src_user.name
         l_name = lg.name
+        from handlers import build_user_main_menu
+        user_kb = build_user_main_menu(db, tg_id, new_profile)
 
     await safe_send_message(
         callback.bot,
@@ -2215,6 +2462,7 @@ async def _execute_user_add_second_league_impl(callback: CallbackQuery) -> None:
         f"🎉 شما توسط مدیر به لیگ «{escape_md(l_name)}» نیز اضافه شدید!\n"
         f"✨ امتیاز هدیه همگام‌سازی با روز {current_day} لیگ: {gift_points} امتیاز!\n"
         "می‌توانید از دکمه «🔄 تغییر لیگ فعال» در منوی اصلی برای جابجایی بین لیگ‌های خود استفاده کنید.",
+        reply_markup=user_kb,
     )
     await callback.answer("اضافه شد.")
 
@@ -2541,16 +2789,63 @@ async def cb_user_delete(callback: CallbackQuery) -> None:
             await callback.answer("عدم دسترسی", show_alert=True)
             return
         u_name = u.name
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ بله، حذف شود",
+                    callback_data=f"adm_confirmdel_{target_uid}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ انصراف",
+                    callback_data="adm_canceldeluser",
+                ),
+            ]
+        ]
+    )
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        f"⚠️ آیا از حذف کاربر *{escape_md(u_name)}* (`{target_uid}`) و خروج او از لیگ اطمینان دارید؟",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("adm_confirmdel_"))
+async def cb_confirm_user_delete(callback: CallbackQuery) -> None:
+    target_uid = callback.data.replace("adm_confirmdel_", "")
+    admin_id = str(callback.from_user.id)
+    with get_db() as db:
+        u = db.query(User).filter(User.id == target_uid).first()
+        if not u or not is_user_admin(db, admin_id, u.group_id):
+            await callback.answer("عدم دسترسی", show_alert=True)
+            return
+        u_name = u.name
         u.is_active = False
         u.league_id = None
         db.commit()
 
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
     await safe_send_message(
         callback.bot,
         callback.message.chat.id,
         f"🗑 کاربر *{escape_md(u_name)}* (`{target_uid}`) با موفقیت غیرفعال و از لیگ خارج شد.",
     )
     await callback.answer("حذف شد.")
+
+
+@admin_router.callback_query(F.data == "adm_canceldeluser")
+async def cb_cancel_user_delete(callback: CallbackQuery) -> None:
+    try:
+        await callback.message.edit_text("✅ عملیات حذف کاربر لغو شد.")
+    except Exception:
+        pass
+    await callback.answer("لغو شد.")
 
 
 # --- دستور st و دکمه شیشه‌ای adm_menu_stats (آمار کلی مجموعه) ---
@@ -2748,27 +3043,122 @@ def _build_cycle_history_excel_sync(group_ids: List[int]) -> str:
 # --- دستور sr (دریافت فایل اکسل آرشیو تاریخچه چله‌ها) ---
 @admin_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "sr"))
 async def cmd_export_cycle_history_excel(message: Message) -> None:
+    from handlers import safe_send_document
+
     user_id = str(message.from_user.id)
-    with get_db() as db:
-        if not is_user_admin(db, user_id):
-            return
-        group_ids = get_admin_group_ids(db, user_id)
+    group_ids = await asyncio.to_thread(_get_admin_groups_if_authorized_sync, user_id)
+    if group_ids is None:
+        return
 
     file_path = await asyncio.to_thread(_build_cycle_history_excel_sync, group_ids)
 
     try:
-        await message.bot.send_document(
-            chat_id=message.chat.id,
-            document=FSInputFile(file_path),
+        ok = await safe_send_document(
+            message.bot,
+            message.chat.id,
+            file_path,
             caption="📚 فایل اکسل چندشیتی آرشیو تاریخچه چله‌های فعال و پایان‌یافته",
         )
+        if not ok:
+            await safe_reply(message, "❌ خطا در ارسال فایل اکسل آرشیو.")
     except Exception as exc:
         logger.error(f"خطا در ارسال اکسل تاریخچه چله‌ها: {exc}")
         await safe_reply(message, "❌ خطا در ارسال فایل اکسل آرشیو.")
     finally:
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
+            except OSError:
+                pass
+
+
+def _get_admin_groups_if_authorized_sync(user_id: str) -> Optional[List[int]]:
+    with get_db() as db:
+        if not is_user_admin(db, user_id):
+            return None
+        return get_admin_group_ids(db, user_id)
+
+
+def _prepare_log_snapshot_sync(user_id: str, max_bytes: int = 1024 * 1024) -> Optional[str]:
+    """بررسی دسترسی ادمین و ساخت یک کپی موقت از آخرین لاگ‌های سیستم برای ارسال در پیام‌رسان"""
+    with get_db() as db:
+        if not is_user_admin(db, user_id):
+            return None
+
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+
+    reports_dir = settings.REPORTS_DIR
+    os.makedirs(reports_dir, exist_ok=True)
+    ts = DateService.now_iran().strftime("%Y%m%d_%H%M%S")
+    snapshot_path = os.path.join(reports_dir, f"ketabkharsho_logs_{ts}.log")
+
+    log_file = settings.LOG_FILE
+    content_bytes = b""
+    if os.path.exists(log_file):
+        try:
+            file_size = os.path.getsize(log_file)
+            with open(log_file, "rb") as f:
+                if file_size > max_bytes:
+                    f.seek(file_size - max_bytes)
+                    # رد کردن خط ناقص ابتدای برش
+                    f.readline()
+                content_bytes = f.read()
+        except OSError as exc:
+            logger.warning(f"خطا در خواندن فایل لاگ: {exc}")
+
+    if not content_bytes.strip():
+        fallback_line = (
+            f"{DateService.today_shamsi()} {DateService.now_iran_time_str()} | INFO | "
+            "فایل لاگ فعال است (رکوردی برای نمایش وجود ندارد).\n"
+        )
+        content_bytes = fallback_line.encode("utf-8")
+
+    with open(snapshot_path, "wb") as out_f:
+        out_f.write(content_bytes)
+
+    return snapshot_path
+
+
+# --- دستور دوحرفی lg (دریافت فایل لاگ سیستم مشابه خروجی اکسل) ---
+@admin_router.message(Command("logs"))
+@admin_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "lg"))
+async def cmd_export_system_logs(message: Message) -> None:
+    from handlers import safe_send_document
+
+    user_id = str(message.from_user.id)
+    if not settings.is_super_admin(user_id):
+        await safe_reply(message, "⛔️ این دستور فقط مخصوص مدیر ارشد است.")
+        return
+    snapshot_path = await asyncio.to_thread(_prepare_log_snapshot_sync, user_id)
+    if snapshot_path is None:
+        return
+
+    try:
+        size_kb = round(os.path.getsize(snapshot_path) / 1024, 1)
+        caption = (
+            f"📋 فایل لاگ سیستم «کتابخوارشو»\n"
+            f"📅 تاریخ: {DateService.today_shamsi()} | ⏰ ساعت: {DateService.now_iran_time_str()}\n"
+            f"📦 حجم فایل: {size_kb} KB"
+        )
+        ok = await safe_send_document(
+            message.bot,
+            message.chat.id,
+            snapshot_path,
+            caption=caption,
+        )
+        if not ok:
+            await safe_reply(message, "❌ در ارسال فایل لاگ سیستم خطایی رخ داد.")
+    except Exception as exc:
+        logger.error(f"خطا در ارسال فایل لاگ به ادمین {user_id}: {exc}")
+        await safe_reply(message, "❌ خطا در ارسال فایل لاگ سیستم.")
+    finally:
+        if snapshot_path and os.path.exists(snapshot_path):
+            try:
+                os.remove(snapshot_path)
             except OSError:
                 pass
 
@@ -3095,6 +3485,330 @@ async def cmd_archive_include(message: Message) -> None:
         db.commit()
         l_name = lg.name
     await safe_reply(message, f"🔔 ارسال آرشیو خودکار برای لیگ *{escape_md(l_name)}* (`{league_id}`) فعال شد.")
+
+
+# ===========================================================================
+# ارسال پیام همگانی (Broadcast) توسط ادمین به اعضای لیگ، مجموعه یا کل سیستم
+# ===========================================================================
+async def _start_broadcast_flow(bot: Bot, chat_id: int | str, user_id: str, state: FSMContext) -> None:
+    await state.clear()
+    with get_db() as db:
+        if not is_user_admin(db, user_id):
+            await safe_send_message(bot, chat_id, "⛔️ شما دسترسی به پنل مدیریت ندارید.")
+            return
+
+        is_super = settings.is_super_admin(user_id)
+        admin_group_ids = get_admin_group_ids(db, user_id)
+        if not is_super and not admin_group_ids:
+            await safe_send_message(bot, chat_id, "⛔️ شما به هیچ مجموعه‌ای دسترسی مدیریت ندارید.")
+            return
+
+        buttons = []
+        if is_super:
+            buttons.append([InlineKeyboardButton(text="🌍 کل کاربران سیستم", callback_data="admbc_target_all")])
+            buttons.append([InlineKeyboardButton(text="🏢 اعضای یک مجموعه خاص", callback_data="admbc_pick_group")])
+            buttons.append([InlineKeyboardButton(text="🏆 اعضای یک لیگ خاص", callback_data="admbc_pick_league")])
+        else:
+            if len(admin_group_ids) == 1:
+                g = db.query(Group).filter(Group.id == admin_group_ids[0]).first()
+                g_name = g.name if g else "مجموعه شما"
+                buttons.append([InlineKeyboardButton(text=f"🏢 کل اعضای {g_name}", callback_data=f"admbc_tgt_grp_{admin_group_ids[0]}")])
+                buttons.append([InlineKeyboardButton(text="🏆 اعضای یک لیگ از مجموعه", callback_data=f"admbc_pick_league_g_{admin_group_ids[0]}")])
+            else:
+                buttons.append([InlineKeyboardButton(text="🏢 اعضای یکی از مجموعه‌های شما", callback_data="admbc_pick_group")])
+                buttons.append([InlineKeyboardButton(text="🏆 اعضای یک لیگ از مجموعه‌های شما", callback_data="admbc_pick_league")])
+
+        buttons.append([InlineKeyboardButton(text="❌ انصراف", callback_data="fsm_cancel")])
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    txt = (
+        "📢 *ارسال پیام همگانی (اطلاعیه / انگیزشی)*\n"
+        "───────────────────\n"
+        "لطفاً جامعه مخاطبان پیام را انتخاب کنید:"
+    )
+    await safe_send_message(bot, chat_id, txt, reply_markup=kb)
+
+
+@admin_router.message(Command("broadcast"))
+@admin_router.message(Command("bc"))
+@admin_router.message(StateFilter(None), F.text.func(lambda t: bool(t) and t.strip().lower() in ("bc", "ارسال پیام همگانی")))
+async def cmd_broadcast(message: Message, state: FSMContext) -> None:
+    await _start_broadcast_flow(message.bot, message.chat.id, str(message.from_user.id), state)
+
+
+@admin_router.callback_query(F.data == "adm_menu_broadcast")
+async def cb_menu_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
+    await _start_broadcast_flow(callback.bot, callback.message.chat.id, str(callback.from_user.id), state)
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "admbc_target_all")
+async def cb_broadcast_target_all(callback: CallbackQuery, state: FSMContext) -> None:
+    user_id = str(callback.from_user.id)
+    if not settings.is_super_admin(user_id):
+        await callback.answer("⛔️ فقط مدیر ارشد می‌تواند به کل کاربران پیام ارسال کند.", show_alert=True)
+        return
+
+    with get_db() as db:
+        user_count = db.query(func.count(func.distinct(User.telegram_id))).filter(User.is_active == True).scalar() or 0
+
+    await state.update_data(
+        bc_target_type="all",
+        bc_target_id=None,
+        bc_target_label="کل کاربران سیستم",
+        bc_user_count=user_count,
+    )
+    await state.set_state(AdminStates.bc_waiting_text)
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        f"📢 جامعه هدف: *کل کاربران سیستم* (تعداد تقریبی: {user_count} نفر)\n\n"
+        "لطفاً *متن پیام همگانی* را ارسال کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data == "admbc_pick_group")
+async def cb_broadcast_pick_group(callback: CallbackQuery) -> None:
+    user_id = str(callback.from_user.id)
+    with get_db() as db:
+        is_super = settings.is_super_admin(user_id)
+        if is_super:
+            groups = db.query(Group).filter(Group.is_deleted == False).order_by(Group.id.asc()).all()
+        else:
+            g_ids = get_admin_group_ids(db, user_id)
+            groups = db.query(Group).filter(Group.id.in_(g_ids), Group.is_deleted == False).order_by(Group.id.asc()).all()
+
+        if not groups:
+            await callback.answer("مجموعه‌ای یافت نشد.", show_alert=True)
+            return
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=f"🏢 {g.name}", callback_data=f"admbc_tgt_grp_{g.id}")]
+                for g in groups
+            ] + [[InlineKeyboardButton(text="❌ انصراف", callback_data="fsm_cancel")]]
+        )
+
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        "🏢 لطفاً مجموعه موردنظر برای ارسال پیام را انتخاب کنید:",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admbc_tgt_grp_"))
+async def cb_broadcast_target_group(callback: CallbackQuery, state: FSMContext) -> None:
+    group_id = int(callback.data.replace("admbc_tgt_grp_", ""))
+    user_id = str(callback.from_user.id)
+    with get_db() as db:
+        if not is_user_admin(db, user_id, group_id):
+            await callback.answer("⛔️ شما به این مجموعه دسترسی ندارید.", show_alert=True)
+            return
+        g = db.query(Group).filter(Group.id == group_id).first()
+        g_name = g.name if g else f"مجموعه {group_id}"
+        user_count = (
+            db.query(func.count(func.distinct(User.telegram_id)))
+            .filter(User.group_id == group_id, User.is_active == True)
+            .scalar() or 0
+        )
+
+    await state.update_data(
+        bc_target_type="group",
+        bc_target_id=group_id,
+        bc_target_label=f"مجموعه «{g_name}»",
+        bc_user_count=user_count,
+    )
+    await state.set_state(AdminStates.bc_waiting_text)
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        f"📢 جامعه هدف: *مجموعه «{escape_md(g_name)}»* (تعداد تقریبی: {user_count} نفر)\n\n"
+        "لطفاً *متن پیام همگانی* را ارسال کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admbc_pick_league"))
+async def cb_broadcast_pick_league(callback: CallbackQuery) -> None:
+    user_id = str(callback.from_user.id)
+    data = callback.data
+    with get_db() as db:
+        is_super = settings.is_super_admin(user_id)
+        if data.startswith("admbc_pick_league_g_"):
+            spec_gid = int(data.replace("admbc_pick_league_g_", ""))
+            if not is_user_admin(db, user_id, spec_gid):
+                await callback.answer("عدم دسترسی", show_alert=True)
+                return
+            leagues = db.query(League).filter(League.group_id == spec_gid, League.is_deleted == False, League.is_active == True).all()
+        elif is_super:
+            leagues = db.query(League).filter(League.is_deleted == False, League.is_active == True).all()
+        else:
+            g_ids = get_admin_group_ids(db, user_id)
+            leagues = db.query(League).filter(League.group_id.in_(g_ids), League.is_deleted == False, League.is_active == True).all()
+
+        if not leagues:
+            await callback.answer("هیچ لیگ فعالی یافت نشد.", show_alert=True)
+            return
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=f"🏆 {lg.name}", callback_data=f"admbc_tgt_lg_{lg.id}")]
+                for lg in leagues
+            ] + [[InlineKeyboardButton(text="❌ انصراف", callback_data="fsm_cancel")]]
+        )
+
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        "🏆 لطفاً لیگ موردنظر برای ارسال پیام را انتخاب کنید:",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admbc_tgt_lg_"))
+async def cb_broadcast_target_league(callback: CallbackQuery, state: FSMContext) -> None:
+    league_id = callback.data.replace("admbc_tgt_lg_", "")
+    user_id = str(callback.from_user.id)
+    with get_db() as db:
+        lg = db.query(League).filter(League.id == league_id).first()
+        if not lg or not is_user_admin(db, user_id, lg.group_id):
+            await callback.answer("⛔️ شما به این لیگ دسترسی ندارید.", show_alert=True)
+            return
+        lg_name = lg.name
+        user_count = (
+            db.query(func.count(func.distinct(User.telegram_id)))
+            .filter(User.league_id == league_id, User.is_active == True)
+            .scalar() or 0
+        )
+
+    await state.update_data(
+        bc_target_type="league",
+        bc_target_id=league_id,
+        bc_target_label=f"لیگ «{lg_name}»",
+        bc_user_count=user_count,
+    )
+    await state.set_state(AdminStates.bc_waiting_text)
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        f"📢 جامعه هدف: *لیگ «{escape_md(lg_name)}»* (تعداد تقریبی: {user_count} نفر)\n\n"
+        "لطفاً *متن پیام همگانی* را ارسال کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+@admin_router.message(AdminStates.bc_waiting_text)
+async def process_broadcast_text(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if len(text) < 2:
+        await safe_reply(message, "❌ متن پیام باید حداقل ۲ کاراکتر باشد. لطفاً مجدداً وارد کنید:")
+        return
+
+    data = await state.get_data()
+    target_label = data.get("bc_target_label", "مخاطبان")
+    user_count = data.get("bc_user_count", 0)
+
+    await state.update_data(bc_message_text=text)
+
+    preview_text = (
+        f"📋 *پیش‌نمایش پیام همگانی*\n"
+        f"🎯 مخاطبان: *{escape_md(target_label)}*\n"
+        f"👥 تعداد گیرندگان: *{user_count} نفر*\n"
+        f"───────────────────\n"
+        f"{text}\n"
+        f"───────────────────\n"
+        f"⚠️ آیا از ارسال این پیام برای مخاطبان بالا اطمینان دارید؟"
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ بله، ارسال شود", callback_data="admbc_confirm_send"),
+                InlineKeyboardButton(text="❌ لغو", callback_data="fsm_cancel"),
+            ]
+        ]
+    )
+    await safe_reply(message, preview_text, reply_markup=kb)
+
+
+@admin_router.callback_query(F.data == "admbc_confirm_send")
+async def cb_broadcast_confirm_send(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    target_type = data.get("bc_target_type")
+    target_id = data.get("bc_target_id")
+    target_label = data.get("bc_target_label", "مخاطبان")
+    msg_text = data.get("bc_message_text", "")
+    admin_id = str(callback.from_user.id)
+
+    if not msg_text:
+        await callback.answer("متن پیام یافت نشد.", show_alert=True)
+        return
+
+    with get_db() as db:
+        is_super = settings.is_super_admin(admin_id)
+        if target_type == "all":
+            if not is_super:
+                await callback.answer("⛔️ فقط مدیر ارشد مجاز به ارسال به کل کاربران است.", show_alert=True)
+                return
+            recipients = [
+                str(r[0])
+                for r in db.query(func.distinct(User.telegram_id))
+                .filter(User.is_active == True)
+                .all()
+                if r[0]
+            ]
+        elif target_type == "group":
+            if not is_user_admin(db, admin_id, target_id):
+                await callback.answer("⛔️ عدم دسترسی به این مجموعه.", show_alert=True)
+                return
+            recipients = [
+                str(r[0])
+                for r in db.query(func.distinct(User.telegram_id))
+                .filter(User.group_id == target_id, User.is_active == True)
+                .all()
+                if r[0]
+            ]
+        elif target_type == "league":
+            lg = db.query(League).filter(League.id == target_id).first()
+            if not lg or not is_user_admin(db, admin_id, lg.group_id):
+                await callback.answer("⛔️ عدم دسترسی به این لیگ.", show_alert=True)
+                return
+            recipients = [
+                str(r[0])
+                for r in db.query(func.distinct(User.telegram_id))
+                .filter(User.league_id == target_id, User.is_active == True)
+                .all()
+                if r[0]
+            ]
+        else:
+            await callback.answer("نوع مخاطب نامعتبر است.", show_alert=True)
+            return
+
+    await state.clear()
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        f"⏳ در حال ارسال پیام به *{len(recipients)}* مخاطب در *{escape_md(target_label)}*...",
+    )
+    await callback.answer()
+
+    from handlers import dispatch_outbox, BroadcastThrottle
+    outbox = [(tg_id, msg_text, None) for tg_id in recipients]
+    sent_count = await dispatch_outbox(callback.bot, outbox, BroadcastThrottle())
+
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        f"✅ ارسال پیام همگانی پایان یافت.\n\n"
+        f"🎯 مخاطبان: *{escape_md(target_label)}*\n"
+        f"📨 ارسال موفق: *{sent_count}* از *{len(recipients)}*",
+    )
 
 
 @admin_router.message(Command("datetest"))

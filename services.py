@@ -17,7 +17,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session
 
 from config import settings
-from models import User, League, Cycle, ActivityLog, CycleResult, Group
+from models import User, League, Cycle, ActivityLog, CycleResult, Group, SystemState
 
 logger = logging.getLogger(__name__)
 
@@ -273,16 +273,23 @@ class DateService:
         return target_d.strftime("%Y-%m-%d")
 
     @classmethod
-    def user_joined_before_today(cls, user: User) -> bool:
-        """بررسی اینکه آیا تاریخ عضویت کاربر قبل از امروز (به وقت ایران) بوده است"""
+    def get_user_join_date(cls, user: User) -> date:
+        """محاسبه تاریخ عضویت کاربر به وقت ایران بر اساس created_at"""
         if not user.created_at:
-            return True
+            return cls.today_date()
         created_dt = user.created_at
         if created_dt.tzinfo is None:
             created_dt = created_dt.replace(tzinfo=timezone.utc).astimezone(IRAN_TZ)
         else:
             created_dt = created_dt.astimezone(IRAN_TZ)
-        return created_dt.date() < cls.today_date()
+        return created_dt.date()
+
+    @classmethod
+    def user_joined_before_today(cls, user: User) -> bool:
+        """بررسی اینکه آیا تاریخ عضویت کاربر قبل از امروز (به وقت ایران) بوده است"""
+        if not user.created_at:
+            return True
+        return cls.get_user_join_date(user) < cls.today_date()
 
 
 # ===========================================================================
@@ -648,7 +655,7 @@ class ReportService:
         cls._style_worksheet(ws, headers, rows, highlight_top3=True)
 
         if not output_path:
-            reports_dir = Path("./reports")
+            reports_dir = Path(settings.REPORTS_DIR)
             reports_dir.mkdir(parents=True, exist_ok=True)
             safe_name = cls._sanitize_filename(league_name)
             ts = DateService.now_iran().strftime("%Y%m%d_%H%M%S")
@@ -668,8 +675,8 @@ class ReportService:
         current_day: int = 1,
         league_floor: int = 10,
     ) -> str:
-        """۲. تولید فایل اکسل گزارش هفتگی جمعه"""
-        reports_dir = Path("./reports")
+        """۲. تولید فایل اکسل گزارش هفتگی جمعه (اسنپ‌شات وضعیت چله تا این هفته)"""
+        reports_dir = Path(settings.REPORTS_DIR)
         reports_dir.mkdir(parents=True, exist_ok=True)
         safe_name = cls._sanitize_filename(league_name)
         ts = DateService.now_iran().strftime("%Y%m%d_%H%M%S")
@@ -847,7 +854,7 @@ class ReportService:
             cls._style_worksheet(default_sheet, ["وضعیت"], [["هیچ چله‌ای یافت نشد"]], highlight_top3=False)
 
         if not output_path:
-            reports_dir = Path("./reports")
+            reports_dir = Path(settings.REPORTS_DIR)
             reports_dir.mkdir(parents=True, exist_ok=True)
             ts = DateService.now_iran().strftime("%Y%m%d_%H%M%S")
             uid_short = uuid.uuid4().hex[:6]
@@ -856,6 +863,36 @@ class ReportService:
         wb.save(output_path)
         wb.close()
         return output_path
+
+    @classmethod
+    def cleanup_old_reports(cls, max_age_hours: int = 24) -> int:
+        """
+        پاکسازی خودکار فایل‌های موقت باقیمانده (Orphaned files) در پوشه reports/
+        که عمر آن‌ها بیشتر از max_age_hours ساعت است.
+        """
+        reports_dir = Path(settings.REPORTS_DIR)
+        if not reports_dir.exists():
+            return 0
+
+        cutoff_ts = datetime.now().timestamp() - (max(1, int(max_age_hours)) * 3600)
+        removed_count = 0
+        for file_path in reports_dir.iterdir():
+            if not file_path.is_file():
+                continue
+            if file_path.suffix.lower() not in (".xlsx", ".xls", ".log", ".txt", ".tmp"):
+                continue
+            try:
+                if file_path.stat().st_mtime < cutoff_ts:
+                    file_path.unlink()
+                    removed_count += 1
+            except OSError as exc:
+                logger.warning(f"عدم امکان حذف فایل موقت قدیمی {file_path}: {exc}")
+
+        if removed_count > 0:
+            logger.info(
+                f"پاکسازی فایل‌های موقت: {removed_count} فایل قدیمی‌تر از {max_age_hours} ساعت از پوشه reports حذف شد."
+            )
+        return removed_count
 
 
 # ===========================================================================
@@ -1014,6 +1051,31 @@ class AbsenceService:
                 .filter(User.league_id == lg.id, User.is_active == True)
                 .all()
             )
+
+            # بارگذاری یکباره لاگهای معتبر چله فعال این لیگ (بهجای یک کوئری برای هر کاربر/روز)
+            logged_dates_by_user: Dict[str, set] = {}
+            logged_days_by_user: Dict[str, set] = {}
+            for l_uid, l_date, l_day in (
+                db.query(
+                    ActivityLog.user_id,
+                    ActivityLog.log_date,
+                    ActivityLog.league_day,
+                )
+                .filter(
+                    ActivityLog.league_id == lg.id,
+                    (ActivityLog.cycle_id == active_cycle.id)
+                    | (
+                        (ActivityLog.cycle_id == None)
+                        & (ActivityLog.cycle_number == lg.cycle_number)
+                    ),
+                    ActivityLog.minutes > 0,
+                )
+                .all()
+            ):
+                logged_dates_by_user.setdefault(l_uid, set()).add(l_date)
+                if l_day is not None:
+                    logged_days_by_user.setdefault(l_uid, set()).add(int(l_day))
+
             for dt_str in dates:
                 try:
                     target_date = datetime.strptime(dt_str[:10], "%Y-%m-%d").date()
@@ -1041,20 +1103,8 @@ class AbsenceService:
 
                     # آیا کاربر برای این روز یا این تاریخ در چله فعلی لاگ معتبری ثبت کرده است؟
                     has_log = (
-                        db.query(ActivityLog)
-                        .filter(
-                            ActivityLog.user_id == u.id,
-                            ActivityLog.league_id == lg.id,
-                            (ActivityLog.cycle_id == active_cycle.id)
-                            | (
-                                (ActivityLog.cycle_id == None)
-                                & (ActivityLog.cycle_number == lg.cycle_number)
-                            ),
-                            (ActivityLog.log_date == dt_str)
-                            | (ActivityLog.league_day == day_num),
-                            ActivityLog.minutes > 0,
-                        )
-                        .first()
+                        dt_str in logged_dates_by_user.get(u.id, ())
+                        or day_num in logged_days_by_user.get(u.id, ())
                     )
                     if not has_log:
                         from database import set_system_state
@@ -1065,7 +1115,9 @@ class AbsenceService:
                             u.absent_days_list = cls.format_days_list(absent_days)
                             u.no_study_days = len(absent_days)
                             u.streak = 0
-                            set_system_state(db, f"streak_offset_{u.id}", "0")
+                            set_system_state(
+                                db, f"streak_offset_{u.id}", "0", commit=False
+                            )
                             total_absences_recorded += 1
 
         db.commit()
@@ -1099,6 +1151,7 @@ class AbsenceService:
 
         league_cache: Dict[str, Optional[League]] = {}
         cycle_cache: Dict[str, Optional[Cycle]] = {}
+        league_logs_cache: Dict[str, Dict[str, List[Any]]] = {}
 
         for u in users_to_check:
             if not u.league_id:
@@ -1117,20 +1170,44 @@ class AbsenceService:
                 cycle_cache[lg.id] = get_or_create_active_cycle(db, lg)
             cyc = cycle_cache[lg.id]
 
-            logs = (
-                db.query(ActivityLog)
-                .filter(
-                    ActivityLog.user_id == u.id,
-                    ActivityLog.league_id == lg.id,
-                    (ActivityLog.cycle_id == cyc.id)
-                    | (
-                        (ActivityLog.cycle_id == None)
-                        & (ActivityLog.cycle_number == lg.cycle_number)
-                    ),
-                    ActivityLog.minutes > 0,
+            if user is None:
+                if lg.id not in league_logs_cache:
+                    grouped_logs: Dict[str, List[Any]] = {}
+                    for row in (
+                        db.query(
+                            ActivityLog.user_id,
+                            ActivityLog.log_date,
+                            ActivityLog.league_day,
+                        )
+                        .filter(
+                            ActivityLog.league_id == lg.id,
+                            (ActivityLog.cycle_id == cyc.id)
+                            | (
+                                (ActivityLog.cycle_id == None)
+                                & (ActivityLog.cycle_number == lg.cycle_number)
+                            ),
+                            ActivityLog.minutes > 0,
+                        )
+                        .all()
+                    ):
+                        grouped_logs.setdefault(row.user_id, []).append(row)
+                    league_logs_cache[lg.id] = grouped_logs
+                logs = league_logs_cache[lg.id].get(u.id, [])
+            else:
+                logs = (
+                    db.query(ActivityLog)
+                    .filter(
+                        ActivityLog.user_id == u.id,
+                        ActivityLog.league_id == lg.id,
+                        (ActivityLog.cycle_id == cyc.id)
+                        | (
+                            (ActivityLog.cycle_id == None)
+                            & (ActivityLog.cycle_number == lg.cycle_number)
+                        ),
+                        ActivityLog.minutes > 0,
+                    )
+                    .all()
                 )
-                .all()
-            )
 
             logged_days = set()
             start_d = DateService.shamsi_to_date(cyc.start_shamsi or lg.start_shamsi)
@@ -1165,25 +1242,27 @@ class AbsenceService:
         u: User,
         lg: League,
         cyc: Cycle,
+        logs: Optional[List[Any]] = None,
     ) -> int:
         """محاسبه زنجیره خام صرفاً بر اساس پیوستگی لاگ‌های ثبت‌شده در چله فعال"""
         today_str = DateService.today_str()
         yesterday_str = DateService.yesterday_str()
 
-        logs = (
-            db.query(ActivityLog)
-            .filter(
-                ActivityLog.user_id == u.id,
-                ActivityLog.league_id == lg.id,
-                (ActivityLog.cycle_id == cyc.id)
-                | (
-                    (ActivityLog.cycle_id == None)
-                    & (ActivityLog.cycle_number == lg.cycle_number)
-                ),
-                ActivityLog.minutes > 0,
+        if logs is None:
+            logs = (
+                db.query(ActivityLog)
+                .filter(
+                    ActivityLog.user_id == u.id,
+                    ActivityLog.league_id == lg.id,
+                    (ActivityLog.cycle_id == cyc.id)
+                    | (
+                        (ActivityLog.cycle_id == None)
+                        & (ActivityLog.cycle_number == lg.cycle_number)
+                    ),
+                    ActivityLog.minutes > 0,
+                )
+                .all()
             )
-            .all()
-        )
 
         start_d = DateService.shamsi_to_date(cyc.start_shamsi or lg.start_shamsi)
         end_d = (start_d + timedelta(days=settings.LEAGUE_DURATION - 1)) if start_d else None
@@ -1272,22 +1351,69 @@ class AbsenceService:
             users_to_check = db.query(User).filter(User.is_active == True, User.league_id.isnot(None)).all()
 
         last_streak = 0
+        league_cache: Dict[str, Optional[League]] = {}
+        cycle_cache: Dict[str, Cycle] = {}
+        logs_cache: Dict[str, Dict[str, List[Any]]] = {}
+        offsets_cache: Optional[Dict[str, str]] = None
+        if user is None:
+            prefix = "streak_offset_"
+            offsets_cache = {
+                k[len(prefix):]: (v or "0")
+                for k, v in db.query(SystemState.key, SystemState.value)
+                .filter(SystemState.key.startswith(prefix, autoescape=True))
+                .all()
+            }
 
         for u in users_to_check:
             if not u.league_id:
                 continue
-            lg = (
-                league
-                if (league and league.id == u.league_id)
-                else db.query(League).filter(League.id == u.league_id).first()
-            )
+            if league and league.id == u.league_id:
+                lg = league
+            else:
+                if u.league_id not in league_cache:
+                    league_cache[u.league_id] = (
+                        db.query(League).filter(League.id == u.league_id).first()
+                    )
+                lg = league_cache[u.league_id]
             if not lg or lg.is_deleted:
                 continue
 
-            cyc = get_or_create_active_cycle(db, lg)
-            raw_streak = cls._compute_raw_streak_from_logs(db, u, lg, cyc)
+            if lg.id not in cycle_cache:
+                cycle_cache[lg.id] = get_or_create_active_cycle(db, lg)
+            cyc = cycle_cache[lg.id]
 
-            raw_offset_str = get_system_state(db, f"streak_offset_{u.id}", "0")
+            if user is None:
+                if lg.id not in logs_cache:
+                    grouped_logs: Dict[str, List[Any]] = {}
+                    for row in (
+                        db.query(
+                            ActivityLog.user_id,
+                            ActivityLog.log_date,
+                            ActivityLog.league_day,
+                        )
+                        .filter(
+                            ActivityLog.league_id == lg.id,
+                            (ActivityLog.cycle_id == cyc.id)
+                            | (
+                                (ActivityLog.cycle_id == None)
+                                & (ActivityLog.cycle_number == lg.cycle_number)
+                            ),
+                            ActivityLog.minutes > 0,
+                        )
+                        .all()
+                    ):
+                        grouped_logs.setdefault(row.user_id, []).append(row)
+                    logs_cache[lg.id] = grouped_logs
+                raw_streak = cls._compute_raw_streak_from_logs(
+                    db, u, lg, cyc, logs=logs_cache[lg.id].get(u.id, [])
+                )
+            else:
+                raw_streak = cls._compute_raw_streak_from_logs(db, u, lg, cyc)
+
+            if offsets_cache is not None:
+                raw_offset_str = offsets_cache.get(u.id, "0")
+            else:
+                raw_offset_str = get_system_state(db, f"streak_offset_{u.id}", "0")
             try:
                 offset = int(raw_offset_str or "0")
             except ValueError:
@@ -1304,7 +1430,9 @@ class AbsenceService:
                 else:
                     u.streak = 0
                     if offset != 0:
-                        set_system_state(db, f"streak_offset_{u.id}", "0")
+                        set_system_state(
+                            db, f"streak_offset_{u.id}", "0", commit=False
+                        )
             else:
                 u.streak = max(0, raw_streak + offset)
 

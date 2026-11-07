@@ -1,12 +1,13 @@
 import os
 import shutil
 import sqlite3
+import asyncio
 import logging
 import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 from contextlib import contextmanager
-from typing import Generator, Optional, List
+from typing import Generator, Optional, List, Callable, TypeVar, Any
 
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import make_url
@@ -14,6 +15,8 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 
 from config import settings
+
+T = TypeVar("T")
 from models import (
     Base,
     Group,
@@ -73,6 +76,16 @@ def get_db() -> Generator[Session, None, None]:
         raise
     finally:
         db.close()
+
+
+def _run_sync_db_callable(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    with get_db() as db:
+        return func(db, *args, **kwargs)
+
+
+async def run_db(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """اجرای غیرمسدودکننده عملیات دیتابیس در ترد مجزا با asyncio.to_thread"""
+    return await asyncio.to_thread(_run_sync_db_callable, func, *args, **kwargs)
 
 
 def _backup_postgres() -> Optional[str]:
@@ -141,7 +154,7 @@ def backup_database() -> Optional[str]:
     if not db_path.exists() or db_path.stat().st_size == 0:
         return None
 
-    backup_dir = Path("./backups")
+    backup_dir = Path(settings.BACKUP_DIR)
     backup_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -446,8 +459,8 @@ def get_system_state(db: Session, key: str, default: Optional[str] = None) -> Op
     return default
 
 
-def set_system_state(db: Session, key: str, value: str) -> None:
-    """ذخیره یا به‌روزرسانی یک کلید در جدول SystemState"""
+def set_system_state(db: Session, key: str, value: str, commit: bool = True) -> None:
+    """ذخیره یا به‌روزرسانی یک کلید در جدول SystemState (با commit=False فقط flush می‌شود)"""
     record = db.query(SystemState).filter(SystemState.key == key).first()
     if record:
         record.value = str(value)
@@ -455,7 +468,10 @@ def set_system_state(db: Session, key: str, value: str) -> None:
     else:
         record = SystemState(key=key, value=str(value))
         db.add(record)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
 
 
 def get_user_profiles(db: Session, telegram_id: str | int, only_active: bool = True) -> List[User]:

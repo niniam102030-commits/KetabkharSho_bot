@@ -17,6 +17,8 @@ env/
 data/
 backups/
 code_backups/
+reports/
+*.xlsx
 
 # Logs
 logs/

@@ -32,7 +32,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 
-from config import settings
+from config import Config, settings
 from database import (
     init_db,
     get_db,
@@ -80,6 +80,14 @@ from admin_handlers import (
     cb_em_edit_msg,
     process_em_new_msg,
     cb_execute_user_add_second_league,
+    cb_user_edit_name,
+    process_user_new_name,
+    cmd_broadcast,
+    cb_broadcast_target_all,
+    cb_broadcast_target_group,
+    cb_broadcast_target_league,
+    process_broadcast_text,
+    cb_broadcast_confirm_send,
 )
 from handlers import (
     user_router,
@@ -226,6 +234,34 @@ async def run_all_tests() -> None:
     # -----------------------------------------------------------------------
     # سناریو ۱: راه‌اندازی اولیه (init_db)، ساخت گروه پیش‌فرض ۱ با رمز 1234 و ثبت سوپرادمین‌ها
     # -----------------------------------------------------------------------
+    # اعتبارسنجی تطابق متغیرهای محیطی با کلاس تنظیمات (BALE_API_URL, CYCLE_DAYS, DEFAULT_LEAGUE_FLOOR, REPORTS_DIR)
+    old_env = os.environ.copy()
+    try:
+        os.environ["BALE_API_URL"] = "https://custom-bale.example.com"
+        os.environ.pop("API_URL", None)
+        os.environ["CYCLE_DAYS"] = "50"
+        os.environ.pop("LEAGUE_DURATION", None)
+        os.environ["DEFAULT_LEAGUE_FLOOR"] = "25"
+        os.environ.pop("DEFAULT_FLOOR", None)
+        os.environ["REPORTS_DIR"] = "./custom_reports"
+
+        custom_cfg = Config()
+        assert custom_cfg.API_URL == "https://custom-bale.example.com"
+        assert custom_cfg.BALE_API_URL == "https://custom-bale.example.com"
+        assert custom_cfg.LEAGUE_DURATION == 50
+        assert custom_cfg.CYCLE_DAYS == 50
+        assert custom_cfg.DEFAULT_FLOOR == 25
+        assert custom_cfg.DEFAULT_LEAGUE_FLOOR == 25
+        assert custom_cfg.REPORTS_DIR == "./custom_reports"
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
+        if os.path.exists("./custom_reports"):
+            try:
+                os.rmdir("./custom_reports")
+            except OSError:
+                pass
+
     init_db()
     with get_db() as db:
         g1 = db.query(Group).filter(Group.id == 1).first()
@@ -269,26 +305,26 @@ async def run_all_tests() -> None:
     await process_cg_name(MockMessage(bot, SUPER_ADMIN_ID, "مجموعه فرهیختگان"), sa_fsm)
     assert await sa_fsm.get_state() == AdminStates.cg_waiting_password
 
-    # تست رد شدن رمز تکراری 1234
+    # تست رد شدن رمز کوتاه (کمتر از ۶ رقم)
     await process_cg_password(MockMessage(bot, SUPER_ADMIN_ID, "1234"), sa_fsm)
     assert await sa_fsm.get_state() == AdminStates.cg_waiting_password
-    assert "قبلاً" in bot.sent_messages[-1]["text"] or "از قبل" in bot.sent_messages[-1]["text"]
+    assert "۶" in bot.sent_messages[-1]["text"]
 
-    # ثبت رمز یکتا 5678
-    await process_cg_password(MockMessage(bot, SUPER_ADMIN_ID, "5678"), sa_fsm)
+    # ثبت رمز معتبر ۶ رقمی
+    await process_cg_password(MockMessage(bot, SUPER_ADMIN_ID, "567890"), sa_fsm)
     assert await sa_fsm.get_state() is None
 
     with get_db() as db:
         g2 = db.query(Group).filter(Group.id == 2).first()
-        assert g2 is not None and g2.password == "5678" and g2.name == "مجموعه فرهیختگان"
+        assert g2 is not None and g2.password == "567890" and g2.name == "مجموعه فرهیختگان"
 
     # تغییر رمز با pg به 9876 و برگشت به 5678
     await cb_select_group_for_password(MockCallbackQuery(bot, SUPER_ADMIN_ID, "adm_pwgrp_2"), sa_fsm)
-    await process_pg_new_password(MockMessage(bot, SUPER_ADMIN_ID, "9876"), sa_fsm)
+    await process_pg_new_password(MockMessage(bot, SUPER_ADMIN_ID, "987654"), sa_fsm)
     with get_db() as db:
-        assert db.query(Group).filter(Group.id == 2).first().password == "9876"
+        assert db.query(Group).filter(Group.id == 2).first().password == "987654"
     await cb_select_group_for_password(MockCallbackQuery(bot, SUPER_ADMIN_ID, "adm_pwgrp_2"), sa_fsm)
-    await process_pg_new_password(MockMessage(bot, SUPER_ADMIN_ID, "5678"), sa_fsm)
+    await process_pg_new_password(MockMessage(bot, SUPER_ADMIN_ID, "567890"), sa_fsm)
 
     # تغییر نام با ng
     await cb_select_group_for_name(MockCallbackQuery(bot, SUPER_ADMIN_ID, "adm_nggrp_2"), sa_fsm)
@@ -482,6 +518,59 @@ async def run_all_tests() -> None:
     with get_db() as db:
         assert get_active_user(db, USER_1_ID).id == str(USER_1_ID)
 
+    # تست تغییر نام کاربر توسط ادمین و یکپارچگی نام در تمام پروفایل‌های موازی کاربر
+    ga_fsm = make_fsm(storage, bot.id, GROUP_ADMIN_ID)
+    await cb_user_edit_name(MockCallbackQuery(bot, GROUP_ADMIN_ID, f"adm_editname_{USER_1_ID}"), ga_fsm)
+    await process_user_new_name(MockMessage(bot, GROUP_ADMIN_ID, "سید علی حسینی"), ga_fsm)
+    with get_db() as db:
+        profs = get_user_profiles(db, USER_1_ID, only_active=True)
+        assert len(profs) == 2
+        for p in profs:
+            assert p.name == "سید علی حسینی", f"نام پروفایل {p.id} یکپارچه نشد: {p.name}"
+            assert p.first_name == "سید"
+            assert p.last_name == "علی حسینی"
+
+    # تست ثبت‌نام مجدد کاربر با نام جدید و یکپارچگی نام در تمام پروفایل‌های موازی کاربر
+    await start_registration_or_new_group(MockMessage(bot, USER_1_ID, "🚀 شروع ثبت نام"), u1_fsm)
+    await process_group_password(MockMessage(bot, USER_1_ID, "۱۲۳۴"), u1_fsm)
+    await process_register_first_name(MockMessage(bot, USER_1_ID, "مهدی"), u1_fsm)
+    await process_register_last_name(MockMessage(bot, USER_1_ID, "کرمی"), u1_fsm)
+    with get_db() as db:
+        profs = get_user_profiles(db, USER_1_ID, only_active=True)
+        assert len(profs) == 2
+        for p in profs:
+            assert p.name == "مهدی کرمی", f"نام پروفایل {p.id} در ثبت‌نام مجدد یکپارچه نشد: {p.name}"
+            assert p.first_name == "مهدی"
+            assert p.last_name == "کرمی"
+
+    # تست اصلاح امتیاز هدیه همگام‌سازی کاربر با تغییر تاریخ شروع لیگ توسط ادمین
+    with get_db() as db:
+        u1_rec = db.query(User).filter(User.id == str(USER_1_ID)).first()
+        pts_before = u1_rec.points  # 47.5 (عضویت در ۳ روز قبل: ۱۰ هدیه + ۳۷.۵ مطالعه)
+
+    # الف) جلو بردن تاریخ شروع لیگ ۱ به ۲ روز قبل (عضویت کاربر در ۳ روز قبل قبل از شروع لیگ می‌افتد -> روز ۱ -> هدیه از ۱۰ به ۰ کاهش می‌یابد: ۳۷.۵)
+    two_days_ago_shamsi = DateService.date_to_shamsi(DateService.today_date() - timedelta(days=2))
+    await cb_league_edit_date(MockCallbackQuery(bot, GROUP_ADMIN_ID, f"leagedit_date_{lg1_id}"), ga_fsm)
+    await process_league_new_date(MockMessage(bot, GROUP_ADMIN_ID, two_days_ago_shamsi), ga_fsm)
+    with get_db() as db:
+        u1_rec = db.query(User).filter(User.id == str(USER_1_ID)).first()
+        assert u1_rec.points == pts_before - 10.0, f"امتیاز هدیه پس از جلو بردن تاریخ اصلاح نشد: {u1_rec.points}"
+
+    # ب) عقب بردن تاریخ شروع لیگ ۱ به ۵ روز قبل (عضویت در ۳ روز قبل -> روز ۳ لیگ -> هدیه ۲۰: امتیاز = ۳۷.۵ + ۲۰ = ۵۷.۵)
+    five_days_ago_shamsi = DateService.date_to_shamsi(DateService.today_date() - timedelta(days=5))
+    await cb_league_edit_date(MockCallbackQuery(bot, GROUP_ADMIN_ID, f"leagedit_date_{lg1_id}"), ga_fsm)
+    await process_league_new_date(MockMessage(bot, GROUP_ADMIN_ID, five_days_ago_shamsi), ga_fsm)
+    with get_db() as db:
+        u1_rec = db.query(User).filter(User.id == str(USER_1_ID)).first()
+        assert u1_rec.points == pts_before + 10.0, f"امتیاز هدیه پس از عقب بردن تاریخ اصلاح نشد: {u1_rec.points}"
+
+    # ج) بازگرداندن تاریخ شروع لیگ ۱ به ۴ روز قبل (روز جاری = ۵، روز عضویت = ۲ -> هدیه ۱۰، بازگشت به ۴۷.۵)
+    await cb_league_edit_date(MockCallbackQuery(bot, GROUP_ADMIN_ID, f"leagedit_date_{lg1_id}"), ga_fsm)
+    await process_league_new_date(MockMessage(bot, GROUP_ADMIN_ID, four_days_ago_shamsi), ga_fsm)
+    with get_db() as db:
+        u1_rec = db.query(User).filter(User.id == str(USER_1_ID)).first()
+        assert u1_rec.points == pts_before, f"امتیاز هدیه پس از بازگرداندن تاریخ بازنشانی نشد: {u1_rec.points}"
+
     # صفر کردن ثبت امروز هر دو پروفایل برای تست تجمیع یادآوری شبانه
     with get_db() as db:
         for p in get_user_profiles(db, USER_1_ID, only_active=True):
@@ -495,6 +584,41 @@ async def run_all_tests() -> None:
     assert len(new_msgs) == 1, "یادآوری شبانه باید در یک پیام واحد تجمیع شود"
     assert "لیگ ستارگان" in new_msgs[0]["text"] and "لیگ نخبگان" in new_msgs[0]["text"]
     print("✅ [PASS] Scenario 8: Multi-profile creation, profile switching, and aggregated night reminders verified.")
+
+    # -----------------------------------------------------------------------
+    # سناریو ۸.۵: ارسال پیام همگانی (Broadcast) توسط ادمین و تفکیک دسترسی سوپرادمین
+    # -----------------------------------------------------------------------
+    # ۱. عدم دسترسی ادمین معمولی به ارسال سراسری (کل سیستم)
+    await cb_broadcast_target_all(MockCallbackQuery(bot, GROUP_ADMIN_ID, "admbc_target_all"), ga_fsm)
+    assert await ga_fsm.get_state() is None
+
+    # ۲. ارسال پیام همگانی توسط ادمین مجموعه به کل اعضای مجموعه ۱
+    await cb_broadcast_target_group(MockCallbackQuery(bot, GROUP_ADMIN_ID, "admbc_tgt_grp_1"), ga_fsm)
+    assert await ga_fsm.get_state() == AdminStates.bc_waiting_text
+    await process_broadcast_text(MockMessage(bot, GROUP_ADMIN_ID, "📢 اطلاعیه مهم برای تمام اعضای مجموعه ۱"), ga_fsm)
+    bc_before = len(bot.sent_messages)
+    await cb_broadcast_confirm_send(MockCallbackQuery(bot, GROUP_ADMIN_ID, "admbc_confirm_send"), ga_fsm)
+    bc_msgs = [m for m in bot.sent_messages[bc_before:] if m["chat_id"] == str(USER_1_ID)]
+    assert len(bc_msgs) >= 1 and "📢 اطلاعیه مهم برای تمام اعضای مجموعه ۱" in bc_msgs[0]["text"]
+
+    # ۳. ارسال پیام همگانی توسط ادمین به یک لیگ خاص (لیگ ۱)
+    await cb_broadcast_target_league(MockCallbackQuery(bot, GROUP_ADMIN_ID, f"admbc_tgt_lg_{lg1_id}"), ga_fsm)
+    await process_broadcast_text(MockMessage(bot, GROUP_ADMIN_ID, "🏆 پیام انگیزشی اعضای لیگ ستارگان"), ga_fsm)
+    bc_before = len(bot.sent_messages)
+    await cb_broadcast_confirm_send(MockCallbackQuery(bot, GROUP_ADMIN_ID, "admbc_confirm_send"), ga_fsm)
+    bc_msgs = [m for m in bot.sent_messages[bc_before:] if m["chat_id"] == str(USER_1_ID)]
+    assert len(bc_msgs) >= 1 and "🏆 پیام انگیزشی اعضای لیگ ستارگان" in bc_msgs[0]["text"]
+
+    # ۴. ارسال پیام سراسری به کل کاربران سیستم توسط سوپرادمین
+    sa_fsm = make_fsm(storage, bot.id, SUPER_ADMIN_ID)
+    await cb_broadcast_target_all(MockCallbackQuery(bot, SUPER_ADMIN_ID, "admbc_target_all"), sa_fsm)
+    assert await sa_fsm.get_state() == AdminStates.bc_waiting_text
+    await process_broadcast_text(MockMessage(bot, SUPER_ADMIN_ID, "🌍 پیام سراسری سوپرادمین برای کل کاربران"), sa_fsm)
+    bc_before = len(bot.sent_messages)
+    await cb_broadcast_confirm_send(MockCallbackQuery(bot, SUPER_ADMIN_ID, "admbc_confirm_send"), sa_fsm)
+    bc_msgs = [m for m in bot.sent_messages[bc_before:] if m["chat_id"] == str(USER_1_ID)]
+    assert len(bc_msgs) >= 1 and "🌍 پیام سراسری سوپرادمین برای کل کاربران" in bc_msgs[0]["text"]
+    print("✅ [PASS] Scenario 8.5: Broadcast flow with strict superadmin vs group admin permissions verified.")
 
     # -----------------------------------------------------------------------
     # سناریو ۹: تست تولید هر ۳ نوع فایل اکسل و اعتبارسنجی با openpyxl
@@ -609,4 +733,18 @@ async def run_all_tests() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run_all_tests())
+    try:
+        asyncio.run(run_all_tests())
+    finally:
+        # پاکسازی خودکار دیتابیس و دایرکتوری موقت تست
+        from database import engine
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+        if os.path.exists(TEMP_DB_DIR):
+            try:
+                import shutil
+                shutil.rmtree(TEMP_DB_DIR, ignore_errors=True)
+            except Exception:
+                pass

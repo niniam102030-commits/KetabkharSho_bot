@@ -141,7 +141,11 @@ def get_admin_main_inline_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="📊 مشاهده جداول لیگ‌ها",
                     callback_data="adm_viewleagues_select",
-                )
+                ),
+                InlineKeyboardButton(
+                    text="🔍 جستجوی کاربر",
+                    callback_data="adm_menu_search_user",
+                ),
             ],
             [
                 InlineKeyboardButton(
@@ -165,9 +169,13 @@ def get_admin_main_inline_menu() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="📢 ارسال پیام همگانی",
+                    callback_data="adm_menu_broadcast",
+                ),
+                InlineKeyboardButton(
                     text="📥 دریافت خروجی اکسل",
                     callback_data="adm_menu_excel",
-                )
+                ),
             ],
         ]
     )
