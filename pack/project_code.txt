@@ -53,6 +53,7 @@ main.py
 message_service.py
 models.py
 requirements.txt
+run_bot.bat
 run_tests.py
 scheduler.py
 services.py
@@ -61,6 +62,59 @@ weekly_report.py
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="run_bot.bat">
+@echo off
+chcp 65001 >nul
+title KetabKharsho Bot Runner
+
+echo ======================================================
+echo    KetabKharsho Bot - Starter Script
+echo ======================================================
+echo.
+
+cd /d "%~dp0"
+
+echo [1/3] Dar hale barresi mohite majazi (venv)...
+if exist ".venv\Scripts\python.exe" (
+    set "PYTHON_EXE=.venv\Scripts\python.exe"
+    echo [+] Mohite majazi .venv peyda shod va faal shod.
+) else (
+    set "PYTHON_EXE=python"
+    echo [!] Mohite majazi .venv yaft nashod. Az python pishfarze system estefadeh mishavad.
+)
+
+echo.
+echo [2/3] Dar hale barresi file .env va niazmandiha...
+if not exist ".env" (
+    echo [WARNING] File .env vojood nadarad! Lotfan ghabl az ejra .env ra tanzim konid.
+)
+
+echo.
+echo [3/3] Dar hale ejraye robat (main.py)...
+echo ======================================================
+echo [INFO] Robat ba movafaghiat start shod.
+echo [INFO] Baraye tavaghofe robat Dokmeye Ctrl + C ra feshar dahid.
+echo ======================================================
+echo.
+
+"%PYTHON_EXE%" main.py
+
+if %ERRORLEVEL% neq 0 (
+    echo.
+    echo ======================================================
+    echo [ERROR] Robat ba khata motavaghef shod (Error code: %ERRORLEVEL%)!
+    echo ======================================================
+) else (
+    echo.
+    echo ======================================================
+    echo [INFO] Robat ba movafaghiat baste shod.
+    echo ======================================================
+)
+
+echo.
+pause
+</file>
 
 <file path=".env.example">
 # توکن بازوی پیام‌رسان بله (دریافتی از @BotFather در بله)
@@ -117,6 +171,10 @@ logs/
 # Temporary fix files
 AAAFIX*.py
 
+# Graphify cache
+graphify-out/cache/
+*.tmp
+
 # IDE & OS files
 .idea/
 .vscode/
@@ -125,10 +183,13 @@ Thumbs.db
 
 <file path="admin_handlers.py">
 import os
+import asyncio
 import logging
-from typing import List, Optional, Dict
+from datetime import datetime, timezone
+from typing import List, Optional, Dict, Any
 
 from aiogram import Router, F, Bot
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -151,6 +212,8 @@ from database import (
     get_or_create_active_cycle,
     generate_new_profile_id,
     set_active_user_id,
+    set_system_state,
+    get_active_user,
 )
 from models import (
     Group,
@@ -175,7 +238,11 @@ from message_service import (
     DEFAULT_MESSAGES,
     MESSAGE_LABELS,
 )
-from keyboards import get_admin_main_inline_menu
+from keyboards import (
+    get_admin_main_inline_menu,
+    get_inline_cancel_keyboard,
+    CANCEL_TEXTS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +290,7 @@ async def safe_send_message(
     reply_markup=None,
     parse_mode: Optional[str] = "Markdown",
 ) -> Optional[Message]:
-    """ارسال ایمن پیام با قابلیت Fallback بدون parse_mode در صورت خطای فرمت"""
+    """ارسال ایمن پیام با مدیریت FloodWait و قابلیت Fallback بدون parse_mode در صورت خطای فرمت"""
     try:
         return await bot.send_message(
             chat_id=chat_id,
@@ -231,6 +298,29 @@ async def safe_send_message(
             reply_markup=reply_markup,
             parse_mode=parse_mode,
         )
+    except TelegramRetryAfter as exc:
+        await asyncio.sleep(min(exc.retry_after, 30))
+        try:
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+        except Exception as retry_exc:
+            logger.warning(f"خطا پس از انتظار FloodWait در ارسال به {chat_id}: {retry_exc}")
+            return None
+    except TelegramBadRequest:
+        try:
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=None,
+            )
+        except Exception as exc:
+            logger.warning(f"خطا در ارسال پیام بدون فرمت به {chat_id}: {exc}")
+            return None
     except Exception:
         try:
             return await bot.send_message(
@@ -250,11 +340,28 @@ async def safe_reply(
     reply_markup=None,
     parse_mode: Optional[str] = "Markdown",
 ) -> Optional[Message]:
-    """پاسخ ایمن به پیام کاربر/ادمین با مدیریت خطای Markdown"""
+    """پاسخ ایمن به پیام کاربر/ادمین با مدیریت FloodWait و خطای Markdown"""
     try:
         return await message.answer(
             text=text, reply_markup=reply_markup, parse_mode=parse_mode
         )
+    except TelegramRetryAfter as exc:
+        await asyncio.sleep(min(exc.retry_after, 30))
+        try:
+            return await message.answer(
+                text=text, reply_markup=reply_markup, parse_mode=parse_mode
+            )
+        except Exception as retry_exc:
+            logger.warning(f"خطا پس از انتظار FloodWait در پاسخ به پیام: {retry_exc}")
+            return None
+    except TelegramBadRequest:
+        try:
+            return await message.answer(
+                text=text, reply_markup=reply_markup, parse_mode=None
+            )
+        except Exception as exc:
+            logger.warning(f"خطا در پاسخ بدون فرمت به پیام: {exc}")
+            return None
     except Exception:
         try:
             return await message.answer(
@@ -512,6 +619,102 @@ def _get_em_msgs_keyboard(group_id: int) -> InlineKeyboardMarkup:
 
 
 # ===========================================================================
+# هندلر عمومی لغو (Global FSM Cancel) و بازگشت به مرحله قبل
+# توجه: این هندلرها باید قبل از هندلرهای استیتدار ثبت شوند و admin_router در main.py اول include میشود.
+# ===========================================================================
+async def _cancel_flow(
+    bot: Bot, chat_id: int | str, tg_id: str, state: FSMContext, was_admin_flow: bool
+) -> None:
+    """پاکسازی ایمن FSM و بازگشت به منوی مناسب (بدون باقی ماندن داده نیمه‌کاره)"""
+    from database import get_active_user
+    from handlers import build_user_main_menu
+    from keyboards import get_start_menu
+
+    await state.clear()
+    with get_db() as db:
+        user = get_active_user(db, tg_id)
+        has_profile = bool(user and user.is_active)
+        is_adm = is_user_admin(db, tg_id)
+        if has_profile:
+            kb = build_user_main_menu(db, tg_id, user)
+        elif is_adm:
+            kb = build_user_main_menu(db, tg_id, None)
+        else:
+            kb = get_start_menu()
+
+    await safe_send_message(
+        bot,
+        chat_id,
+        "✅ عملیات لغو شد و اطلاعات نیمه‌کاره پاک گردید.\n🏠 بازگشت به منوی اصلی.",
+        reply_markup=kb,
+        parse_mode=None,
+    )
+    if was_admin_flow and is_adm:
+        await safe_send_message(
+            bot,
+            chat_id,
+            _build_admin_help_text(settings.is_super_admin(tg_id)),
+            reply_markup=get_admin_main_inline_menu(),
+        )
+
+
+@admin_router.message(F.text.func(lambda t: bool(t) and t.strip() in CANCEL_TEXTS))
+@admin_router.message(Command("cancel"))
+async def global_cancel_message(message: Message, state: FSMContext) -> None:
+    current = await state.get_state()
+    was_admin = bool(current and current.startswith("AdminStates:"))
+    await _cancel_flow(
+        message.bot, message.chat.id, str(message.from_user.id), state, was_admin
+    )
+
+
+@admin_router.callback_query(F.data == "fsm_cancel")
+async def global_cancel_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    current = await state.get_state()
+    was_admin = bool(current and current.startswith("AdminStates:"))
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await _cancel_flow(
+        callback.bot,
+        callback.message.chat.id,
+        str(callback.from_user.id),
+        state,
+        was_admin,
+    )
+    await callback.answer("لغو شد.")
+
+
+@admin_router.callback_query(F.data == "fsm_back")
+async def global_back_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    current = await state.get_state()
+    chat_id = callback.message.chat.id
+    if current == AdminStates.cg_waiting_password.state:
+        await state.set_state(AdminStates.cg_waiting_name)
+        await safe_send_message(
+            callback.bot,
+            chat_id,
+            "🏢 لطفاً *نام مجموعه جدید* را وارد کنید:",
+            reply_markup=get_inline_cancel_keyboard(),
+        )
+    elif current == AdminStates.al_waiting_floor.state:
+        await state.set_state(AdminStates.al_waiting_name)
+        await safe_send_message(
+            callback.bot,
+            chat_id,
+            "➕ لطفاً *نام لیگ جدید* را وارد کنید:",
+            reply_markup=get_inline_cancel_keyboard(),
+        )
+    else:
+        await callback.answer(
+            "مرحله قبلی وجود ندارد؛ از «❌ لغو عملیات» استفاده کنید.", show_alert=True
+        )
+        return
+    await callback.answer()
+
+
+# ===========================================================================
 # ۷.۱. منوی مدیریت ادمین
 # ===========================================================================
 @admin_router.message(F.text == "⚙️ منوی مدیریت ادمین")
@@ -553,7 +756,11 @@ async def cmd_create_group(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     await state.set_state(AdminStates.cg_waiting_name)
-    await safe_reply(message, "🏢 لطفاً *نام مجموعه جدید* را وارد کنید:")
+    await safe_reply(
+        message,
+        "🏢 لطفاً *نام مجموعه جدید* را وارد کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
+    )
 
 
 @admin_router.message(AdminStates.cg_waiting_name)
@@ -569,6 +776,7 @@ async def process_cg_name(message: Message, state: FSMContext) -> None:
         message,
         f"🔑 نام مجموعه: *{escape_md(name)}*\n\n"
         "حالا *رمز ورود مجموعه* (یک عدد ۴ تا ۸ رقمی یکتا) را وارد کنید:",
+        reply_markup=get_inline_cancel_keyboard(show_back=True),
     )
 
 
@@ -661,6 +869,7 @@ async def cmd_change_group_password(message: Message, state: FSMContext) -> None
                 message,
                 f"🔑 تغییر رمز مجموعه *{escape_md(g.name)}* (رمز فعلی: `{g.password}`)\n\n"
                 "لطفاً رمز جدید (عدد ۴ تا ۸ رقمی) را وارد کنید:",
+                reply_markup=get_inline_cancel_keyboard(),
             )
             return
 
@@ -699,6 +908,7 @@ async def cb_select_group_for_password(callback: CallbackQuery, state: FSMContex
         callback.message.chat.id,
         f"🔑 تغییر رمز مجموعه *{escape_md(g_name)}* (رمز فعلی: `{g_pwd}`)\n\n"
         "لطفاً رمز جدید (عدد ۴ تا ۸ رقمی) را وارد کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
     )
     await callback.answer()
 
@@ -767,6 +977,7 @@ async def cmd_change_group_name(message: Message, state: FSMContext) -> None:
             await safe_reply(
                 message,
                 f"🏷 تغییر نام مجموعه *{escape_md(g.name)}*\nلطفاً نام جدید مجموعه را وارد کنید:",
+                reply_markup=get_inline_cancel_keyboard(),
             )
             return
 
@@ -804,6 +1015,7 @@ async def cb_select_group_for_name(callback: CallbackQuery, state: FSMContext) -
         callback.bot,
         callback.message.chat.id,
         f"🏷 تغییر نام مجموعه *{escape_md(g_name)}*\nلطفاً نام جدید مجموعه را وارد کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
     )
     await callback.answer()
 
@@ -1221,6 +1433,7 @@ async def _start_add_league_flow(bot: Bot, chat_id: int | str, user_id: str, sta
                 chat_id,
                 f"➕ ساخت لیگ جدید در مجموعه *{escape_md(g.name)}*\n\n"
                 "لطفاً *نام لیگ جدید* را وارد کنید:",
+                reply_markup=get_inline_cancel_keyboard(),
             )
             return
 
@@ -1277,6 +1490,7 @@ async def cb_select_group_for_new_league(callback: CallbackQuery, state: FSMCont
         callback.message.chat.id,
         f"➕ ساخت لیگ جدید در مجموعه *{escape_md(g_name)}*\n\n"
         "لطفاً *نام لیگ جدید* را وارد کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
     )
     await callback.answer()
 
@@ -1294,6 +1508,7 @@ async def process_al_league_name(message: Message, state: FSMContext) -> None:
         message,
         f"⏱ نام لیگ: *{escape_md(name)}*\n\n"
         "حالا *کف مطالعه روزانه (میثاق)* را به دقیقه وارد کنید (فقط عدد، مثلاً `15`):",
+        reply_markup=get_inline_cancel_keyboard(show_back=True),
     )
 
 
@@ -1418,6 +1633,7 @@ async def cb_league_edit_floor(callback: CallbackQuery, state: FSMContext) -> No
         callback.message.chat.id,
         f"⏱ ویرایش میثاق لیگ *{escape_md(l_name)}* (فعلی: {l_floor} دقیقه)\n"
         "لطفاً زمان میثاق جدید را به دقیقه وارد کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
     )
     await callback.answer()
 
@@ -1468,6 +1684,7 @@ async def cb_league_edit_cycle(callback: CallbackQuery, state: FSMContext) -> No
         callback.message.chat.id,
         f"🏆 ویرایش شماره چله لیگ *{escape_md(l_name)}* (فعلی: چله {l_cyc})\n"
         "لطفاً شماره چله جدید را وارد کنید (فقط عدد):",
+        reply_markup=get_inline_cancel_keyboard(),
     )
     await callback.answer()
 
@@ -1522,6 +1739,7 @@ async def cb_league_edit_date(callback: CallbackQuery, state: FSMContext) -> Non
         callback.message.chat.id,
         f"📅 ویرایش تاریخ شروع چله لیگ *{escape_md(l_name)}* (فعلی: `{cur_date}`)\n"
         "لطفاً تاریخ شروع شمسی جدید را با فرمت `1405/07/01` وارد کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
     )
     await callback.answer()
 
@@ -1551,7 +1769,31 @@ async def process_league_new_date(message: Message, state: FSMContext) -> None:
         active_cycle = get_or_create_active_cycle(db, lg)
         active_cycle.start_shamsi = norm_shamsi
         active_cycle.current_day = new_day
+
+        start_d = DateService.shamsi_to_date(norm_shamsi)
+        if start_d:
+            cycle_logs = (
+                db.query(ActivityLog)
+                .filter(
+                    ActivityLog.league_id == lg.id,
+                    (ActivityLog.cycle_id == active_cycle.id)
+                    | (ActivityLog.cycle_number == lg.cycle_number),
+                )
+                .all()
+            )
+            for c_log in cycle_logs:
+                if c_log.log_date:
+                    try:
+                        ld = datetime.strptime(c_log.log_date[:10], "%Y-%m-%d").date()
+                        calc_day = (ld - start_d).days + 1
+                        if calc_day >= 1:
+                            c_log.league_day = calc_day
+                    except ValueError:
+                        pass
+
         db.commit()
+        AbsenceService.reconcile_historical_gaps(db, league=lg)
+        AbsenceService.reconcile_streaks(db, league=lg)
         l_name = lg.name
 
     await state.clear()
@@ -1765,6 +2007,7 @@ async def cb_user_edit_name(callback: CallbackQuery, state: FSMContext) -> None:
         callback.bot,
         callback.message.chat.id,
         "✏️ لطفاً *نام و نام خانوادگی جدید* کاربر را وارد کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
     )
     await callback.answer()
 
@@ -1799,10 +2042,35 @@ async def process_user_new_name(message: Message, state: FSMContext) -> None:
     await safe_reply(message, f"✅ نام کاربر به‌روزرسانی شد.\n\n{card}", reply_markup=_get_user_manage_keyboard(target_uid))
 
 
+def _get_profile_league_ids(db: Session, telegram_id: str | int) -> set[str]:
+    """مجموعه شناسه لیگ‌هایی که این شخص در آنها پروفایل فعال دارد"""
+    rows = (
+        db.query(User.league_id)
+        .filter(
+            User.telegram_id == str(telegram_id).strip(),
+            User.is_active == True,
+            User.league_id.isnot(None),
+        )
+        .all()
+    )
+    return {r[0] for r in rows if r[0]}
+
+
+def _get_admin_profile_lock(profile_id: str) -> asyncio.Lock:
+    """قفل اختصاصی شخص (بر اساس telegram_id) مشترک با هندلرهای کاربر"""
+    from handlers import _get_user_lock
+
+    with get_db() as db:
+        row = db.query(User.telegram_id).filter(User.id == profile_id).first()
+    tg = row[0] if row and row[0] else profile_id
+    return _get_user_lock(tg)
+
+
 @admin_router.callback_query(F.data.startswith("adm_moveleague_"))
 async def cb_user_move_league(callback: CallbackQuery) -> None:
     target_uid = callback.data.replace("adm_moveleague_", "")
     admin_id = str(callback.from_user.id)
+    kb: Optional[InlineKeyboardMarkup] = None
 
     with get_db() as db:
         u = db.query(User).filter(User.id == target_uid).first()
@@ -1810,7 +2078,7 @@ async def cb_user_move_league(callback: CallbackQuery) -> None:
             await callback.answer("عدم دسترسی", show_alert=True)
             return
         group_ids = get_admin_group_ids(db, admin_id)
-        leagues = (
+        all_leagues = (
             db.query(League)
             .filter(
                 League.group_id.in_(group_ids),
@@ -1819,18 +2087,32 @@ async def cb_user_move_league(callback: CallbackQuery) -> None:
             )
             .all()
         )
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"🏆 {l.name} (کف: {l.floor} دقیقه)",
-                        callback_data=f"adm_domove_{l.id}_{u.id}",
-                    )
+        excluded = _get_profile_league_ids(db, u.telegram_id or u.id)
+        if u.league_id:
+            excluded.add(u.league_id)
+        leagues = [l for l in all_leagues if l.id not in excluded]
+        if leagues:
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=f"🏆 {l.name} (کف: {l.floor} دقیقه)",
+                            callback_data=f"adm_domove_{l.id}_{u.id}",
+                        )
+                    ]
+                    for l in leagues
                 ]
-                for l in leagues
-            ]
-        )
+            )
         u_name = u.name
+
+    if kb is None:
+        await safe_send_message(
+            callback.bot,
+            callback.message.chat.id,
+            "هیچ لیگ دیگری برای انتقال این کاربر در دسترس نیست.",
+        )
+        await callback.answer()
+        return
 
     await safe_send_message(
         callback.bot,
@@ -1843,26 +2125,113 @@ async def cb_user_move_league(callback: CallbackQuery) -> None:
 
 @admin_router.callback_query(F.data.startswith("adm_domove_"))
 async def cb_execute_user_move_league(callback: CallbackQuery) -> None:
+    from handlers import build_user_main_menu
+
     payload = callback.data.replace("adm_domove_", "")
     new_league_id, target_uid = payload.split("_", 1)
+    admin_id = str(callback.from_user.id)
 
-    with get_db() as db:
-        u = db.query(User).filter(User.id == target_uid).first()
-        lg = db.query(League).filter(League.id == new_league_id, League.is_deleted == False).first()
-        if not u or not lg:
-            await callback.answer("خطا در یافتن کاربر یا لیگ", show_alert=True)
+    async with _get_admin_profile_lock(target_uid):
+        warn_text: Optional[str] = None
+        with get_db() as db:
+            u = db.query(User).filter(User.id == target_uid).first()
+            lg = (
+                db.query(League)
+                .filter(
+                    League.id == new_league_id,
+                    League.is_deleted == False,
+                    League.is_active == True,
+                )
+                .first()
+            )
+            if not u or not u.is_active or not lg:
+                await callback.answer(
+                    "کاربر یافت نشد یا لیگ مقصد غیرفعال/حذف شده است.", show_alert=True
+                )
+                return
+            if not is_user_admin(db, admin_id, lg.group_id) or not is_user_admin(
+                db, admin_id, u.group_id
+            ):
+                await callback.answer("عدم دسترسی", show_alert=True)
+                return
+
+            tg_id = u.telegram_id or u.id
+            if u.league_id == lg.id:
+                warn_text = "⚠️ کاربر هم‌اکنون در همین لیگ عضو است."
+            elif _get_profile_league_ids(db, tg_id) & {lg.id}:
+                warn_text = (
+                    f"⚠️ کاربر *{escape_md(u.name)}* از قبل یک پروفایل فعال دیگر "
+                    f"در لیگ *{escape_md(lg.name)}* دارد."
+                )
+
+            if warn_text is None:
+                old_league = (
+                    db.query(League).filter(League.id == u.league_id).first()
+                    if u.league_id
+                    else None
+                )
+                old_l_name = old_league.name if old_league else "بدون لیگ"
+
+                cyc = get_or_create_active_cycle(db, lg)
+                current_day = DateService.calculate_league_day(
+                    cyc.start_shamsi or lg.start_shamsi
+                )
+                gift_points = float(max(0, (current_day - 1) * 10))
+
+                # ریست کامل آمار دوره؛ لاگ‌های قبلی متعلق به لیگ/چله قبلی باقی می‌مانند
+                u.league_id = lg.id
+                u.group_id = lg.group_id
+                u.points = gift_points
+                u.total_minutes = 0
+                u.total_pages = 0
+                u.streak = 0
+                u.no_study_days = 0
+                u.absent_days_list = ""
+                u.late_days_list = ""
+                u.half_coupons = settings.DEFAULT_HALF_COUPONS
+                u.one_min_coupons = settings.DEFAULT_ONE_MIN_COUPONS
+                if u.user_floor is not None and u.user_floor < lg.floor:
+                    u.user_floor = None
+                u.last_log_date = None
+                u.today_minutes = 0
+                u.today_pages = 0
+                u.today_points = 0.0
+                u.today_half_used = 0
+                u.today_one_min_used = 0
+                u.created_at = datetime.now(timezone.utc)
+                db.commit()
+
+                set_system_state(db, f"streak_offset_{u.id}", "0")
+
+                active_now = get_active_user(db, tg_id)
+                if active_now and active_now.id == u.id:
+                    set_active_user_id(db, tg_id, u.id)
+
+                eff_floor = u.get_effective_floor(lg.floor)
+                l_name = lg.name
+                u_name = u.name
+                user_msg = MessageService.apply_terms(
+                    db,
+                    lg.group_id,
+                    f"🔄 شما توسط مدیر از لیگ «{escape_md(old_l_name)}» به لیگ «{escape_md(l_name)}» منتقل شدید.\n"
+                    f"🏆 چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION}\n"
+                    f"✨ امتیاز هدیه همگام‌سازی: {gift_points}\n"
+                    f"⏱ میثاق شما در این لیگ: {eff_floor} دقیقه\n"
+                    f"🌸 به لیگ جدید خوش آمدید!",
+                )
+                user_kb = build_user_main_menu(db, tg_id, u)
+
+        if warn_text is not None:
+            await safe_send_message(callback.bot, callback.message.chat.id, warn_text)
+            await callback.answer()
             return
-        u.league_id = lg.id
-        u.group_id = lg.group_id
-        db.commit()
-        l_name = lg.name
-        u_name = u.name
 
     await safe_send_message(
         callback.bot,
         callback.message.chat.id,
-        f"✅ کاربر *{escape_md(u_name)}* به لیگ *{escape_md(l_name)}* منتقل شد.",
+        f"✅ کاربر *{escape_md(u_name)}* به لیگ *{escape_md(l_name)}* منتقل شد (امتیاز هدیه همگام‌سازی: *{gift_points}*).",
     )
+    await safe_send_message(callback.bot, tg_id, user_msg, reply_markup=user_kb)
     await callback.answer("منتقل شد.")
 
 
@@ -1870,6 +2239,7 @@ async def cb_execute_user_move_league(callback: CallbackQuery) -> None:
 async def cb_user_add_second_league(callback: CallbackQuery) -> None:
     target_uid = callback.data.replace("adm_addleague_", "")
     admin_id = str(callback.from_user.id)
+    kb: Optional[InlineKeyboardMarkup] = None
 
     with get_db() as db:
         u = db.query(User).filter(User.id == target_uid).first()
@@ -1877,7 +2247,7 @@ async def cb_user_add_second_league(callback: CallbackQuery) -> None:
             await callback.answer("عدم دسترسی", show_alert=True)
             return
         group_ids = get_admin_group_ids(db, admin_id)
-        leagues = (
+        all_leagues = (
             db.query(League)
             .filter(
                 League.group_id.in_(group_ids),
@@ -1886,18 +2256,30 @@ async def cb_user_add_second_league(callback: CallbackQuery) -> None:
             )
             .all()
         )
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"➕ {l.name} (کف: {l.floor} دقیقه)",
-                        callback_data=f"adm_doaddl_{l.id}_{u.id}",
-                    )
+        excluded = _get_profile_league_ids(db, u.telegram_id or u.id)
+        leagues = [l for l in all_leagues if l.id not in excluded]
+        if leagues:
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=f"➕ {l.name} (کف: {l.floor} دقیقه)",
+                            callback_data=f"adm_doaddl_{l.id}_{u.id}",
+                        )
+                    ]
+                    for l in leagues
                 ]
-                for l in leagues
-            ]
-        )
+            )
         u_name = u.name
+
+    if kb is None:
+        await safe_send_message(
+            callback.bot,
+            callback.message.chat.id,
+            f"کاربر *{escape_md(u_name)}* در حال حاضر در تمامی لیگ‌های فعال عضو است.",
+        )
+        await callback.answer()
+        return
 
     await safe_send_message(
         callback.bot,
@@ -1910,13 +2292,28 @@ async def cb_user_add_second_league(callback: CallbackQuery) -> None:
 
 @admin_router.callback_query(F.data.startswith("adm_doaddl_"))
 async def cb_execute_user_add_second_league(callback: CallbackQuery) -> None:
+    source_uid = callback.data.replace("adm_doaddl_", "").split("_", 1)[1]
+    async with _get_admin_profile_lock(source_uid):
+        await _execute_user_add_second_league_impl(callback)
+
+
+async def _execute_user_add_second_league_impl(callback: CallbackQuery) -> None:
     payload = callback.data.replace("adm_doaddl_", "")
     target_league_id, source_uid = payload.split("_", 1)
+    admin_id = str(callback.from_user.id)
 
     with get_db() as db:
         src_user = db.query(User).filter(User.id == source_uid).first()
-        lg = db.query(League).filter(League.id == target_league_id, League.is_deleted == False).first()
-        if not src_user or not lg:
+        lg = (
+            db.query(League)
+            .filter(
+                League.id == target_league_id,
+                League.is_deleted == False,
+                League.is_active == True,
+            )
+            .first()
+        )
+        if not src_user or not lg or not is_user_admin(db, admin_id, lg.group_id):
             await callback.answer("کاربر یا لیگ یافت نشد.", show_alert=True)
             return
 
@@ -1990,7 +2387,12 @@ async def cb_user_edit_points(callback: CallbackQuery, state: FSMContext) -> Non
     target_uid = callback.data.replace("adm_edit_points_", "")
     await state.update_data(target_user_id=target_uid)
     await state.set_state(AdminStates.usr_waiting_points)
-    await safe_send_message(callback.bot, callback.message.chat.id, "⭐️ لطفاً *امتیاز کل جدید* کاربر را وارد کنید (عدد):")
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        "⭐️ لطفاً *امتیاز کل جدید* کاربر را وارد کنید (عدد):",
+        reply_markup=get_inline_cancel_keyboard(),
+    )
     await callback.answer()
 
 
@@ -2023,7 +2425,12 @@ async def cb_user_edit_streak(callback: CallbackQuery, state: FSMContext) -> Non
     target_uid = callback.data.replace("adm_edit_streak_", "")
     await state.update_data(target_user_id=target_uid)
     await state.set_state(AdminStates.usr_waiting_streak)
-    await safe_send_message(callback.bot, callback.message.chat.id, "🔥 لطفاً *زنجیره استمرار جدید* (تعداد روز) را وارد کنید:")
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        "🔥 لطفاً *زنجیره استمرار جدید* (تعداد روز) را وارد کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
+    )
     await callback.answer()
 
 
@@ -2040,6 +2447,16 @@ async def process_user_new_streak(message: Message, state: FSMContext) -> None:
         u = db.query(User).filter(User.id == target_uid).first()
         if u:
             u.streak = int(raw)
+            lg_s = (
+                db.query(League).filter(League.id == u.league_id).first()
+                if u.league_id
+                else None
+            )
+            raw_streak = 0
+            if lg_s:
+                cyc_s = get_or_create_active_cycle(db, lg_s)
+                raw_streak = AbsenceService._compute_raw_streak_from_logs(db, u, lg_s, cyc_s)
+            set_system_state(db, f"streak_offset_{u.id}", str(int(raw) - raw_streak))
             db.commit()
             card = _format_user_admin_card(db, u)
         else:
@@ -2054,7 +2471,12 @@ async def cb_user_edit_minutes(callback: CallbackQuery, state: FSMContext) -> No
     target_uid = callback.data.replace("adm_edit_minutes_", "")
     await state.update_data(target_user_id=target_uid)
     await state.set_state(AdminStates.usr_waiting_minutes)
-    await safe_send_message(callback.bot, callback.message.chat.id, "⏱ لطفاً *مجموع زمان کل مطالعه جدید* (به دقیقه) را وارد کنید:")
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        "⏱ لطفاً *مجموع زمان کل مطالعه جدید* (به دقیقه) را وارد کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
+    )
     await callback.answer()
 
 
@@ -2085,7 +2507,12 @@ async def cb_user_edit_pages(callback: CallbackQuery, state: FSMContext) -> None
     target_uid = callback.data.replace("adm_edit_pages_", "")
     await state.update_data(target_user_id=target_uid)
     await state.set_state(AdminStates.usr_waiting_pages)
-    await safe_send_message(callback.bot, callback.message.chat.id, "📄 لطفاً *مجموع صفحات کل جدید* را وارد کنید:")
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        "📄 لطفاً *مجموع صفحات کل جدید* را وارد کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
+    )
     await callback.answer()
 
 
@@ -2116,7 +2543,12 @@ async def cb_user_edit_no_study(callback: CallbackQuery, state: FSMContext) -> N
     target_uid = callback.data.replace("adm_edit_no_study_", "")
     await state.update_data(target_user_id=target_uid)
     await state.set_state(AdminStates.usr_waiting_no_study)
-    await safe_send_message(callback.bot, callback.message.chat.id, "❌ لطفاً *تعداد روزهای غیبت جدید* را وارد کنید (عدد):")
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        "❌ لطفاً *تعداد روزهای غیبت جدید* را وارد کنید (عدد):",
+        reply_markup=get_inline_cancel_keyboard(),
+    )
     await callback.answer()
 
 
@@ -2133,9 +2565,23 @@ async def process_user_new_no_study(message: Message, state: FSMContext) -> None
     with get_db() as db:
         u = db.query(User).filter(User.id == target_uid).first()
         if u:
+            logged_days = {
+                int(r.league_day)
+                for r in db.query(ActivityLog)
+                .filter(
+                    ActivityLog.user_id == u.id,
+                    ActivityLog.league_id == u.league_id,
+                    ActivityLog.minutes > 0,
+                )
+                .all()
+                if r.league_day
+            }
             u.no_study_days = new_count
             u.absent_days_list = AbsenceService.sync_days_list_with_count(
-                u.absent_days_list, new_count, max_day=settings.LEAGUE_DURATION
+                u.absent_days_list,
+                new_count,
+                max_day=settings.LEAGUE_DURATION,
+                exclude_days=logged_days,
             )
             db.commit()
             card = _format_user_admin_card(db, u)
@@ -2151,7 +2597,12 @@ async def cb_user_edit_late(callback: CallbackQuery, state: FSMContext) -> None:
     target_uid = callback.data.replace("adm_edit_late_", "")
     await state.update_data(target_user_id=target_uid)
     await state.set_state(AdminStates.usr_waiting_late)
-    await safe_send_message(callback.bot, callback.message.chat.id, "⚠️ لطفاً *تعداد روزهای ثبت با تاخیر (عدم اعلام به موقع)* را وارد کنید (عدد):")
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        "⚠️ لطفاً *تعداد روزهای ثبت با تاخیر (عدم اعلام به موقع)* را وارد کنید (عدد):",
+        reply_markup=get_inline_cancel_keyboard(),
+    )
     await callback.answer()
 
 
@@ -2168,8 +2619,12 @@ async def process_user_new_late(message: Message, state: FSMContext) -> None:
     with get_db() as db:
         u = db.query(User).filter(User.id == target_uid).first()
         if u:
+            absent_days = set(AbsenceService.parse_days_list(u.absent_days_list))
             u.late_days_list = AbsenceService.sync_days_list_with_count(
-                u.late_days_list, new_count, max_day=settings.LEAGUE_DURATION
+                u.late_days_list,
+                new_count,
+                max_day=settings.LEAGUE_DURATION,
+                exclude_days=absent_days,
             )
             db.commit()
             card = _format_user_admin_card(db, u)
@@ -2189,6 +2644,7 @@ async def cb_user_edit_floor(callback: CallbackQuery, state: FSMContext) -> None
         callback.bot,
         callback.message.chat.id,
         "⏱ لطفاً *میثاق اختصاصی جدید کاربر* را به دقیقه وارد کنید (برای بازگشت به میثاق پیش‌فرض لیگ، عدد `0` را بفرستید):",
+        reply_markup=get_inline_cancel_keyboard(),
     )
     await callback.answer()
 
@@ -2295,6 +2751,7 @@ async def cb_menu_stats(callback: CallbackQuery) -> None:
 
 # --- دستور ex و دکمه شیشه‌ای adm_menu_excel (دریافت خروجی اکسل لیگ‌های فعال) ---
 async def _send_active_leagues_excel(bot: Bot, chat_id: int | str, user_id: str) -> None:
+    export_tasks: List[Dict[str, Any]] = []
     with get_db() as db:
         if not is_user_admin(db, user_id):
             return
@@ -2321,30 +2778,51 @@ async def _send_active_leagues_excel(bot: Bot, chat_id: int | str, user_id: str)
                 .filter(User.league_id == lg.id, User.is_active == True)
                 .all()
             )
-            file_path = ReportService.generate_excel(
-                league_name=lg.name,
-                users_data=users,
-                cycle_number=lg.cycle_number,
-                current_day=curr_day,
-                league_floor=lg.floor,
+            export_tasks.append(
+                {
+                    "id": lg.id,
+                    "name": lg.name,
+                    "cycle_number": lg.cycle_number,
+                    "current_day": curr_day,
+                    "floor": lg.floor,
+                    "users_data": [
+                        ReportService._extract_row_dict(u, league_floor=lg.floor)
+                        for u in users
+                    ],
+                }
             )
-            try:
-                await bot.send_document(
-                    chat_id=chat_id,
-                    document=FSInputFile(file_path),
-                    caption=(
-                        f"📥 گزارش اکسل لیگ «{lg.name}»\n"
-                        f"🏆 چله {lg.cycle_number} | روز {curr_day}"
-                    ),
-                )
-            except Exception as exc:
-                logger.error(f"خطا در ارسال فایل اکسل لیگ {lg.id}: {exc}")
-            finally:
-                if os.path.exists(file_path):
-                    try:
-                        os.remove(file_path)
-                    except OSError:
-                        pass
+
+    for task in export_tasks:
+        file_path = await asyncio.to_thread(
+            ReportService.generate_excel,
+            league_name=task["name"],
+            users_data=task["users_data"],
+            cycle_number=task["cycle_number"],
+            current_day=task["current_day"],
+            league_floor=task["floor"],
+        )
+        try:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=FSInputFile(file_path),
+                caption=(
+                    f"📥 گزارش اکسل لیگ «{task['name']}»\n"
+                    f"🏆 چله {task['cycle_number']} | روز {task['current_day']}"
+                ),
+            )
+        except Exception as exc:
+            logger.error(f"خطا در ارسال فایل اکسل لیگ {task['id']}: {exc}")
+            await safe_send_message(
+                bot,
+                chat_id,
+                f"❌ در ارسال فایل اکسل لیگ «{escape_md(task['name'])}» خطایی رخ داد: {escape_md(str(exc))}",
+            )
+        finally:
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
 
 
 @admin_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "ex"))
@@ -2360,6 +2838,12 @@ async def cb_menu_excel(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+def _build_cycle_history_excel_sync(group_ids: List[int]) -> str:
+    """تولید همگام اکسل آرشیو تاریخچه چله‌ها در ترد جداگانه با نشست دیتابیس مستقل"""
+    with get_db() as db:
+        return ReportService.generate_cycle_history_excel(db, group_ids=group_ids)
+
+
 # --- دستور sr (دریافت فایل اکسل آرشیو تاریخچه چله‌ها) ---
 @admin_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "sr"))
 async def cmd_export_cycle_history_excel(message: Message) -> None:
@@ -2368,7 +2852,8 @@ async def cmd_export_cycle_history_excel(message: Message) -> None:
         if not is_user_admin(db, user_id):
             return
         group_ids = get_admin_group_ids(db, user_id)
-        file_path = ReportService.generate_cycle_history_excel(db, group_ids=group_ids)
+
+    file_path = await asyncio.to_thread(_build_cycle_history_excel_sync, group_ids)
 
     try:
         await message.bot.send_document(
@@ -2508,6 +2993,7 @@ async def cb_em_edit_term(callback: CallbackQuery, state: FSMContext) -> None:
         f"✏️ ویرایش اصطلاح *{escape_md(label)}*\n"
         f"مقدار فعلی: «{escape_md(curr_val)}»\n\n"
         "لطفاً معادل جدید موردنظر خود را ارسال کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
     )
     await callback.answer()
 
@@ -2600,6 +3086,7 @@ async def cb_em_edit_msg(callback: CallbackQuery, state: FSMContext) -> None:
         f"✏️ ویرایش *{escape_md(label)}*\n\n"
         f"📌 متن فعلی:\n{curr_msg}\n\n"
         "لطفاً متن جدید را ارسال کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
         parse_mode=None,
     )
     await callback.answer()
@@ -2992,6 +3479,7 @@ logging.basicConfig(
 
 <file path="database.py">
 import shutil
+import sqlite3
 import logging
 from pathlib import Path
 from datetime import datetime, timezone
@@ -3032,7 +3520,8 @@ def set_sqlite_pragma(dbapi_connection, connection_record) -> None:
         cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute("PRAGMA synchronous=NORMAL;")
         cursor.execute("PRAGMA foreign_keys=ON;")
-        cursor.execute("PRAGMA busy_timeout=15000;")
+        cursor.execute("PRAGMA busy_timeout=30000;")
+        cursor.execute("PRAGMA temp_store=MEMORY;")
         cursor.close()
 
 
@@ -3068,7 +3557,14 @@ def backup_database() -> Optional[str]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_file = backup_dir / f"ketabkharsho_backup_{timestamp}.db"
     try:
-        shutil.copy2(db_path, backup_file)
+        src_conn = sqlite3.connect(str(db_path), timeout=30)
+        dst_conn = sqlite3.connect(str(backup_file))
+        try:
+            with dst_conn:
+                src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+            src_conn.close()
         logger.info(f"نسخه پشتیبان دیتابیس ایجاد شد: {backup_file}")
 
         # نگهداری حداکثر ۳۰ نسخه پشتیبان اخیر جهت جلوگیری از پر شدن دیسک
@@ -3178,15 +3674,31 @@ def _run_migrations() -> None:
 
 
 def get_or_create_active_cycle(db: Session, league: League, default_start_shamsi: Optional[str] = None) -> Cycle:
-    """تضمین وجود یک چله (Cycle) فعال برای لیگ و برگرداندن آن"""
-    active_cycle = (
+    """تضمین وجود دقیقاً یک چله (Cycle) فعال برای لیگ و برگرداندن آن"""
+    active_cycles = (
         db.query(Cycle)
         .filter(Cycle.league_id == league.id, Cycle.status == "active")
         .order_by(Cycle.cycle_number.desc(), Cycle.id.desc())
-        .first()
+        .all()
     )
-    if active_cycle:
-        return active_cycle
+    if active_cycles:
+        primary_cycle = active_cycles[0]
+        dirty = False
+        if len(active_cycles) > 1:
+            for extra_cycle in active_cycles[1:]:
+                extra_cycle.status = "finished"
+                if not extra_cycle.finished_at:
+                    extra_cycle.finished_at = datetime.now(timezone.utc)
+            dirty = True
+        if league.start_shamsi and primary_cycle.start_shamsi != league.start_shamsi:
+            primary_cycle.start_shamsi = league.start_shamsi
+            dirty = True
+        if league.cycle_number and primary_cycle.cycle_number != league.cycle_number:
+            primary_cycle.cycle_number = league.cycle_number
+            dirty = True
+        if dirty:
+            db.commit()
+        return primary_cycle
 
     from services import DateService
 
@@ -3408,11 +3920,14 @@ def is_user_admin(db: Session, telegram_id: str | int, group_id: Optional[int] =
 
 <file path="handlers.py">
 import os
+import asyncio
 import logging
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Tuple
 
 from aiogram import Router, F, Bot
+from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -3460,6 +3975,7 @@ from keyboards import (
     get_league_selection,
     get_cancel_league_confirm,
     get_profile_switch_keyboard,
+    get_cancel_or_back_keyboard,
 )
 
 logger = logging.getLogger(__name__)
@@ -3499,8 +4015,24 @@ RESERVED_MENU_TEXTS = {
 
 
 # ===========================================================================
-# توابع کمکی ارسال پیام، بررسی شرایط ثبت با تاخیر و ساخت منوی اصلی
+# توابع کمکی ارسال پیام، قفل همزمانی کاربران و بررسی شرایط ثبت با تاخیر
 # ===========================================================================
+_user_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _get_user_lock(user_key: str | int) -> asyncio.Lock:
+    """دریافت قفل اختصاصی هر کاربر جهت جلوگیری از شرایط رقابتی (Race Condition)"""
+    key = str(user_key).strip()
+    lock = _user_locks.get(key)
+    if lock is None:
+        if len(_user_locks) > 5000:
+            for stale_key in [k for k, lk in _user_locks.items() if not lk.locked()]:
+                _user_locks.pop(stale_key, None)
+        lock = asyncio.Lock()
+        _user_locks[key] = lock
+    return lock
+
+
 async def safe_send(
     bot: Bot,
     chat_id: int | str,
@@ -3508,7 +4040,7 @@ async def safe_send(
     reply_markup=None,
     parse_mode: Optional[str] = "Markdown",
 ) -> Optional[Message]:
-    """ارسال ایمن پیام با مدیریت خطای احتمالی Markdown"""
+    """ارسال ایمن پیام با مدیریت خطای FloodWait و خطای احتمالی Markdown"""
     try:
         return await bot.send_message(
             chat_id=chat_id,
@@ -3516,6 +4048,29 @@ async def safe_send(
             reply_markup=reply_markup,
             parse_mode=parse_mode,
         )
+    except TelegramRetryAfter as exc:
+        await asyncio.sleep(min(exc.retry_after, 30))
+        try:
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode,
+            )
+        except Exception as retry_exc:
+            logger.debug(f"خطا پس از انتظار FloodWait در ارسال به {chat_id}: {retry_exc}")
+            return None
+    except TelegramBadRequest:
+        try:
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=None,
+            )
+        except Exception as exc:
+            logger.debug(f"عدم امکان ارسال پیام بدون فرمت به {chat_id}: {exc}")
+            return None
     except Exception:
         try:
             return await bot.send_message(
@@ -3535,11 +4090,28 @@ async def safe_answer(
     reply_markup=None,
     parse_mode: Optional[str] = "Markdown",
 ) -> Optional[Message]:
-    """پاسخ ایمن به پیام کاربر با مدیریت خطای احتمالی Markdown"""
+    """پاسخ ایمن به پیام کاربر با مدیریت FloodWait و خطای احتمالی Markdown"""
     try:
         return await message.answer(
             text=text, reply_markup=reply_markup, parse_mode=parse_mode
         )
+    except TelegramRetryAfter as exc:
+        await asyncio.sleep(min(exc.retry_after, 30))
+        try:
+            return await message.answer(
+                text=text, reply_markup=reply_markup, parse_mode=parse_mode
+            )
+        except Exception as retry_exc:
+            logger.debug(f"خطا پس از انتظار FloodWait در پاسخ به پیام: {retry_exc}")
+            return None
+    except TelegramBadRequest:
+        try:
+            return await message.answer(
+                text=text, reply_markup=reply_markup, parse_mode=None
+            )
+        except Exception as exc:
+            logger.debug(f"عدم امکان پاسخ بدون فرمت به پیام: {exc}")
+            return None
     except Exception:
         try:
             return await message.answer(
@@ -3608,28 +4180,31 @@ def user_can_log_late(db: Session, user: Optional[User]) -> bool:
         return False
 
     cycle = get_or_create_active_cycle(db, league)
-    current_day = DateService.calculate_league_day(
+    raw_current_day = DateService.calculate_raw_league_day(
         cycle.start_shamsi or league.start_shamsi
     )
-    if current_day <= 1:
-        return False
-
-    if not DateService.user_joined_before_today(user):
+    yesterday_day = raw_current_day - 1
+    if yesterday_day < 1 or yesterday_day > settings.LEAGUE_DURATION:
         return False
 
     yesterday_str = DateService.yesterday_str()
-    yesterday_day = current_day - 1
+
+    if not DateService.user_joined_before_today(user):
+        return False
 
     existing_log = (
         db.query(ActivityLog)
         .filter(
             ActivityLog.user_id == user.id,
             ActivityLog.league_id == league.id,
-            (ActivityLog.log_date == yesterday_str)
+            (ActivityLog.cycle_id == cycle.id)
             | (
-                (ActivityLog.cycle_id == cycle.id)
-                & (ActivityLog.league_day == yesterday_day)
+                (ActivityLog.cycle_id == None)
+                & (ActivityLog.cycle_number == league.cycle_number)
             ),
+            (ActivityLog.log_date == yesterday_str)
+            | (ActivityLog.league_day == yesterday_day),
+            ActivityLog.minutes > 0,
         )
         .first()
     )
@@ -3728,14 +4303,29 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
                 .all()
             )
             if leagues:
-                prompt_txt = MessageService.apply_terms(
-                    db, user.group_id, "🏆 لطفاً لیگ مدنظرتان را انتخاب کنید:"
-                )
-                await safe_answer(
-                    message,
-                    prompt_txt,
-                    reply_markup=get_league_selection(leagues),
-                )
+                joined_ids = {
+                    p.league_id
+                    for p in get_user_profiles(db, tg_id, only_active=True)
+                    if p.league_id
+                }
+                available = [l for l in leagues if l.id not in joined_ids]
+                if available:
+                    prompt_txt = MessageService.apply_terms(
+                        db, user.group_id, "🏆 لطفاً لیگ مدنظرتان را انتخاب کنید:"
+                    )
+                    await safe_answer(
+                        message,
+                        prompt_txt,
+                        reply_markup=get_league_selection(
+                            available, exclude_league_ids=joined_ids
+                        ),
+                    )
+                else:
+                    await safe_answer(
+                        message,
+                        "شما در حال حاضر در تمامی لیگ‌های فعال این مجموعه عضو هستید.",
+                        reply_markup=build_user_main_menu(db, tg_id, user),
+                    )
                 return
 
         kb = build_user_main_menu(db, tg_id, user)
@@ -3763,7 +4353,11 @@ async def start_registration_or_new_group(message: Message, state: FSMContext) -
         enter_pwd_txt = MessageService.get_message(db, 1, "enter_pwd")
 
     await state.set_state(StudyStates.waiting_for_group_password)
-    await safe_answer(message, enter_pwd_txt, reply_markup=ReplyKeyboardRemove())
+    await safe_answer(
+        message,
+        enter_pwd_txt,
+        reply_markup=get_cancel_or_back_keyboard(show_back=False),
+    )
 
 
 @user_router.callback_query(F.data == "join_new_group_prompt")
@@ -3777,7 +4371,7 @@ async def cb_join_new_group_prompt(callback: CallbackQuery, state: FSMContext) -
         callback.bot,
         callback.message.chat.id,
         enter_pwd_txt,
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=get_cancel_or_back_keyboard(show_back=False),
     )
     await callback.answer()
 
@@ -3905,15 +4499,32 @@ async def process_register_last_name(message: Message, state: FSMContext) -> Non
             .order_by(League.id.asc())
             .all()
         )
-        kb_leagues = get_league_selection(leagues) if leagues else None
+        joined_league_ids = {
+            p.league_id
+            for p in get_user_profiles(db, tg_id, only_active=True)
+            if p.league_id
+        }
+        available_leagues = [l for l in leagues if l.id not in joined_league_ids]
+        kb_leagues = (
+            get_league_selection(available_leagues, exclude_league_ids=joined_league_ids)
+            if available_leagues
+            else None
+        )
         choose_league_msg = MessageService.apply_terms(
             db, group_id, "🏆 لطفاً لیگ مدنظرتان را انتخاب کنید:"
         )
-        no_league_msg = MessageService.apply_terms(
-            db,
-            group_id,
-            "⚠️ در حال حاضر هیچ لیگ فعالی در این مجموعه تعریف نشده است. لطفاً منتظر ایجاد لیگ توسط مدیر بمانید.",
-        )
+        if leagues and not available_leagues:
+            no_league_msg = MessageService.apply_terms(
+                db,
+                group_id,
+                "شما در حال حاضر در تمامی لیگ‌های فعال این مجموعه عضو هستید.",
+            )
+        else:
+            no_league_msg = MessageService.apply_terms(
+                db,
+                group_id,
+                "⚠️ در حال حاضر هیچ لیگ فعالی در این مجموعه تعریف نشده است. لطفاً منتظر ایجاد لیگ توسط مدیر بمانید.",
+            )
         main_kb = build_user_main_menu(db, tg_id)
 
     await state.clear()
@@ -3932,7 +4543,11 @@ async def process_register_last_name(message: Message, state: FSMContext) -> Non
 async def cb_join_league(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.data == "join_new_group_prompt":
         return
+    async with _get_user_lock(str(callback.from_user.id)):
+        await _cb_join_league_impl(callback, state)
 
+
+async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> None:
     league_id = callback.data.replace("join_", "")
     tg_id = str(callback.from_user.id)
 
@@ -4125,12 +4740,27 @@ async def handle_log_study_today(message: Message, state: FSMContext) -> None:
                 )
                 .all()
             )
+            joined_ids = {
+                p.league_id
+                for p in get_user_profiles(db, tg_id, only_active=True)
+                if p.league_id
+            }
+            available = [l for l in leagues if l.id not in joined_ids]
+            if not available:
+                await safe_answer(
+                    message,
+                    "شما در حال حاضر در تمامی لیگ‌های فعال این مجموعه عضو هستید.",
+                    reply_markup=build_user_main_menu(db, tg_id, user),
+                )
+                return
             await safe_answer(
                 message,
                 MessageService.apply_terms(
                     db, user.group_id, "🏆 لطفاً ابتدا لیگ مدنظرتان را انتخاب کنید:"
                 ),
-                reply_markup=get_league_selection(leagues),
+                reply_markup=get_league_selection(
+                    available, exclude_league_ids=joined_ids
+                ),
             )
             return
 
@@ -4150,13 +4780,14 @@ async def handle_log_study_today(message: Message, state: FSMContext) -> None:
             user.last_log_date == today_str and int(user.today_minutes or 0) > 0
         )
         if already_logged_today:
+            can_late = user_can_log_late(db, user)
             msg_txt = (
                 f"📊 {escape_md(user.name)} عزیز!\n\n"
                 f"شما امروز{league_text} {user.today_minutes} دقیقه ثبت کرده‌اید.\n"
                 f"چه اقدامی مدنظر دارید؟"
             )
             msg_txt = MessageService.apply_terms(db, user.group_id, msg_txt)
-            await safe_answer(message, msg_txt, reply_markup=get_study_edit_menu())
+            await safe_answer(message, msg_txt, reply_markup=get_study_edit_menu(can_log_late=can_late))
             return
 
         prompt_txt = (
@@ -4168,19 +4799,37 @@ async def handle_log_study_today(message: Message, state: FSMContext) -> None:
         prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
         user_id = user.id
 
-    await state.update_data(study_mode="fresh", study_user_id=user_id)
+    await state.update_data(
+        study_mode="fresh", study_user_id=user_id, study_init_date=today_str
+    )
     await state.set_state(StudyStates.waiting_for_minutes)
-    await safe_answer(message, prompt_txt)
+    await safe_answer(
+        message,
+        prompt_txt,
+        reply_markup=get_cancel_or_back_keyboard(show_back=False),
+    )
 
 
 @user_router.message(F.text == "🔄 ویرایش مطالعه امروز")
 async def handle_edit_study_today(message: Message, state: FSMContext) -> None:
+    await state.clear()
     tg_id = str(message.from_user.id)
+    today_str = DateService.today_str()
     with get_db() as db:
         user = get_active_user(db, tg_id)
-        if not user or not user.league_id:
+        if not user or not user.is_active or not user.league_id:
             return
         league = db.query(League).filter(League.id == user.league_id).first()
+        if not league or league.is_deleted or not league.is_active:
+            await safe_answer(
+                message,
+                MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست."),
+            )
+            return
+        if user.last_log_date != today_str or int(user.today_minutes or 0) <= 0:
+            # اگر کاربر هنوز امروز ثبتی ندارد (مثلاً از منوی شب قبل کلیک کرده)، به ثبت عادی هدایت شود
+            await handle_log_study_today(message, state)
+            return
         eff_floor = user.get_effective_floor(league.floor if league else 10)
         prompt_txt = (
             f"🔄 *ویرایش ثبت امروز*\n\n"
@@ -4191,17 +4840,35 @@ async def handle_edit_study_today(message: Message, state: FSMContext) -> None:
         prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
         user_id = user.id
 
-    await state.update_data(study_mode="edit", study_user_id=user_id)
+    await state.update_data(
+        study_mode="edit", study_user_id=user_id, study_init_date=today_str
+    )
     await state.set_state(StudyStates.waiting_for_minutes)
-    await safe_answer(message, prompt_txt)
+    await safe_answer(
+        message,
+        prompt_txt,
+        reply_markup=get_cancel_or_back_keyboard(show_back=False),
+    )
 
 
 @user_router.message(F.text == "➕ افزودن زمان به ثبت امروز")
 async def handle_append_study_today(message: Message, state: FSMContext) -> None:
+    await state.clear()
     tg_id = str(message.from_user.id)
+    today_str = DateService.today_str()
     with get_db() as db:
         user = get_active_user(db, tg_id)
-        if not user or not user.league_id:
+        if not user or not user.is_active or not user.league_id:
+            return
+        league = db.query(League).filter(League.id == user.league_id).first()
+        if not league or league.is_deleted or not league.is_active:
+            await safe_answer(
+                message,
+                MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست."),
+            )
+            return
+        if user.last_log_date != today_str or int(user.today_minutes or 0) <= 0:
+            await handle_log_study_today(message, state)
             return
         prompt_txt = (
             f"➕ *افزودن زمان به ثبت امروز*\n\n"
@@ -4211,15 +4878,22 @@ async def handle_append_study_today(message: Message, state: FSMContext) -> None
         prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
         user_id = user.id
 
-    await state.update_data(study_mode="append", study_user_id=user_id)
+    await state.update_data(
+        study_mode="append", study_user_id=user_id, study_init_date=today_str
+    )
     await state.set_state(StudyStates.waiting_for_minutes)
-    await safe_answer(message, prompt_txt)
+    await safe_answer(
+        message,
+        prompt_txt,
+        reply_markup=get_cancel_or_back_keyboard(show_back=False),
+    )
 
 
 @user_router.message(F.text == "⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)")
 async def handle_log_study_yesterday(message: Message, state: FSMContext) -> None:
     await state.clear()
     tg_id = str(message.from_user.id)
+    today_str = DateService.today_str()
 
     with get_db() as db:
         user = get_active_user(db, tg_id)
@@ -4255,13 +4929,25 @@ async def handle_log_study_yesterday(message: Message, state: FSMContext) -> Non
         prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
         user_id = user.id
 
-    await state.update_data(study_mode="late", study_user_id=user_id)
+    await state.update_data(
+        study_mode="late", study_user_id=user_id, study_init_date=today_str
+    )
     await state.set_state(StudyStates.waiting_for_minutes)
-    await safe_answer(message, prompt_txt)
+    await safe_answer(
+        message,
+        prompt_txt,
+        reply_markup=get_cancel_or_back_keyboard(show_back=False),
+    )
 
 
 async def _dispatch_menu_interruption(message: Message, state: FSMContext, text_val: str) -> bool:
     """بررسی اینکه آیا کاربر در وسط استیت ثبت مطالعه یکی از دکمه‌های منوی اصلی یا دستورات را زده است"""
+    if text_val == "📝 ثبت مطالعه امروز":
+        await handle_log_study_today(message, state)
+        return True
+    if text_val == "⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)":
+        await handle_log_study_yesterday(message, state)
+        return True
     if text_val == "🏆 جدول لیگ":
         await handle_league_leaderboard(message, state)
         return True
@@ -4335,246 +5021,280 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
         return
 
     pages = int(raw_pages)
-    data = await state.get_data()
-    mode = data.get("study_mode", "fresh")
-    input_minutes = int(data.get("study_minutes", 0))
-    study_uid = data.get("study_user_id")
     tg_id = str(message.from_user.id)
 
-    now_ir = DateService.now_iran()
-    today_str = DateService.today_str()
-    yesterday_str = DateService.yesterday_str()
-
-    with get_db() as db:
-        user = (
-            db.query(User).filter(User.id == study_uid).first()
-            if study_uid
-            else get_active_user(db, tg_id)
-        )
-        if not user or not user.league_id:
-            await state.clear()
-            await safe_answer(message, "❌ اطلاعات کاربری یا لیگ یافت نشد.")
+    async with _get_user_lock(tg_id):
+        current_state = await state.get_state()
+        if current_state != StudyStates.waiting_for_pages.state:
             return
 
-        league = db.query(League).filter(League.id == user.league_id).first()
-        if not league:
+        data = await state.get_data()
+        mode = data.get("study_mode", "fresh")
+        input_minutes = int(data.get("study_minutes", 0))
+        study_uid = data.get("study_user_id")
+        init_date = data.get("study_init_date")
+
+        now_ir = DateService.now_iran()
+        today_str = DateService.today_str()
+        yesterday_str = DateService.yesterday_str()
+
+        # اگر کاربر قبل از نیمه‌شب دکمه ثبت را زده و پس از نیمه‌شب عدد صفحات را ارسال کرده است
+        if init_date and init_date != today_str:
             await state.clear()
-            await safe_answer(message, "❌ لیگ یافت نشد.")
+            with get_db() as db:
+                u_curr = get_active_user(db, tg_id)
+                kb = build_user_main_menu(db, tg_id, u_curr)
+            await safe_answer(
+                message,
+                "⚠️ به دلیل عبور از نیمه‌شب و تغییر روز، عملیات قبلی لغو شد. لطفاً مجدداً گزینه موردنظر را از منوی اصلی انتخاب کنید.",
+                reply_markup=kb,
+            )
             return
 
-        cycle = get_or_create_active_cycle(db, league)
-        raw_current_day = DateService.calculate_raw_league_day(
-            cycle.start_shamsi or league.start_shamsi
-        )
-        current_day = DateService.calculate_league_day(
-            cycle.start_shamsi or league.start_shamsi
-        )
-        effective_floor = user.get_effective_floor(league.floor)
-
-        if mode == "late":
-            # بررسی مجدد مجاز بودن ثبت دیروز جهت جلوگیری از ثبت تکراری یا عبور از نیمه‌شب
-            if not user_can_log_late(db, user):
-                kb = build_user_main_menu(db, tg_id, user)
-                err_msg = MessageService.apply_terms(
-                    db,
-                    user.group_id,
-                    "⚠️ مطالعه دیروز قبلاً ثبت شده یا مهلت ثبت آن به پایان رسیده است.",
-                )
+        with get_db() as db:
+            user = (
+                db.query(User).filter(User.id == study_uid).first()
+                if study_uid
+                else get_active_user(db, tg_id)
+            )
+            if not user or not user.is_active or not user.league_id:
                 await state.clear()
-                await safe_answer(message, err_msg, reply_markup=kb)
+                await safe_answer(
+                    message,
+                    "❌ اطلاعات کاربری یا لیگ یافت نشد.",
+                    reply_markup=build_user_main_menu(db, tg_id),
+                )
                 return
 
-            # ثبت با تاخیر برای دیروز
-            target_date_str = yesterday_str
-            target_league_day = max(1, current_day - 1)
+            league = db.query(League).filter(League.id == user.league_id).first()
+            if not league or league.is_deleted or not league.is_active:
+                await state.clear()
+                await safe_answer(
+                    message,
+                    "❌ لیگ یافت نشد یا غیرفعال شده است.",
+                    reply_markup=build_user_main_menu(db, tg_id, user),
+                )
+                return
 
-            pts, half_used, one_used, status_msg = ScoringService.calculate_points(
-                minutes=input_minutes,
-                floor=effective_floor,
-                half_coupons=user.half_coupons,
-                one_min_coupons=user.one_min_coupons,
+            cycle = get_or_create_active_cycle(db, league)
+            raw_current_day = DateService.calculate_raw_league_day(
+                cycle.start_shamsi or league.start_shamsi
             )
-            pts = round(pts / 2.0, 1)
-            status_msg += f"\n⏳ (به دلیل ثبت با تاخیر، ۵۰٪ امتیاز محاسبه شد: {pts} امتیاز)"
-
-            user.points = round(float(user.points or 0.0) + pts, 1)
-            user.total_minutes = int(user.total_minutes or 0) + input_minutes
-            user.total_pages = int(user.total_pages or 0) + pages
-            user.half_coupons = max(0, int(user.half_coupons or 0) - half_used)
-            user.one_min_coupons = max(0, int(user.one_min_coupons or 0) - one_used)
-
-            # افزودن روز دیروز به late_days_list و حذف از absent_days_list
-            late_days = AbsenceService.parse_days_list(user.late_days_list)
-            if target_league_day not in late_days:
-                late_days.append(target_league_day)
-            user.late_days_list = AbsenceService.format_days_list(late_days)
-
-            absent_days = AbsenceService.parse_days_list(user.absent_days_list)
-            if target_league_day in absent_days:
-                absent_days.remove(target_league_day)
-            user.absent_days_list = AbsenceService.format_days_list(absent_days)
-            user.no_study_days = len(absent_days)
-
-            log_entry = ActivityLog(
-                user_id=user.id,
-                league_id=league.id,
-                cycle_id=cycle.id,
-                cycle_number=league.cycle_number,
-                league_day=target_league_day,
-                minutes=input_minutes,
-                pages=pages,
-                points_earned=pts,
-                half_coupon_used=half_used,
-                one_min_coupon_used=one_used,
-                log_date=target_date_str,
-                log_hour=now_ir.hour,
+            current_day = DateService.calculate_league_day(
+                cycle.start_shamsi or league.start_shamsi
             )
-            db.add(log_entry)
-            db.commit()
+            effective_floor = user.get_effective_floor(league.floor)
 
-            # بازسازی شکاف‌های تاریخی و زنجیره استمرار بر اساس لاگ‌های روزهای قبل و امروز
-            AbsenceService.reconcile_historical_gaps(db, user=user, league=league)
-            AbsenceService.reconcile_streaks(db, user=user, league=league)
-            db.refresh(user)
+            if mode == "late":
+                # بررسی مجدد مجاز بودن ثبت دیروز جهت جلوگیری از ثبت تکراری یا عبور از نیمه‌شب
+                if not user_can_log_late(db, user):
+                    kb = build_user_main_menu(db, tg_id, user)
+                    err_msg = MessageService.apply_terms(
+                        db,
+                        user.group_id,
+                        "⚠️ مطالعه دیروز قبلاً ثبت شده یا مهلت ثبت آن به پایان رسیده است.",
+                    )
+                    await state.clear()
+                    await safe_answer(message, err_msg, reply_markup=kb)
+                    return
 
-            cum_minutes = input_minutes
-            cum_pages = pages
-            day_label = "دیروز"
-            header_msg = MessageService.get_message(db, user.group_id, "late_logged")
-
-        else:
-            # ثبت امروز: حالت‌های fresh، edit یا append
-            if user.last_log_date != today_str:
-                user.today_minutes = 0
-                user.today_pages = 0
-                user.today_points = 0.0
-                user.today_half_used = 0
-                user.today_one_min_used = 0
-
-            # در حالت edit یا append ابتدا مقادیر ثبت‌شده قبلی امروز را برمی‌گردانیم (با رعایت سقف مجاز سهمیه‌ها)
-            if user.last_log_date == today_str and (
-                user.today_minutes > 0 or user.today_points > 0
-            ):
-                user.points = max(
-                    0.0, round(float(user.points or 0.0) - float(user.today_points or 0.0), 1)
-                )
-                user.total_minutes = max(
-                    0, int(user.total_minutes or 0) - int(user.today_minutes or 0)
-                )
-                user.total_pages = max(
-                    0, int(user.total_pages or 0) - int(user.today_pages or 0)
-                )
-                user.half_coupons = min(
-                    settings.DEFAULT_HALF_COUPONS,
-                    max(0, int(user.half_coupons or 0) + int(user.today_half_used or 0)),
-                )
-                user.one_min_coupons = min(
-                    settings.DEFAULT_ONE_MIN_COUPONS,
-                    max(0, int(user.one_min_coupons or 0) + int(user.today_one_min_used or 0)),
+                # ثبت با تاخیر برای دیروز (محاسبه از raw_current_day جهت پشتیبانی دقیق از روز ۴۰ در بامداد روز ۴۱)
+                target_date_str = yesterday_str
+                target_league_day = max(
+                    1, min(settings.LEAGUE_DURATION, raw_current_day - 1)
                 )
 
-            if mode == "append" and user.last_log_date == today_str:
-                cum_minutes = int(user.today_minutes or 0) + input_minutes
-                cum_pages = int(user.today_pages or 0) + pages
-            else:
-                cum_minutes = input_minutes
-                cum_pages = pages
-
-            pts, half_used, one_used, status_msg = ScoringService.calculate_points(
-                minutes=cum_minutes,
-                floor=effective_floor,
-                half_coupons=user.half_coupons,
-                one_min_coupons=user.one_min_coupons,
-            )
-
-            user.points = round(float(user.points or 0.0) + pts, 1)
-            user.total_minutes = int(user.total_minutes or 0) + cum_minutes
-            user.total_pages = int(user.total_pages or 0) + cum_pages
-            user.half_coupons = max(0, int(user.half_coupons or 0) - half_used)
-            user.one_min_coupons = max(0, int(user.one_min_coupons or 0) - one_used)
-
-            user.last_log_date = today_str
-            user.today_minutes = cum_minutes
-            user.today_pages = cum_pages
-            user.today_points = pts
-            user.today_half_used = half_used
-            user.today_one_min_used = one_used
-
-            existing_today_log = (
-                db.query(ActivityLog)
-                .filter(
-                    ActivityLog.user_id == user.id,
-                    ActivityLog.league_id == league.id,
-                    ActivityLog.log_date == today_str,
+                pts, half_used, one_used, status_msg = ScoringService.calculate_points(
+                    minutes=input_minutes,
+                    floor=effective_floor,
+                    half_coupons=user.half_coupons,
+                    one_min_coupons=user.one_min_coupons,
                 )
-                .first()
-            )
-            log_day_to_record = (
-                raw_current_day
-                if raw_current_day > settings.LEAGUE_DURATION
-                else current_day
-            )
-            if existing_today_log:
-                existing_today_log.minutes = cum_minutes
-                existing_today_log.pages = cum_pages
-                existing_today_log.points_earned = pts
-                existing_today_log.half_coupon_used = half_used
-                existing_today_log.one_min_coupon_used = one_used
-                existing_today_log.league_day = log_day_to_record
-                existing_today_log.cycle_id = cycle.id
-                existing_today_log.cycle_number = league.cycle_number
-                existing_today_log.log_hour = now_ir.hour
-            else:
-                db.add(
-                    ActivityLog(
-                        user_id=user.id,
-                        league_id=league.id,
-                        cycle_id=cycle.id,
-                        cycle_number=league.cycle_number,
-                        league_day=log_day_to_record,
-                        minutes=cum_minutes,
-                        pages=cum_pages,
-                        points_earned=pts,
-                        half_coupon_used=half_used,
-                        one_min_coupon_used=one_used,
-                        log_date=today_str,
-                        log_hour=now_ir.hour,
+                pts = float(
+                    (Decimal(str(pts)) / Decimal(2)).quantize(
+                        Decimal("0.1"), rounding=ROUND_HALF_UP
                     )
                 )
-            db.commit()
+                status_msg += f"\n⏳ (به دلیل ثبت با تاخیر، ۵۰٪ امتیاز محاسبه شد: {pts} امتیاز)"
 
-            AbsenceService.reconcile_historical_gaps(db, user=user, league=league)
-            AbsenceService.reconcile_streaks(db, user=user, league=league)
-            db.refresh(user)
+                user.points = round(float(user.points or 0.0) + pts, 1)
+                user.total_minutes = int(user.total_minutes or 0) + input_minutes
+                user.total_pages = int(user.total_pages or 0) + pages
+                user.half_coupons = max(0, int(user.half_coupons or 0) - half_used)
+                user.one_min_coupons = max(0, int(user.one_min_coupons or 0) - one_used)
 
-            day_label = "امروز"
-            header_msg = MessageService.get_message(db, user.group_id, "study_logged")
+                # افزودن روز دیروز به late_days_list و حذف از absent_days_list
+                late_days = AbsenceService.parse_days_list(user.late_days_list)
+                if target_league_day not in late_days:
+                    late_days.append(target_league_day)
+                user.late_days_list = AbsenceService.format_days_list(late_days)
 
-        # محاسبه رتبه کاربر و روزهای باقی‌مانده چله
-        all_league_users = (
-            db.query(User)
-            .filter(User.league_id == league.id, User.is_active == True)
-            .all()
-        )
-        my_rank = ScoringService.get_user_rank(user, all_league_users, league.floor)
-        days_left = max(0, settings.LEAGUE_DURATION - current_day)
-        league_title = f"لیگ «{escape_md(league.name)}»"
+                absent_days = AbsenceService.parse_days_list(user.absent_days_list)
+                if target_league_day in absent_days:
+                    absent_days.remove(target_league_day)
+                user.absent_days_list = AbsenceService.format_days_list(absent_days)
+                user.no_study_days = len(absent_days)
 
-        card_body = (
-            f"{header_msg}\n\n"
-            f"⏱ زمان {day_label}: {cum_minutes} دقیقه\n"
-            f"📄 صفحات {day_label}: {cum_pages} صفحه\n"
-            f"🏆 چله {cycle.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION}\n"
-            f"🔥 زنجیره شما: {user.streak} روز\n"
-            f"🏆 رتبه شما در {league_title}: {my_rank}\n"
-            f"⏳ روزهای مانده تا پایان چله: {days_left} روز\n\n"
-            f"{status_msg}"
-        )
-        final_text = MessageService.apply_terms(db, user.group_id, card_body)
-        main_kb = build_user_main_menu(db, tg_id, user)
+                log_entry = ActivityLog(
+                    user_id=user.id,
+                    league_id=league.id,
+                    cycle_id=cycle.id,
+                    cycle_number=league.cycle_number,
+                    league_day=target_league_day,
+                    minutes=input_minutes,
+                    pages=pages,
+                    points_earned=pts,
+                    half_coupon_used=half_used,
+                    one_min_coupon_used=one_used,
+                    log_date=target_date_str,
+                    log_hour=now_ir.hour,
+                )
+                db.add(log_entry)
+                db.commit()
 
-    await state.clear()
-    await safe_answer(message, final_text, reply_markup=main_kb)
+                # بازسازی شکاف‌های تاریخی و زنجیره استمرار بر اساس لاگ‌های روزهای قبل و امروز
+                AbsenceService.reconcile_historical_gaps(db, user=user, league=league)
+                AbsenceService.reconcile_streaks(db, user=user, league=league)
+                db.refresh(user)
+
+                cum_minutes = input_minutes
+                cum_pages = pages
+                day_label = "دیروز"
+                header_msg = MessageService.get_message(db, user.group_id, "late_logged")
+
+            else:
+                # ثبت امروز: حالت‌های fresh، edit یا append
+                if user.last_log_date != today_str:
+                    user.today_minutes = 0
+                    user.today_pages = 0
+                    user.today_points = 0.0
+                    user.today_half_used = 0
+                    user.today_one_min_used = 0
+
+                # در حالت edit یا append ابتدا مقادیر ثبت‌شده قبلی امروز را برمی‌گردانیم (با رعایت سقف مجاز سهمیه‌ها)
+                if user.last_log_date == today_str and (
+                    user.today_minutes > 0 or user.today_points > 0
+                ):
+                    user.points = max(
+                        0.0, round(float(user.points or 0.0) - float(user.today_points or 0.0), 1)
+                    )
+                    user.total_minutes = max(
+                        0, int(user.total_minutes or 0) - int(user.today_minutes or 0)
+                    )
+                    user.total_pages = max(
+                        0, int(user.total_pages or 0) - int(user.today_pages or 0)
+                    )
+                    user.half_coupons = min(
+                        settings.DEFAULT_HALF_COUPONS,
+                        max(0, int(user.half_coupons or 0) + int(user.today_half_used or 0)),
+                    )
+                    user.one_min_coupons = min(
+                        settings.DEFAULT_ONE_MIN_COUPONS,
+                        max(0, int(user.one_min_coupons or 0) + int(user.today_one_min_used or 0)),
+                    )
+
+                if mode == "append" and user.last_log_date == today_str:
+                    cum_minutes = int(user.today_minutes or 0) + input_minutes
+                    cum_pages = int(user.today_pages or 0) + pages
+                else:
+                    cum_minutes = input_minutes
+                    cum_pages = pages
+
+                pts, half_used, one_used, status_msg = ScoringService.calculate_points(
+                    minutes=cum_minutes,
+                    floor=effective_floor,
+                    half_coupons=user.half_coupons,
+                    one_min_coupons=user.one_min_coupons,
+                )
+
+                user.points = round(float(user.points or 0.0) + pts, 1)
+                user.total_minutes = int(user.total_minutes or 0) + cum_minutes
+                user.total_pages = int(user.total_pages or 0) + cum_pages
+                user.half_coupons = max(0, int(user.half_coupons or 0) - half_used)
+                user.one_min_coupons = max(0, int(user.one_min_coupons or 0) - one_used)
+
+                user.last_log_date = today_str
+                user.today_minutes = cum_minutes
+                user.today_pages = cum_pages
+                user.today_points = pts
+                user.today_half_used = half_used
+                user.today_one_min_used = one_used
+
+                existing_today_log = (
+                    db.query(ActivityLog)
+                    .filter(
+                        ActivityLog.user_id == user.id,
+                        ActivityLog.league_id == league.id,
+                        ActivityLog.log_date == today_str,
+                    )
+                    .first()
+                )
+                log_day_to_record = (
+                    raw_current_day
+                    if raw_current_day > settings.LEAGUE_DURATION
+                    else current_day
+                )
+                if existing_today_log:
+                    existing_today_log.minutes = cum_minutes
+                    existing_today_log.pages = cum_pages
+                    existing_today_log.points_earned = pts
+                    existing_today_log.half_coupon_used = half_used
+                    existing_today_log.one_min_coupon_used = one_used
+                    existing_today_log.league_day = log_day_to_record
+                    existing_today_log.cycle_id = cycle.id
+                    existing_today_log.cycle_number = league.cycle_number
+                    existing_today_log.log_hour = now_ir.hour
+                else:
+                    db.add(
+                        ActivityLog(
+                            user_id=user.id,
+                            league_id=league.id,
+                            cycle_id=cycle.id,
+                            cycle_number=league.cycle_number,
+                            league_day=log_day_to_record,
+                            minutes=cum_minutes,
+                            pages=pages,
+                            points_earned=pts,
+                            half_coupon_used=half_used,
+                            one_min_coupon_used=one_used,
+                            log_date=today_str,
+                            log_hour=now_ir.hour,
+                        )
+                    )
+                db.commit()
+
+                AbsenceService.reconcile_historical_gaps(db, user=user, league=league)
+                AbsenceService.reconcile_streaks(db, user=user, league=league)
+                db.refresh(user)
+
+                day_label = "امروز"
+                header_msg = MessageService.get_message(db, user.group_id, "study_logged")
+
+            # محاسبه رتبه کاربر و روزهای باقیمانده چله
+            all_league_users = (
+                db.query(User)
+                .filter(User.league_id == league.id, User.is_active == True)
+                .all()
+            )
+            my_rank = ScoringService.get_user_rank(user, all_league_users, league.floor)
+            days_left = max(0, settings.LEAGUE_DURATION - current_day)
+            league_title = f"لیگ «{escape_md(league.name)}»"
+
+            card_body = (
+                f"{header_msg}\n\n"
+                f"⏱ زمان {day_label}: {cum_minutes} دقیقه\n"
+                f"📄 صفحات {day_label}: {cum_pages} صفحه\n"
+                f"🏆 چله {cycle.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION}\n"
+                f"🔥 زنجیره شما: {user.streak} روز\n"
+                f"🏆 رتبه شما در {league_title}: {my_rank}\n"
+                f"⏳ روزهای مانده تا پایان چله: {days_left} روز\n\n"
+                f"{status_msg}"
+            )
+            final_text = MessageService.apply_terms(db, user.group_id, card_body)
+            main_kb = build_user_main_menu(db, tg_id, user)
+
+        await state.clear()
+        await safe_answer(message, final_text, reply_markup=main_kb)
 
 
 # ===========================================================================
@@ -5036,13 +5756,19 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
     old_cycle_number = active_cycle.cycle_number
     league_name_snapshot = league.name
     group_id_snapshot = league.group_id
+    league_floor_snapshot = league.floor
     final_table_text = format_league_leaderboard(db, league)
-    final_excel_path = ReportService.generate_excel(
+    users_snapshot = [
+        ReportService._extract_row_dict(u, league_floor=league_floor_snapshot)
+        for u in users
+    ]
+    final_excel_path = await asyncio.to_thread(
+        ReportService.generate_excel,
         league_name=league_name_snapshot,
-        users_data=users,
+        users_data=users_snapshot,
         cycle_number=old_cycle_number,
         current_day=settings.LEAGUE_DURATION,
-        league_floor=league.floor,
+        league_floor=league_floor_snapshot,
     )
     cycle_finished_msg = MessageService.get_message(
         db, group_id_snapshot, "cycle_finished"
@@ -5143,6 +5869,9 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
 
     db.commit()
 
+    for u in users:
+        set_system_state(db, f"streak_offset_{u.id}", "0")
+
     # ارسال پیام پایان چله، جدول نهایی و فایل اکسل به ادمین‌ها و اعضا
     group_admins = (
         db.query(GroupAdmin).filter(GroupAdmin.group_id == league.group_id).all()
@@ -5153,6 +5882,11 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
     user_recipients = {str(u.telegram_id or u.id) for u in users}
     all_recipients = admin_recipients | user_recipients
 
+    final_caption = MessageService.apply_terms(
+        db,
+        league.group_id,
+        f"🏆 کارنامه نهایی چله {old_cycle_number} لیگ «{league_name_snapshot}»",
+    )
     try:
         for rcpt in all_recipients:
             await safe_send(bot, rcpt, cycle_finished_msg)
@@ -5161,10 +5895,10 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
                 await bot.send_document(
                     chat_id=rcpt,
                     document=FSInputFile(final_excel_path),
-                    caption=MessageService.apply_terms(db, league.group_id, f"🏆 کارنامه نهایی چله {active_cycle.cycle_number} لیگ «{league.name}»"),
+                    caption=final_caption,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"عدم امکان ارسال اکسل پایان چله به {rcpt}: {exc}")
     finally:
         if os.path.exists(final_excel_path):
             try:
@@ -5173,7 +5907,16 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
                 pass
 
 
+_daily_user_reports_lock = asyncio.Lock()
+
+
 async def send_daily_user_reports(bot: Bot, force: bool = False) -> None:
+    """قفل سراسری: جلوگیری از اجرای همزمان و رولاور دوباره چله"""
+    async with _daily_user_reports_lock:
+        await _send_daily_user_reports_impl(bot, force=force)
+
+
+async def _send_daily_user_reports_impl(bot: Bot, force: bool = False) -> None:
     """
     ۴. جاب ساعت 08:00 صبح:
     - بررسی پایان چله ۴۰ روزه (raw_current_day > settings.LEAGUE_DURATION).
@@ -5194,77 +5937,80 @@ async def send_daily_user_reports(bot: Bot, force: bool = False) -> None:
         )
 
         for lg in active_leagues:
-            cyc = get_or_create_active_cycle(db, lg)
-            raw_current_day = DateService.calculate_raw_league_day(
-                cyc.start_shamsi or lg.start_shamsi
-            )
+            try:
+                cyc = get_or_create_active_cycle(db, lg)
+                raw_current_day = DateService.calculate_raw_league_day(
+                    cyc.start_shamsi or lg.start_shamsi
+                )
 
-            # اگر در صبح روز ۴۱ام هستیم، چله قبلی بسته و چله جدید از روز ۱ آغاز شود
-            if raw_current_day > settings.LEAGUE_DURATION:
-                await _complete_and_rollover_cycle(bot, db, lg, cyc)
-                continue
-
-            current_day = min(raw_current_day, settings.LEAGUE_DURATION)
-            if current_day <= 1 and not force:
-                continue
-
-            yesterday_day = max(1, current_day - 1)
-            users = (
-                db.query(User)
-                .filter(User.league_id == lg.id, User.is_active == True)
-                .all()
-            )
-            ranked_users = ScoringService.rank_users(users, lg.floor)
-            rank_map = {u.id: rnk for rnk, u in ranked_users}
-
-            for u in users:
-                if not DateService.user_joined_before_today(u) and not force:
+                # اگر در صبح روز ۴۱ام هستیم، چله قبلی بسته و چله جدید از روز ۱ آغاز شود
+                if raw_current_day > settings.LEAGUE_DURATION:
+                    await _complete_and_rollover_cycle(bot, db, lg, cyc)
                     continue
 
-                y_log = (
-                    db.query(ActivityLog)
-                    .filter(
-                        ActivityLog.user_id == u.id,
-                        ActivityLog.league_id == lg.id,
-                        (ActivityLog.log_date == yesterday_str)
-                        | (
-                            (ActivityLog.cycle_id == cyc.id)
-                            & (ActivityLog.league_day == yesterday_day)
-                        ),
-                    )
-                    .first()
-                )
-                late_days = AbsenceService.parse_days_list(u.late_days_list)
-                if y_log:
-                    if yesterday_day in late_days:
-                        y_status = f"⚠️ ثبت با تاخیر ({y_log.minutes} دقیقه | {y_log.points_earned} امتیاز)"
-                    else:
-                        y_status = f"✅ ثبت موفق ({y_log.minutes} دقیقه | {y_log.points_earned} امتیاز)"
-                    hint_line = "✨ خداقوت! امروز هم مطالعه خود را به موقع ثبت کنید."
-                else:
-                    y_status = "❌ عدم ثبت (غیبت)"
-                    hint_line = (
-                        "💡 *راهنمایی:* اگر دیروز مطالعه داشته‌اید اما فراموش کردید ثبت کنید، "
-                        "همین امروز می‌توانید از دکمه «⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)» در منوی اصلی استفاده کنید تا غیبت دیروز شما حذف شود."
-                    )
+                current_day = min(raw_current_day, settings.LEAGUE_DURATION)
+                if current_day <= 1 and not force:
+                    continue
 
-                u_rank = rank_map.get(u.id, 1)
-                report_card = (
-                    f"☀️ *کارنامه صبحگاهی باشگاه کتابخوارشو*\n"
-                    f"🏆 لیگ: *{escape_md(lg.name)}* (چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION})\n"
-                    f"───────────────────\n"
-                    f"👤 نام: *{escape_md(u.name)}*\n"
-                    f"📌 وضعیت دیروز (روز {yesterday_day}): {y_status}\n"
-                    f"🏅 رتبه فعلی شما: *{u_rank}*\n"
-                    f"⭐️ امتیاز کل: *{round(float(u.points or 0.0), 1)}*\n"
-                    f"🔥 زنجیره استمرار: *{u.streak}* روز\n"
-                    f"❌ تعداد غیبت دوره: *{u.no_study_days}* روز\n\n"
-                    f"{hint_line}"
+                yesterday_day = max(1, current_day - 1)
+                users = (
+                    db.query(User)
+                    .filter(User.league_id == lg.id, User.is_active == True)
+                    .all()
                 )
-                report_card = MessageService.apply_terms(db, lg.group_id, report_card)
-                tg_target = u.telegram_id or u.id
-                kb = build_user_main_menu(db, tg_target)
-                await safe_send(bot, tg_target, report_card, reply_markup=kb)
+                ranked_users = ScoringService.rank_users(users, lg.floor)
+                rank_map = {u.id: rnk for rnk, u in ranked_users}
+
+                for u in users:
+                    if not DateService.user_joined_before_today(u) and not force:
+                        continue
+
+                    y_log = (
+                        db.query(ActivityLog)
+                        .filter(
+                            ActivityLog.user_id == u.id,
+                            ActivityLog.league_id == lg.id,
+                            (ActivityLog.cycle_id == cyc.id)
+                            | (ActivityLog.cycle_number == lg.cycle_number),
+                            (ActivityLog.log_date == yesterday_str)
+                            | (ActivityLog.league_day == yesterday_day),
+                            ActivityLog.minutes > 0,
+                        )
+                        .first()
+                    )
+                    late_days = AbsenceService.parse_days_list(u.late_days_list)
+                    if y_log:
+                        if yesterday_day in late_days:
+                            y_status = f"⚠️ ثبت با تاخیر ({y_log.minutes} دقیقه | {y_log.points_earned} امتیاز)"
+                        else:
+                            y_status = f"✅ ثبت موفق ({y_log.minutes} دقیقه | {y_log.points_earned} امتیاز)"
+                        hint_line = "✨ خداقوت! امروز هم مطالعه خود را به موقع ثبت کنید."
+                    else:
+                        y_status = "❌ عدم ثبت (غیبت)"
+                        hint_line = (
+                            "💡 *راهنمایی:* اگر دیروز مطالعه داشته‌اید اما فراموش کردید ثبت کنید، "
+                            "همین امروز می‌توانید از دکمه «⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)» در منوی اصلی استفاده کنید تا غیبت دیروز شما حذف شود."
+                        )
+
+                    u_rank = rank_map.get(u.id, 1)
+                    report_card = (
+                        f"☀️ *کارنامه صبحگاهی باشگاه کتابخوارشو*\n"
+                        f"🏆 لیگ: *{escape_md(lg.name)}* (چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION})\n"
+                        f"───────────────────\n"
+                        f"👤 نام: *{escape_md(u.name)}*\n"
+                        f"📌 وضعیت دیروز (روز {yesterday_day}): {y_status}\n"
+                        f"🏅 رتبه فعلی شما: *{u_rank}*\n"
+                        f"⭐️ امتیاز کل: *{round(float(u.points or 0.0), 1)}*\n"
+                        f"🔥 زنجیره استمرار: *{u.streak}* روز\n"
+                        f"❌ تعداد غیبت دوره: *{u.no_study_days}* روز\n\n"
+                        f"{hint_line}"
+                    )
+                    report_card = MessageService.apply_terms(db, lg.group_id, report_card)
+                    tg_target = u.telegram_id or u.id
+                    kb = build_user_main_menu(db, tg_target)
+                    await safe_send(bot, tg_target, report_card, reply_markup=kb)
+            except Exception as exc:
+                logger.error(f"خطا در پردازش گزارش صبحگاهی لیگ {lg.id}: {exc}", exc_info=True)
 
         set_system_state(db, "last_daily_user_report_date", today_str)
 
@@ -5341,7 +6087,7 @@ async def send_study_reminders(bot: Bot, force: bool = False) -> None:
 </file>
 
 <file path="keyboards.py">
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
@@ -5393,22 +6139,31 @@ def get_main_menu(
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-def get_study_edit_menu() -> ReplyKeyboardMarkup:
-    """۳. منوی ویرایش مطالعه امروز"""
+def get_study_edit_menu(can_log_late: bool = False) -> ReplyKeyboardMarkup:
+    """۳. منوی ویرایش مطالعه امروز (به همراه گزینه ثبت مطالعه دیروز در صورت واجد شرایط بودن)"""
+    rows: List[List[KeyboardButton]] = [
+        [KeyboardButton(text="🔄 ویرایش مطالعه امروز")],
+        [KeyboardButton(text="➕ افزودن زمان به ثبت امروز")],
+    ]
+    if can_log_late:
+        rows.append([KeyboardButton(text="⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)")])
+    rows.append([KeyboardButton(text="🔙 بازگشت")])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🔄 ویرایش مطالعه امروز")],
-            [KeyboardButton(text="➕ افزودن زمان به ثبت امروز")],
-            [KeyboardButton(text="🔙 بازگشت")],
-        ],
+        keyboard=rows,
         resize_keyboard=True,
     )
 
 
-def get_league_selection(leagues: Iterable[League]) -> InlineKeyboardMarkup:
-    """۴. دکمه‌های شیشه‌ای انتخاب لیگ هنگام ثبت‌نام یا جابجایی"""
+def get_league_selection(
+    leagues: Iterable[League],
+    exclude_league_ids: Optional[Set[str]] = None,
+) -> InlineKeyboardMarkup:
+    """۴. دکمه‌های شیشه‌ای انتخاب لیگ هنگام ثبت‌نام یا جابجایی (با حذف لیگ‌های عضو فعلی)"""
+    excluded = exclude_league_ids or set()
     inline_keyboard: List[List[InlineKeyboardButton]] = []
     for l in leagues:
+        if l.id in excluded:
+            continue
         inline_keyboard.append(
             [
                 InlineKeyboardButton(
@@ -5428,6 +6183,12 @@ def get_cancel_league_confirm() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="✅ بله، انصراف می‌دهم",
                     callback_data="confirm_cancel_league",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ منصرف شدم",
+                    callback_data="fsm_cancel",
                 )
             ]
         ]
@@ -5453,7 +6214,7 @@ def get_profile_switch_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                text="➕ عضویت در مجموعه یا لیگ جدید",
+                text="➕ عضویت در مجموعه یا لیگ جدید (با رمز مجموعه)",
                 callback_data="join_new_group_prompt",
             )
         ]
@@ -5499,6 +6260,34 @@ def get_admin_main_inline_menu() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+# ---------------------------------------------------------------------------
+# کیبوردها و ثابتهای لغو / بازگشت مرحله (FSM)
+# ---------------------------------------------------------------------------
+CANCEL_TEXT = "❌ لغو عملیات"
+BACK_STEP_TEXT = "🔙 مرحله قبل"
+CANCEL_TEXTS = {CANCEL_TEXT, "لغو", "/cancel"}
+
+
+def get_cancel_or_back_keyboard(show_back: bool = True) -> ReplyKeyboardMarkup:
+    """کیبورد معمولی مراحل دریافت ورودی: لغو عملیات و (در صورت نیاز) مرحله قبل"""
+    row: List[KeyboardButton] = []
+    if show_back:
+        row.append(KeyboardButton(text=BACK_STEP_TEXT))
+    row.append(KeyboardButton(text=CANCEL_TEXT))
+    return ReplyKeyboardMarkup(keyboard=[row], resize_keyboard=True)
+
+
+def get_inline_cancel_keyboard(show_back: bool = False) -> InlineKeyboardMarkup:
+    """کیبورد شیشه‌ای مراحل دریافت ورودی در پنل ادمین"""
+    row: List[InlineKeyboardButton] = []
+    if show_back:
+        row.append(
+            InlineKeyboardButton(text=BACK_STEP_TEXT, callback_data="fsm_back")
+        )
+    row.append(InlineKeyboardButton(text=CANCEL_TEXT, callback_data="fsm_cancel"))
+    return InlineKeyboardMarkup(inline_keyboard=[row])
 </file>
 
 <file path="main.py">
@@ -5539,15 +6328,21 @@ class BaleAiohttpSession(AiohttpSession):
     نشست اختصاصی سازگار با پیام‌رسان بله و تلگرام.
     سرور پیام‌رسان بله در هنگام آپلود فایل‌های Multipart (مانند اکسل) در صورتی که
     نام فیلدها یا نام فایل فارسی URL-Encode شود (quote_fields=True پیش‌فرض aiohttp)،
-    خطا برمی‌گرداند. این کلاس با تنظیم quote_fields=False در FormData مشکل را به طور کامل رفع می‌کند.
+    یا فایل به جای نام اصلی فیلد (مانند document) با attach:// کلید تصادفی ارسال شود،
+    خطای «failed to get HTTP URL content» برمی‌گرداند.
+    این کلاس با نگه‌داشتن نام مستقیم فیلد فایل و تنظیم quote_fields=False در FormData
+    مشکل ارسال اسناد در پیام‌رسان بله را به طور کامل رفع می‌کند.
     """
 
     def build_form_data(self, bot: Bot, method: TelegramMethod[Any]) -> FormData:
         form = FormData(quote_fields=False)
         files: dict[str, InputFile] = {}
         for key, value in method.model_dump(warnings=False).items():
+            if isinstance(value, InputFile):
+                files[key] = value
+                continue
             value = self.prepare_value(value, bot=bot, files=files)
-            if not value:
+            if value is None:
                 continue
             form.add_field(key, value)
         for key, value in files.items():
@@ -5560,7 +6355,7 @@ class BaleAiohttpSession(AiohttpSession):
             form.add_field(
                 key,
                 file_payload,
-                filename=value.filename or key or secrets.token_urlsafe(8),
+                filename=value.filename or (os.path.basename(value.path) if hasattr(value, "path") else key),
             )
         return form
 
@@ -5705,7 +6500,7 @@ TERM_LABELS: Dict[str, str] = {
 
 # ۷ پیام اصلی قابل شخصی‌سازی برای هر مجموعه
 DEFAULT_MESSAGES: Dict[str, str] = {
-    "welcome": "👋 به باشگاه کتابخوانی *کتابخوارشو* خوش آمدید!\n\n🌸 برای شروع، دکمه زیر را بزنید:",
+    "welcome": "به بازوی ثبت مطالعه خوش آمدید 👋",
     "enter_pwd": "لطفا رمز ورود به بازو را وارد کنید",
     "study_logged": "📝 *گزارش مطالعه امروز ثبت شد!*\n\n✨ به مسیرت ادامه بده! 📚",
     "late_logged": "⏳ *گزارش مطالعه دیروز با موفقیت ثبت شد!*\n\n✨ آفرین به پشتکار شما! 📚",
@@ -5998,7 +6793,7 @@ class User(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     reminder_enabled = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     def get_effective_floor(self, league_floor: int) -> int:
         """برگرداندن میثاق اختصاصی کاربر در صورت وجود، در غیر این صورت کف لیگ"""
@@ -6042,7 +6837,7 @@ class League(Base):
     cycle_number = Column(Integer, default=1, nullable=False)
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class Cycle(Base):
@@ -6123,7 +6918,7 @@ class SystemState(Base):
 
     key = Column(String(100), primary_key=True)
     value = Column(String(255), nullable=True)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class GroupMessage(Base):
@@ -6137,7 +6932,7 @@ class GroupMessage(Base):
     )
     msg_key = Column(String(50), nullable=False, index=True)
     custom_text = Column(Text, nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class GroupTerm(Base):
@@ -6151,7 +6946,7 @@ class GroupTerm(Base):
     )
     term_key = Column(String(50), nullable=False, index=True)
     custom_term = Column(String(100), nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 </file>
 
 <file path="requirements.txt">
@@ -6799,6 +7594,14 @@ from weekly_report import send_weekly_reports
 logger = logging.getLogger(__name__)
 
 
+async def _run_safe_job(job_func, bot: Bot, job_name: str) -> None:
+    """اجرای ایمن جاب‌های زمان‌بندی‌شده بدون متوقف کردن کل زمان‌بند در صورت بروز استثنا"""
+    try:
+        await job_func(bot=bot)
+    except Exception as exc:
+        logger.error(f"خطای مدیریت‌شده در اجرای جاب «{job_name}»: {exc}", exc_info=True)
+
+
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     """
     تنظیم و راه‌اندازی AsyncIOScheduler بر اساس منطقه زمانی Asia/Tehran
@@ -6808,62 +7611,83 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
 
     # ۱. ساعت 00:00 نیمه‌شب: ثبت غیبت‌ها، ترمیم زنجیره، صفر کردن آمار امروز و بروزرسانی روز چله
     scheduler.add_job(
-        midnight_job,
+        _run_safe_job,
         trigger=CronTrigger(hour=0, minute=0, timezone=IRAN_TZ),
-        kwargs={"bot": bot},
+        kwargs={"job_func": midnight_job, "bot": bot, "job_name": "midnight_daily_job"},
         id="midnight_daily_job",
         replace_existing=True,
         misfire_grace_time=3600,
         coalesce=True,
+        max_instances=1,
     )
 
     # ۲. ساعت 01:00 بامداد (قابل تنظیم با ADMIN_REPORT_HOUR): ارسال جدول آرشیو روزانه به ادمین‌ها
     scheduler.add_job(
-        send_daily_admin_reports,
+        _run_safe_job,
         trigger=CronTrigger(hour=settings.ADMIN_REPORT_HOUR, minute=0, timezone=IRAN_TZ),
-        kwargs={"bot": bot},
+        kwargs={
+            "job_func": send_daily_admin_reports,
+            "bot": bot,
+            "job_name": "daily_admin_report_job",
+        },
         id="daily_admin_report_job",
         replace_existing=True,
         misfire_grace_time=3600,
         coalesce=True,
+        max_instances=1,
     )
 
     # ۳. ساعت 02:00 بامداد روزهای جمعه (قابل تنظیم با WEEKLY_REPORT_HOUR): گزارش هفتگی و اکسل
     scheduler.add_job(
-        send_weekly_reports,
+        _run_safe_job,
         trigger=CronTrigger(
             day_of_week="fri",
             hour=settings.WEEKLY_REPORT_HOUR,
             minute=0,
             timezone=IRAN_TZ,
         ),
-        kwargs={"bot": bot},
+        kwargs={
+            "job_func": send_weekly_reports,
+            "bot": bot,
+            "job_name": "friday_weekly_report_job",
+        },
         id="friday_weekly_report_job",
         replace_existing=True,
         misfire_grace_time=3600,
         coalesce=True,
+        max_instances=1,
     )
 
     # ۴. ساعت 08:00 صبح (قابل تنظیم با DAILY_REPORT_HOUR): کارنامه صبحگاهی کاربران و بررسی پایان چله ۴۰ روزه
     scheduler.add_job(
-        send_daily_user_reports,
+        _run_safe_job,
         trigger=CronTrigger(hour=settings.DAILY_REPORT_HOUR, minute=0, timezone=IRAN_TZ),
-        kwargs={"bot": bot},
+        kwargs={
+            "job_func": send_daily_user_reports,
+            "bot": bot,
+            "job_name": "daily_user_morning_report_job",
+        },
         id="daily_user_morning_report_job",
         replace_existing=True,
         misfire_grace_time=3600,
         coalesce=True,
+        max_instances=1,
     )
 
     # ۵. ساعت 22:00 شب (قابل تنظیم با REMINDER_HOUR): ارسال یادآوری شبانه به افراد ثبت‌نکرده
     scheduler.add_job(
-        send_study_reminders,
+        _run_safe_job,
         trigger=CronTrigger(hour=settings.REMINDER_HOUR, minute=0, timezone=IRAN_TZ),
-        kwargs={"bot": bot},
+        kwargs={
+            "job_func": send_study_reminders,
+            "bot": bot,
+            "job_name": "night_study_reminder_job",
+        },
         id="night_study_reminder_job",
         replace_existing=True,
         misfire_grace_time=3600,
         coalesce=True,
+        max_instances=1,
     )
 
     scheduler.start()
@@ -6879,6 +7703,7 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
 
 <file path="services.py">
 import re
+import uuid
 import logging
 from pathlib import Path
 from datetime import datetime, date, timedelta, timezone
@@ -7534,7 +8359,8 @@ class ReportService:
             reports_dir.mkdir(parents=True, exist_ok=True)
             safe_name = cls._sanitize_filename(league_name)
             ts = DateService.now_iran().strftime("%Y%m%d_%H%M%S")
-            output_path = str(reports_dir / f"league_{safe_name}_c{cycle_number}_d{current_day}_{ts}.xlsx")
+            uid_short = uuid.uuid4().hex[:6]
+            output_path = str(reports_dir / f"league_{safe_name}_c{cycle_number}_d{current_day}_{ts}_{uid_short}.xlsx")
 
         wb.save(output_path)
         return output_path
@@ -7553,7 +8379,8 @@ class ReportService:
         reports_dir.mkdir(parents=True, exist_ok=True)
         safe_name = cls._sanitize_filename(league_name)
         ts = DateService.now_iran().strftime("%Y%m%d_%H%M%S")
-        out_file = str(reports_dir / f"weekly_{safe_name}_c{cycle_number}_{ts}.xlsx")
+        uid_short = uuid.uuid4().hex[:6]
+        out_file = str(reports_dir / f"weekly_{safe_name}_c{cycle_number}_{ts}_{uid_short}.xlsx")
         return cls.generate_excel(
             league_name=league_name,
             users_data=users_data,
@@ -7582,13 +8409,17 @@ class ReportService:
 
         if isinstance(db_or_data, Session):
             db = db_or_data
-            league_query = db.query(League).filter(League.is_deleted == False)
-            if group_ids is not None:
-                league_query = league_query.filter(League.group_id.in_(group_ids))
-            if league_id is not None:
-                league_query = league_query.filter(League.id == league_id)
-            leagues = league_query.order_by(League.id.asc()).all()
+            if group_ids is not None and len(group_ids) == 0:
+                leagues = []
+            else:
+                league_query = db.query(League).filter(League.is_deleted == False)
+                if group_ids is not None:
+                    league_query = league_query.filter(League.group_id.in_(group_ids))
+                if league_id is not None:
+                    league_query = league_query.filter(League.id == league_id)
+                leagues = league_query.order_by(League.group_id.asc(), League.id.asc()).all()
 
+            multi_group = group_ids is None or len(set(group_ids)) > 1
             for lg in leagues:
                 cycles = (
                     db.query(Cycle)
@@ -7596,9 +8427,10 @@ class ReportService:
                     .order_by(Cycle.cycle_number.desc(), Cycle.id.desc())
                     .all()
                 )
+                grp_prefix = f"G{lg.group_id}_" if multi_group else ""
                 for cyc in cycles:
-                    sheet_title = f"{lg.name[:15]}_چله{cyc.cycle_number}_{'فعال' if cyc.status == 'active' else 'پایان'}"
-                    sheet_title = re.sub(r'[\\/*?:\[\]]', "_", sheet_title)[:31]
+                    sheet_title = f"{grp_prefix}{lg.name[:12]}_چله{cyc.cycle_number}_{'فعال' if cyc.status == 'active' else 'پایان'}"
+                    sheet_title = re.sub(r'[\/*?:\[\]]', "_", sheet_title)[:31]
                     if sheet_title in wb.sheetnames:
                         sheet_title = f"{sheet_title[:27]}_{cyc.id}"[:31]
 
@@ -7724,7 +8556,8 @@ class ReportService:
             reports_dir = Path("./reports")
             reports_dir.mkdir(parents=True, exist_ok=True)
             ts = DateService.now_iran().strftime("%Y%m%d_%H%M%S")
-            output_path = str(reports_dir / f"cycles_history_archive_{ts}.xlsx")
+            uid_short = uuid.uuid4().hex[:6]
+            output_path = str(reports_dir / f"cycles_history_archive_{ts}_{uid_short}.xlsx")
 
         wb.save(output_path)
         return output_path
@@ -7762,13 +8595,17 @@ class AbsenceService:
         current_list_str: Optional[str],
         target_count: int,
         max_day: int = 40,
+        exclude_days: Optional[Iterable[int]] = None,
+        preferred_days: Optional[Iterable[int]] = None,
+        current_day: Optional[int] = None,
     ) -> str:
         """
         همگام‌سازی لیست روزها (absent_days_list یا late_days_list) هنگامی که ادمین
         تعداد غیبت یا تاخیر را به صورت دستی ویرایش می‌کند.
         """
         target_count = max(0, int(target_count))
-        days = cls.parse_days_list(current_list_str)
+        excluded = {int(d) for d in (exclude_days or []) if int(d) > 0}
+        days = [d for d in cls.parse_days_list(current_list_str) if d not in excluded]
 
         if target_count == 0:
             return ""
@@ -7778,14 +8615,45 @@ class AbsenceService:
             # حذف از انتهای لیست تا به تعداد جدید برسد
             return cls.format_days_list(days[:target_count])
 
-        # اگر تعداد فعلی کمتر از target_count است، روزهای خالی را اضافه می‌کنیم
         existing_set = set(days)
+
+        # ۱. اولویت اول: روزهای پیشنهادی (مثلاً روزهای گذشته چله برای غیبت، یا روزهای دارای لاگ برای تاخیر)
+        if preferred_days:
+            for p_day in preferred_days:
+                if len(existing_set) >= target_count:
+                    break
+                p_val = int(p_day)
+                if p_val > 0 and p_val not in existing_set and p_val not in excluded:
+                    existing_set.add(p_val)
+
+        # ۲. اولویت دوم: روزهای گذشته قبل از امروز (۱ تا current_day - 1)
+        if current_day and current_day > 1:
+            for cand in range(1, int(current_day)):
+                if len(existing_set) >= target_count:
+                    break
+                if cand not in existing_set and cand not in excluded:
+                    existing_set.add(cand)
+
+        # ۳. اولویت سوم: از انتهای چله به عقب (۴۰، ۳۹، ...) تا با ثبت مطالعه امروز و فردا تداخل نکند
+        upper_bound = max(max_day, target_count + len(excluded) + 10)
+        for cand in range(max_day, 0, -1):
+            if len(existing_set) >= target_count:
+                break
+            if cand not in existing_set and cand not in excluded and cand != current_day:
+                existing_set.add(cand)
+
         candidate = 1
-        upper_bound = max(max_day, target_count + 10)
         while len(existing_set) < target_count and candidate <= upper_bound:
-            if candidate not in existing_set:
+            if candidate not in existing_set and candidate not in excluded:
                 existing_set.add(candidate)
             candidate += 1
+
+        # اگر باز هم به تعداد نرسید (مثلاً تمام روزها پر بودند)، از انتهای دوره پر می‌کنیم
+        for cand in range(upper_bound, 0, -1):
+            if len(existing_set) >= target_count:
+                break
+            if cand not in existing_set:
+                existing_set.add(cand)
         return cls.format_days_list(existing_set)
 
     @classmethod
@@ -7876,21 +8744,25 @@ class AbsenceService:
                         if u_created.date() > target_date:
                             continue
 
-                    # آیا کاربر برای این روز یا این تاریخ لاگی ثبت کرده است؟
+                    # آیا کاربر برای این روز یا این تاریخ در چله فعلی لاگ معتبری ثبت کرده است؟
                     has_log = (
                         db.query(ActivityLog)
                         .filter(
                             ActivityLog.user_id == u.id,
                             ActivityLog.league_id == lg.id,
-                            (ActivityLog.log_date == dt_str)
+                            (ActivityLog.cycle_id == active_cycle.id)
                             | (
-                                (ActivityLog.cycle_id == active_cycle.id)
-                                & (ActivityLog.league_day == day_num)
+                                (ActivityLog.cycle_id == None)
+                                & (ActivityLog.cycle_number == lg.cycle_number)
                             ),
+                            (ActivityLog.log_date == dt_str)
+                            | (ActivityLog.league_day == day_num),
+                            ActivityLog.minutes > 0,
                         )
                         .first()
                     )
                     if not has_log:
+                        from database import set_system_state
                         absent_days = cls.parse_days_list(u.absent_days_list)
                         late_days = cls.parse_days_list(u.late_days_list)
                         if day_num not in absent_days and day_num not in late_days:
@@ -7898,6 +8770,7 @@ class AbsenceService:
                             u.absent_days_list = cls.format_days_list(absent_days)
                             u.no_study_days = len(absent_days)
                             u.streak = 0
+                            set_system_state(db, f"streak_offset_{u.id}", "0")
                             total_absences_recorded += 1
 
         db.commit()
@@ -7954,7 +8827,11 @@ class AbsenceService:
                 .filter(
                     ActivityLog.user_id == u.id,
                     ActivityLog.league_id == lg.id,
-                    (ActivityLog.cycle_id == cyc.id) | (ActivityLog.cycle_number == lg.cycle_number),
+                    (ActivityLog.cycle_id == cyc.id)
+                    | (
+                        (ActivityLog.cycle_id == None)
+                        & (ActivityLog.cycle_number == lg.cycle_number)
+                    ),
                     ActivityLog.minutes > 0,
                 )
                 .all()
@@ -7963,9 +8840,9 @@ class AbsenceService:
             logged_days = set()
             start_d = DateService.shamsi_to_date(cyc.start_shamsi or lg.start_shamsi)
             for log in logs:
-                if log.league_day and 1 <= int(log.league_day) <= settings.LEAGUE_DURATION:
+                if log.league_day is not None and 1 <= int(log.league_day) <= settings.LEAGUE_DURATION:
                     logged_days.add(int(log.league_day))
-                elif log.log_date and start_d:
+                elif log.league_day is None and log.log_date and start_d:
                     try:
                         ld = datetime.strptime(log.log_date[:10], "%Y-%m-%d").date()
                         d_num = (ld - start_d).days + 1
@@ -7987,6 +8864,95 @@ class AbsenceService:
         return updated_count
 
     @classmethod
+    def _compute_raw_streak_from_logs(
+        cls,
+        db: Session,
+        u: User,
+        lg: League,
+        cyc: Cycle,
+    ) -> int:
+        """محاسبه زنجیره خام صرفاً بر اساس پیوستگی لاگ‌های ثبت‌شده در چله فعال"""
+        today_str = DateService.today_str()
+        yesterday_str = DateService.yesterday_str()
+
+        logs = (
+            db.query(ActivityLog)
+            .filter(
+                ActivityLog.user_id == u.id,
+                ActivityLog.league_id == lg.id,
+                (ActivityLog.cycle_id == cyc.id)
+                | (
+                    (ActivityLog.cycle_id == None)
+                    & (ActivityLog.cycle_number == lg.cycle_number)
+                ),
+                ActivityLog.minutes > 0,
+            )
+            .all()
+        )
+
+        start_d = DateService.shamsi_to_date(cyc.start_shamsi or lg.start_shamsi)
+        end_d = (start_d + timedelta(days=settings.LEAGUE_DURATION - 1)) if start_d else None
+        logged_dates = set()
+        for log in logs:
+            if log.log_date and (
+                log.league_day is None or 1 <= int(log.league_day) <= settings.LEAGUE_DURATION
+            ):
+                try:
+                    ld_obj = datetime.strptime(log.log_date[:10], "%Y-%m-%d").date()
+                    if start_d and ld_obj < start_d:
+                        continue
+                    if end_d and ld_obj > end_d:
+                        continue
+                    logged_dates.add(log.log_date[:10])
+                except ValueError:
+                    logged_dates.add(log.log_date[:10])
+        logged_days = {
+            int(log.league_day)
+            for log in logs
+            if log.league_day is not None and 1 <= int(log.league_day) <= settings.LEAGUE_DURATION
+        }
+
+        raw_current_day = DateService.calculate_raw_league_day(
+            cyc.start_shamsi or lg.start_shamsi
+        )
+        current_day = min(raw_current_day, settings.LEAGUE_DURATION)
+
+        if raw_current_day <= settings.LEAGUE_DURATION:
+            if current_day in logged_days or today_str in logged_dates:
+                anchor_day = current_day
+                anchor_date = DateService.today_date()
+            elif (
+                current_day > 1
+                and ((current_day - 1) in logged_days or yesterday_str in logged_dates)
+            ):
+                anchor_day = current_day - 1
+                anchor_date = DateService.yesterday_date()
+            else:
+                return 0
+        else:
+            last_cycle_day = settings.LEAGUE_DURATION
+            end_date_str = end_d.strftime("%Y-%m-%d") if end_d else yesterday_str
+            if last_cycle_day in logged_days or end_date_str in logged_dates:
+                anchor_day = last_cycle_day
+                anchor_date = end_d or DateService.yesterday_date()
+            else:
+                return 0
+
+        streak_by_day = 0
+        d_cursor = anchor_day
+        while d_cursor >= 1 and d_cursor in logged_days:
+            streak_by_day += 1
+            d_cursor -= 1
+
+        streak_by_date = 0
+        dt_cursor = anchor_date
+        while dt_cursor.strftime("%Y-%m-%d") in logged_dates:
+            streak_by_date += 1
+            dt_cursor -= timedelta(days=1)
+
+        return max(streak_by_day, streak_by_date)
+
+    @classmethod
     def reconcile_streaks(
         cls,
         db: Session,
@@ -7995,9 +8961,9 @@ class AbsenceService:
     ) -> int:
         """
         محاسبه مجدد زنجیره استمرار (Streak) بر اساس پیوستگی واقعی لاگ‌های کاربر در چله جاری
-        منتهی به امروز (در صورت ثبت امروز) یا دیروز (در صورت عدم ثبت امروز).
+        با حفظ آفست ویرایش دستی ادمین در صورت برقرار بودن زنجیره.
         """
-        from database import get_or_create_active_cycle
+        from database import get_or_create_active_cycle, get_system_state, set_system_state
 
         if user is not None:
             users_to_check = [user]
@@ -8010,8 +8976,6 @@ class AbsenceService:
         else:
             users_to_check = db.query(User).filter(User.is_active == True, User.league_id.isnot(None)).all()
 
-        today_str = DateService.today_str()
-        yesterday_str = DateService.yesterday_str()
         last_streak = 0
 
         for u in users_to_check:
@@ -8026,65 +8990,29 @@ class AbsenceService:
                 continue
 
             cyc = get_or_create_active_cycle(db, lg)
-            logs = (
-                db.query(ActivityLog)
-                .filter(
-                    ActivityLog.user_id == u.id,
-                    ActivityLog.league_id == lg.id,
-                    (ActivityLog.cycle_id == cyc.id) | (ActivityLog.cycle_number == lg.cycle_number),
-                    ActivityLog.minutes > 0,
+            raw_streak = cls._compute_raw_streak_from_logs(db, u, lg, cyc)
+
+            raw_offset_str = get_system_state(db, f"streak_offset_{u.id}", "0")
+            try:
+                offset = int(raw_offset_str or "0")
+            except ValueError:
+                offset = 0
+
+            if raw_streak == 0:
+                raw_current_day = DateService.calculate_raw_league_day(
+                    cyc.start_shamsi or lg.start_shamsi
                 )
-                .all()
-            )
-
-            start_d = DateService.shamsi_to_date(cyc.start_shamsi or lg.start_shamsi)
-            end_d = (start_d + timedelta(days=settings.LEAGUE_DURATION - 1)) if start_d else None
-            logged_dates = set()
-            for log in logs:
-                if log.log_date and (not log.league_day or int(log.league_day) <= settings.LEAGUE_DURATION):
-                    try:
-                        ld_obj = datetime.strptime(log.log_date[:10], "%Y-%m-%d").date()
-                        if start_d and ld_obj < start_d:
-                            continue
-                        if end_d and ld_obj > end_d:
-                            continue
-                        logged_dates.add(log.log_date[:10])
-                    except ValueError:
-                        logged_dates.add(log.log_date[:10])
-            logged_days = {
-                int(log.league_day)
-                for log in logs
-                if log.league_day and 1 <= int(log.league_day) <= settings.LEAGUE_DURATION
-            }
-
-            current_day = DateService.calculate_league_day(cyc.start_shamsi or lg.start_shamsi)
-
-            # محاسبه بر اساس شماره روزهای چله یا تاریخ‌های متوالی
-            if current_day in logged_days or today_str in logged_dates:
-                anchor_day = current_day
-                anchor_date = DateService.today_date()
-            elif (current_day - 1) in logged_days or yesterday_str in logged_dates:
-                anchor_day = current_day - 1
-                anchor_date = DateService.yesterday_date()
+                yesterday_day = raw_current_day - 1
+                absent_days = cls.parse_days_list(u.absent_days_list)
+                if offset > 0 and (yesterday_day < 1 or yesterday_day not in absent_days):
+                    u.streak = offset
+                else:
+                    u.streak = 0
+                    if offset != 0:
+                        set_system_state(db, f"streak_offset_{u.id}", "0")
             else:
-                u.streak = 0
-                last_streak = 0
-                continue
+                u.streak = max(0, raw_streak + offset)
 
-            # شمارش معکوس پیوستگی بر اساس روز چله و تاریخ
-            streak_by_day = 0
-            d_cursor = anchor_day
-            while d_cursor >= 1 and d_cursor in logged_days:
-                streak_by_day += 1
-                d_cursor -= 1
-
-            streak_by_date = 0
-            dt_cursor = anchor_date
-            while dt_cursor.strftime("%Y-%m-%d") in logged_dates:
-                streak_by_date += 1
-                dt_cursor -= timedelta(days=1)
-
-            u.streak = max(streak_by_day, streak_by_date)
             last_streak = u.streak
 
         db.commit()
@@ -8093,8 +9021,9 @@ class AbsenceService:
 
 <file path="weekly_report.py">
 import os
+import asyncio
 import logging
-from typing import List, Set
+from typing import List, Set, Dict, Any
 
 from aiogram import Bot
 from aiogram.types import FSInputFile
@@ -8144,75 +9073,57 @@ async def send_weekly_reports(bot: Bot, force: bool = False) -> None:
             set_system_state(db, "last_weekly_report_date", today_str)
             return
 
+        weekly_tasks: List[Dict[str, Any]] = []
+        super_admin_ids: Set[str] = {
+            str(sa).strip() for sa in settings.ADMIN_IDS if str(sa).strip()
+        }
+
         for lg in active_leagues:
-            cyc = get_or_create_active_cycle(db, lg)
-            current_day = DateService.calculate_league_day(
-                cyc.start_shamsi or lg.start_shamsi
-            )
-            grp = db.query(Group).filter(Group.id == lg.group_id).first()
-            group_name = grp.name if grp else "پیش‌فرض"
-
-            users = (
-                db.query(User)
-                .filter(User.league_id == lg.id, User.is_active == True)
-                .all()
-            )
-            ranked_users = ScoringService.rank_users(users, lg.floor)
-
-            # ساخت متن معرفی ۳ نفر برتر هفته
-            top_lines: List[str] = [
-                f"🏆 *۳ نفر برتر این هفته - لیگ {escape_md(lg.name)}*",
-                f"🏢 مجموعه: *{escape_md(group_name)}*",
-                f"🔄 چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION}",
-                "───────────────────",
-            ]
-
-            if not ranked_users:
-                top_lines.append("📭 هنوز عضوی در این لیگ فعالیت ثبت نکرده است.")
-            else:
-                medals = {1: "🥇 نفر اول", 2: "🥈 نفر دوم", 3: "🥉 نفر سوم"}
-                top_three = [item for item in ranked_users if item[0] <= 3][:3]
-                if not top_three:
-                    top_three = ranked_users[:3]
-
-                for idx, (rnk, u) in enumerate(top_three, start=1):
-                    medal_label = medals.get(rnk, medals.get(idx, f"🔹 رتبه {rnk}"))
-                    pts = round(float(u.points or 0.0), 1)
-                    mins = int(u.total_minutes or 0)
-                    pgs = int(u.total_pages or 0)
-                    top_lines.append(
-                        f"{medal_label}: *{escape_md(u.name)}*\n"
-                        f"   ⭐️ امتیاز: *{pts}* | ⏱ زمان: *{mins}* دقیقه | 📄 صفحات: *{pgs}*"
-                    )
-
-            base_report_text = "\n".join(top_lines)
-            base_report_text = MessageService.apply_terms(
-                db, lg.group_id, base_report_text
-            )
-            super_admin_text = f"👑 [گزارش مدیر کل]\n{base_report_text}"
-
-            # تولید فایل اکسل هفتگی لیگ
-            excel_path = ReportService.generate_weekly_excel(
-                league_name=lg.name,
-                users_data=users,
-                cycle_number=cyc.cycle_number,
-                current_day=current_day,
-                league_floor=lg.floor,
-            )
-
-            # استخراج لیست ادمین‌های مجموعه و سوپرادمین‌ها
-            group_admin_rows = (
-                db.query(GroupAdmin)
-                .filter(GroupAdmin.group_id == lg.group_id)
-                .all()
-            )
-            group_admin_ids: Set[str] = {str(r.user_id).strip() for r in group_admin_rows if r.user_id}
-            super_admin_ids: Set[str] = {str(sa).strip() for sa in settings.ADMIN_IDS if str(sa).strip()}
-
-            # ادمین‌های مجموعه که سوپرادمین نیستند پیام عادی دریافت می‌کنند
-            only_group_admins = group_admin_ids - super_admin_ids
-
             try:
+                cyc = get_or_create_active_cycle(db, lg)
+                current_day = DateService.calculate_league_day(
+                    cyc.start_shamsi or lg.start_shamsi
+                )
+                grp = db.query(Group).filter(Group.id == lg.group_id).first()
+                group_name = grp.name if grp else "پیش‌فرض"
+
+                users = (
+                    db.query(User)
+                    .filter(User.league_id == lg.id, User.is_active == True)
+                    .all()
+                )
+                ranked_users = ScoringService.rank_users(users, lg.floor)
+
+                top_lines: List[str] = [
+                    f"🏆 *۳ نفر برتر این هفته - لیگ {escape_md(lg.name)}*",
+                    f"🏢 مجموعه: *{escape_md(group_name)}*",
+                    f"🔄 چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION}",
+                    "───────────────────",
+                ]
+
+                if not ranked_users:
+                    top_lines.append("📭 هنوز عضوی در این لیگ فعالیت ثبت نکرده است.")
+                else:
+                    medals = {1: "🥇 نفر اول", 2: "🥈 نفر دوم", 3: "🥉 نفر سوم"}
+                    top_three = [item for item in ranked_users if item[0] <= 3][:3]
+                    if not top_three:
+                        top_three = ranked_users[:3]
+
+                    for idx, (rnk, u) in enumerate(top_three, start=1):
+                        medal_label = medals.get(rnk, medals.get(idx, f"🔹 رتبه {rnk}"))
+                        pts = round(float(u.points or 0.0), 1)
+                        mins = int(u.total_minutes or 0)
+                        pgs = int(u.total_pages or 0)
+                        top_lines.append(
+                            f"{medal_label}: *{escape_md(u.name)}*\n"
+                            f"   ⭐️ امتیاز: *{pts}* | ⏱ زمان: *{mins}* دقیقه | 📄 صفحات: *{pgs}*"
+                        )
+
+                base_report_text = MessageService.apply_terms(
+                    db, lg.group_id, "\n".join(top_lines)
+                )
+                super_admin_text = f"👑 [گزارش مدیر کل]\n{base_report_text}"
+
                 base_caption = MessageService.apply_terms(
                     db,
                     lg.group_id,
@@ -8225,51 +9136,99 @@ async def send_weekly_reports(bot: Bot, force: bool = False) -> None:
                     f"📥 اکسل گزارش هفتگی لیگ «{lg.name}»",
                 )
 
-                # ۱. ارسال به ادمین‌های مجموعه
-                for g_adm_id in only_group_admins:
-                    await safe_send(bot, g_adm_id, base_report_text)
-                    try:
-                        await bot.send_document(
-                            chat_id=g_adm_id,
-                            document=FSInputFile(excel_path),
-                            caption=base_caption,
-                        )
-                    except Exception as exc:
-                        logger.warning(f"خطا در ارسال اکسل هفتگی به ادمین مجموعه {g_adm_id}: {exc}")
+                group_admin_rows = (
+                    db.query(GroupAdmin)
+                    .filter(GroupAdmin.group_id == lg.group_id)
+                    .all()
+                )
+                group_admin_ids: Set[str] = {
+                    str(r.user_id).strip() for r in group_admin_rows if r.user_id
+                }
 
-                # ۲. ارسال به سوپرادمین‌ها با پیشوند 👑 [گزارش مدیر کل]
-                for s_adm_id in super_admin_ids:
-                    await safe_send(bot, s_adm_id, super_admin_text)
-                    try:
-                        await bot.send_document(
-                            chat_id=s_adm_id,
-                            document=FSInputFile(excel_path),
-                            caption=super_caption,
-                        )
-                    except Exception as exc:
-                        logger.warning(f"خطا در ارسال اکسل هفتگی به سوپرادمین {s_adm_id}: {exc}")
-
-                # ۳. ارسال به کانال آرشیو در صورت فعال بودن
-                if settings.ARCHIVE_CHANNEL and lg.archive_enabled:
-                    await safe_send(bot, settings.ARCHIVE_CHANNEL, base_report_text)
-                    try:
-                        await bot.send_document(
-                            chat_id=settings.ARCHIVE_CHANNEL,
-                            document=FSInputFile(excel_path),
-                            caption=archive_caption,
-                        )
-                    except Exception as exc:
-                        logger.warning(f"خطا در ارسال اکسل هفتگی به کانال آرشیو: {exc}")
-
-            finally:
-                if os.path.exists(excel_path):
-                    try:
-                        os.remove(excel_path)
-                    except OSError:
-                        pass
+                weekly_tasks.append(
+                    {
+                        "league_id": lg.id,
+                        "league_name": lg.name,
+                        "cycle_number": cyc.cycle_number,
+                        "current_day": current_day,
+                        "league_floor": lg.floor,
+                        "archive_enabled": lg.archive_enabled,
+                        "users_data": [
+                            ReportService._extract_row_dict(u, league_floor=lg.floor)
+                            for u in users
+                        ],
+                        "only_group_admins": group_admin_ids - super_admin_ids,
+                        "base_report_text": base_report_text,
+                        "super_admin_text": super_admin_text,
+                        "base_caption": base_caption,
+                        "super_caption": super_caption,
+                        "archive_caption": archive_caption,
+                    }
+                )
+            except Exception as exc:
+                logger.error(f"خطا در آماده‌سازی گزارش هفتگی لیگ {lg.id}: {exc}", exc_info=True)
 
         set_system_state(db, "last_weekly_report_date", today_str)
-        logger.info(f"گزارش‌های هفتگی جمعه برای تاریخ {today_str} با موفقیت ارسال شد.")
+
+    # تولید اکسل در ترد جداگانه و ارسال شبکه خارج از نشست دیتابیس
+    for task in weekly_tasks:
+        excel_path = ""
+        try:
+            excel_path = await asyncio.to_thread(
+                ReportService.generate_weekly_excel,
+                league_name=task["league_name"],
+                users_data=task["users_data"],
+                cycle_number=task["cycle_number"],
+                current_day=task["current_day"],
+                league_floor=task["league_floor"],
+            )
+
+            # ۱. ارسال به ادمین‌های مجموعه
+            for g_adm_id in task["only_group_admins"]:
+                await safe_send(bot, g_adm_id, task["base_report_text"])
+                try:
+                    await bot.send_document(
+                        chat_id=g_adm_id,
+                        document=FSInputFile(excel_path),
+                        caption=task["base_caption"],
+                    )
+                except Exception as exc:
+                    logger.warning(f"خطا در ارسال اکسل هفتگی به ادمین مجموعه {g_adm_id}: {exc}")
+
+            # ۲. ارسال به سوپرادمین‌ها با پیشوند 👑 [گزارش مدیر کل]
+            for s_adm_id in super_admin_ids:
+                await safe_send(bot, s_adm_id, task["super_admin_text"])
+                try:
+                    await bot.send_document(
+                        chat_id=s_adm_id,
+                        document=FSInputFile(excel_path),
+                        caption=task["super_caption"],
+                    )
+                except Exception as exc:
+                    logger.warning(f"خطا در ارسال اکسل هفتگی به سوپرادمین {s_adm_id}: {exc}")
+
+            # ۳. ارسال به کانال آرشیو در صورت فعال بودن
+            if settings.ARCHIVE_CHANNEL and task["archive_enabled"]:
+                await safe_send(bot, settings.ARCHIVE_CHANNEL, task["base_report_text"])
+                try:
+                    await bot.send_document(
+                        chat_id=settings.ARCHIVE_CHANNEL,
+                        document=FSInputFile(excel_path),
+                        caption=task["archive_caption"],
+                    )
+                except Exception as exc:
+                    logger.warning(f"خطا در ارسال اکسل هفتگی به کانال آرشیو: {exc}")
+
+        except Exception as exc:
+            logger.error(f"خطا در ارسال گزارش هفتگی لیگ {task['league_id']}: {exc}", exc_info=True)
+        finally:
+            if excel_path and os.path.exists(excel_path):
+                try:
+                    os.remove(excel_path)
+                except OSError:
+                    pass
+
+    logger.info(f"گزارش‌های هفتگی جمعه برای تاریخ {today_str} با موفقیت ارسال شد.")
 </file>
 
 </files>

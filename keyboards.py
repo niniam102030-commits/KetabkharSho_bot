@@ -1,4 +1,4 @@
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
@@ -50,22 +50,31 @@ def get_main_menu(
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-def get_study_edit_menu() -> ReplyKeyboardMarkup:
-    """۳. منوی ویرایش مطالعه امروز"""
+def get_study_edit_menu(can_log_late: bool = False) -> ReplyKeyboardMarkup:
+    """۳. منوی ویرایش مطالعه امروز (به همراه گزینه ثبت مطالعه دیروز در صورت واجد شرایط بودن)"""
+    rows: List[List[KeyboardButton]] = [
+        [KeyboardButton(text="🔄 ویرایش مطالعه امروز")],
+        [KeyboardButton(text="➕ افزودن زمان به ثبت امروز")],
+    ]
+    if can_log_late:
+        rows.append([KeyboardButton(text="⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)")])
+    rows.append([KeyboardButton(text="🔙 بازگشت")])
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🔄 ویرایش مطالعه امروز")],
-            [KeyboardButton(text="➕ افزودن زمان به ثبت امروز")],
-            [KeyboardButton(text="🔙 بازگشت")],
-        ],
+        keyboard=rows,
         resize_keyboard=True,
     )
 
 
-def get_league_selection(leagues: Iterable[League]) -> InlineKeyboardMarkup:
-    """۴. دکمه‌های شیشه‌ای انتخاب لیگ هنگام ثبت‌نام یا جابجایی"""
+def get_league_selection(
+    leagues: Iterable[League],
+    exclude_league_ids: Optional[Set[str]] = None,
+) -> InlineKeyboardMarkup:
+    """۴. دکمه‌های شیشه‌ای انتخاب لیگ هنگام ثبت‌نام یا جابجایی (با حذف لیگ‌های عضو فعلی)"""
+    excluded = exclude_league_ids or set()
     inline_keyboard: List[List[InlineKeyboardButton]] = []
     for l in leagues:
+        if l.id in excluded:
+            continue
         inline_keyboard.append(
             [
                 InlineKeyboardButton(
@@ -85,6 +94,12 @@ def get_cancel_league_confirm() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="✅ بله، انصراف می‌دهم",
                     callback_data="confirm_cancel_league",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ منصرف شدم",
+                    callback_data="fsm_cancel",
                 )
             ]
         ]
@@ -110,7 +125,7 @@ def get_profile_switch_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                text="➕ عضویت در مجموعه یا لیگ جدید",
+                text="➕ عضویت در مجموعه یا لیگ جدید (با رمز مجموعه)",
                 callback_data="join_new_group_prompt",
             )
         ]
@@ -156,3 +171,31 @@ def get_admin_main_inline_menu() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+# ---------------------------------------------------------------------------
+# کیبوردها و ثابتهای لغو / بازگشت مرحله (FSM)
+# ---------------------------------------------------------------------------
+CANCEL_TEXT = "❌ لغو عملیات"
+BACK_STEP_TEXT = "🔙 مرحله قبل"
+CANCEL_TEXTS = {CANCEL_TEXT, "لغو", "/cancel"}
+
+
+def get_cancel_or_back_keyboard(show_back: bool = True) -> ReplyKeyboardMarkup:
+    """کیبورد معمولی مراحل دریافت ورودی: لغو عملیات و (در صورت نیاز) مرحله قبل"""
+    row: List[KeyboardButton] = []
+    if show_back:
+        row.append(KeyboardButton(text=BACK_STEP_TEXT))
+    row.append(KeyboardButton(text=CANCEL_TEXT))
+    return ReplyKeyboardMarkup(keyboard=[row], resize_keyboard=True)
+
+
+def get_inline_cancel_keyboard(show_back: bool = False) -> InlineKeyboardMarkup:
+    """کیبورد شیشه‌ای مراحل دریافت ورودی در پنل ادمین"""
+    row: List[InlineKeyboardButton] = []
+    if show_back:
+        row.append(
+            InlineKeyboardButton(text=BACK_STEP_TEXT, callback_data="fsm_back")
+        )
+    row.append(InlineKeyboardButton(text=CANCEL_TEXT, callback_data="fsm_cancel"))
+    return InlineKeyboardMarkup(inline_keyboard=[row])

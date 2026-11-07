@@ -1,4 +1,5 @@
 import shutil
+import sqlite3
 import logging
 from pathlib import Path
 from datetime import datetime, timezone
@@ -39,7 +40,8 @@ def set_sqlite_pragma(dbapi_connection, connection_record) -> None:
         cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute("PRAGMA synchronous=NORMAL;")
         cursor.execute("PRAGMA foreign_keys=ON;")
-        cursor.execute("PRAGMA busy_timeout=15000;")
+        cursor.execute("PRAGMA busy_timeout=30000;")
+        cursor.execute("PRAGMA temp_store=MEMORY;")
         cursor.close()
 
 
@@ -75,7 +77,14 @@ def backup_database() -> Optional[str]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_file = backup_dir / f"ketabkharsho_backup_{timestamp}.db"
     try:
-        shutil.copy2(db_path, backup_file)
+        src_conn = sqlite3.connect(str(db_path), timeout=30)
+        dst_conn = sqlite3.connect(str(backup_file))
+        try:
+            with dst_conn:
+                src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+            src_conn.close()
         logger.info(f"نسخه پشتیبان دیتابیس ایجاد شد: {backup_file}")
 
         # نگهداری حداکثر ۳۰ نسخه پشتیبان اخیر جهت جلوگیری از پر شدن دیسک
@@ -185,15 +194,31 @@ def _run_migrations() -> None:
 
 
 def get_or_create_active_cycle(db: Session, league: League, default_start_shamsi: Optional[str] = None) -> Cycle:
-    """تضمین وجود یک چله (Cycle) فعال برای لیگ و برگرداندن آن"""
-    active_cycle = (
+    """تضمین وجود دقیقاً یک چله (Cycle) فعال برای لیگ و برگرداندن آن"""
+    active_cycles = (
         db.query(Cycle)
         .filter(Cycle.league_id == league.id, Cycle.status == "active")
         .order_by(Cycle.cycle_number.desc(), Cycle.id.desc())
-        .first()
+        .all()
     )
-    if active_cycle:
-        return active_cycle
+    if active_cycles:
+        primary_cycle = active_cycles[0]
+        dirty = False
+        if len(active_cycles) > 1:
+            for extra_cycle in active_cycles[1:]:
+                extra_cycle.status = "finished"
+                if not extra_cycle.finished_at:
+                    extra_cycle.finished_at = datetime.now(timezone.utc)
+            dirty = True
+        if league.start_shamsi and primary_cycle.start_shamsi != league.start_shamsi:
+            primary_cycle.start_shamsi = league.start_shamsi
+            dirty = True
+        if league.cycle_number and primary_cycle.cycle_number != league.cycle_number:
+            primary_cycle.cycle_number = league.cycle_number
+            dirty = True
+        if dirty:
+            db.commit()
+        return primary_cycle
 
     from services import DateService
 

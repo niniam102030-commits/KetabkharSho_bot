@@ -35,15 +35,21 @@ class BaleAiohttpSession(AiohttpSession):
     نشست اختصاصی سازگار با پیام‌رسان بله و تلگرام.
     سرور پیام‌رسان بله در هنگام آپلود فایل‌های Multipart (مانند اکسل) در صورتی که
     نام فیلدها یا نام فایل فارسی URL-Encode شود (quote_fields=True پیش‌فرض aiohttp)،
-    خطا برمی‌گرداند. این کلاس با تنظیم quote_fields=False در FormData مشکل را به طور کامل رفع می‌کند.
+    یا فایل به جای نام اصلی فیلد (مانند document) با attach:// کلید تصادفی ارسال شود،
+    خطای «failed to get HTTP URL content» برمی‌گرداند.
+    این کلاس با نگه‌داشتن نام مستقیم فیلد فایل و تنظیم quote_fields=False در FormData
+    مشکل ارسال اسناد در پیام‌رسان بله را به طور کامل رفع می‌کند.
     """
 
     def build_form_data(self, bot: Bot, method: TelegramMethod[Any]) -> FormData:
         form = FormData(quote_fields=False)
         files: dict[str, InputFile] = {}
         for key, value in method.model_dump(warnings=False).items():
+            if isinstance(value, InputFile):
+                files[key] = value
+                continue
             value = self.prepare_value(value, bot=bot, files=files)
-            if not value:
+            if value is None:
                 continue
             form.add_field(key, value)
         for key, value in files.items():
@@ -56,7 +62,7 @@ class BaleAiohttpSession(AiohttpSession):
             form.add_field(
                 key,
                 file_payload,
-                filename=value.filename or key or secrets.token_urlsafe(8),
+                filename=value.filename or (os.path.basename(value.path) if hasattr(value, "path") else key),
             )
         return form
 

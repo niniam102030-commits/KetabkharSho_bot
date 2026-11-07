@@ -85,7 +85,7 @@ class User(Base):
     is_active = Column(Boolean, default=True, nullable=False)
     reminder_enabled = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     def get_effective_floor(self, league_floor: int) -> int:
         """برگرداندن میثاق اختصاصی کاربر در صورت وجود، در غیر این صورت کف لیگ"""
@@ -129,7 +129,7 @@ class League(Base):
     cycle_number = Column(Integer, default=1, nullable=False)
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class Cycle(Base):
@@ -210,7 +210,7 @@ class SystemState(Base):
 
     key = Column(String(100), primary_key=True)
     value = Column(String(255), nullable=True)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class GroupMessage(Base):
@@ -224,7 +224,7 @@ class GroupMessage(Base):
     )
     msg_key = Column(String(50), nullable=False, index=True)
     custom_text = Column(Text, nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
 class GroupTerm(Base):
@@ -238,4 +238,4 @@ class GroupTerm(Base):
     )
     term_key = Column(String(50), nullable=False, index=True)
     custom_term = Column(String(100), nullable=False)
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

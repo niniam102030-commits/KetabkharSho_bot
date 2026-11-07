@@ -1,4 +1,5 @@
 import re
+import uuid
 import logging
 from pathlib import Path
 from datetime import datetime, date, timedelta, timezone
@@ -654,7 +655,8 @@ class ReportService:
             reports_dir.mkdir(parents=True, exist_ok=True)
             safe_name = cls._sanitize_filename(league_name)
             ts = DateService.now_iran().strftime("%Y%m%d_%H%M%S")
-            output_path = str(reports_dir / f"league_{safe_name}_c{cycle_number}_d{current_day}_{ts}.xlsx")
+            uid_short = uuid.uuid4().hex[:6]
+            output_path = str(reports_dir / f"league_{safe_name}_c{cycle_number}_d{current_day}_{ts}_{uid_short}.xlsx")
 
         wb.save(output_path)
         return output_path
@@ -673,7 +675,8 @@ class ReportService:
         reports_dir.mkdir(parents=True, exist_ok=True)
         safe_name = cls._sanitize_filename(league_name)
         ts = DateService.now_iran().strftime("%Y%m%d_%H%M%S")
-        out_file = str(reports_dir / f"weekly_{safe_name}_c{cycle_number}_{ts}.xlsx")
+        uid_short = uuid.uuid4().hex[:6]
+        out_file = str(reports_dir / f"weekly_{safe_name}_c{cycle_number}_{ts}_{uid_short}.xlsx")
         return cls.generate_excel(
             league_name=league_name,
             users_data=users_data,
@@ -702,13 +705,17 @@ class ReportService:
 
         if isinstance(db_or_data, Session):
             db = db_or_data
-            league_query = db.query(League).filter(League.is_deleted == False)
-            if group_ids is not None:
-                league_query = league_query.filter(League.group_id.in_(group_ids))
-            if league_id is not None:
-                league_query = league_query.filter(League.id == league_id)
-            leagues = league_query.order_by(League.id.asc()).all()
+            if group_ids is not None and len(group_ids) == 0:
+                leagues = []
+            else:
+                league_query = db.query(League).filter(League.is_deleted == False)
+                if group_ids is not None:
+                    league_query = league_query.filter(League.group_id.in_(group_ids))
+                if league_id is not None:
+                    league_query = league_query.filter(League.id == league_id)
+                leagues = league_query.order_by(League.group_id.asc(), League.id.asc()).all()
 
+            multi_group = group_ids is None or len(set(group_ids)) > 1
             for lg in leagues:
                 cycles = (
                     db.query(Cycle)
@@ -716,9 +723,10 @@ class ReportService:
                     .order_by(Cycle.cycle_number.desc(), Cycle.id.desc())
                     .all()
                 )
+                grp_prefix = f"G{lg.group_id}_" if multi_group else ""
                 for cyc in cycles:
-                    sheet_title = f"{lg.name[:15]}_چله{cyc.cycle_number}_{'فعال' if cyc.status == 'active' else 'پایان'}"
-                    sheet_title = re.sub(r'[\\/*?:\[\]]', "_", sheet_title)[:31]
+                    sheet_title = f"{grp_prefix}{lg.name[:12]}_چله{cyc.cycle_number}_{'فعال' if cyc.status == 'active' else 'پایان'}"
+                    sheet_title = re.sub(r'[\/*?:\[\]]', "_", sheet_title)[:31]
                     if sheet_title in wb.sheetnames:
                         sheet_title = f"{sheet_title[:27]}_{cyc.id}"[:31]
 
@@ -844,7 +852,8 @@ class ReportService:
             reports_dir = Path("./reports")
             reports_dir.mkdir(parents=True, exist_ok=True)
             ts = DateService.now_iran().strftime("%Y%m%d_%H%M%S")
-            output_path = str(reports_dir / f"cycles_history_archive_{ts}.xlsx")
+            uid_short = uuid.uuid4().hex[:6]
+            output_path = str(reports_dir / f"cycles_history_archive_{ts}_{uid_short}.xlsx")
 
         wb.save(output_path)
         return output_path
@@ -882,13 +891,17 @@ class AbsenceService:
         current_list_str: Optional[str],
         target_count: int,
         max_day: int = 40,
+        exclude_days: Optional[Iterable[int]] = None,
+        preferred_days: Optional[Iterable[int]] = None,
+        current_day: Optional[int] = None,
     ) -> str:
         """
         همگام‌سازی لیست روزها (absent_days_list یا late_days_list) هنگامی که ادمین
         تعداد غیبت یا تاخیر را به صورت دستی ویرایش می‌کند.
         """
         target_count = max(0, int(target_count))
-        days = cls.parse_days_list(current_list_str)
+        excluded = {int(d) for d in (exclude_days or []) if int(d) > 0}
+        days = [d for d in cls.parse_days_list(current_list_str) if d not in excluded]
 
         if target_count == 0:
             return ""
@@ -898,14 +911,45 @@ class AbsenceService:
             # حذف از انتهای لیست تا به تعداد جدید برسد
             return cls.format_days_list(days[:target_count])
 
-        # اگر تعداد فعلی کمتر از target_count است، روزهای خالی را اضافه می‌کنیم
         existing_set = set(days)
+
+        # ۱. اولویت اول: روزهای پیشنهادی (مثلاً روزهای گذشته چله برای غیبت، یا روزهای دارای لاگ برای تاخیر)
+        if preferred_days:
+            for p_day in preferred_days:
+                if len(existing_set) >= target_count:
+                    break
+                p_val = int(p_day)
+                if p_val > 0 and p_val not in existing_set and p_val not in excluded:
+                    existing_set.add(p_val)
+
+        # ۲. اولویت دوم: روزهای گذشته قبل از امروز (۱ تا current_day - 1)
+        if current_day and current_day > 1:
+            for cand in range(1, int(current_day)):
+                if len(existing_set) >= target_count:
+                    break
+                if cand not in existing_set and cand not in excluded:
+                    existing_set.add(cand)
+
+        # ۳. اولویت سوم: از انتهای چله به عقب (۴۰، ۳۹، ...) تا با ثبت مطالعه امروز و فردا تداخل نکند
+        upper_bound = max(max_day, target_count + len(excluded) + 10)
+        for cand in range(max_day, 0, -1):
+            if len(existing_set) >= target_count:
+                break
+            if cand not in existing_set and cand not in excluded and cand != current_day:
+                existing_set.add(cand)
+
         candidate = 1
-        upper_bound = max(max_day, target_count + 10)
         while len(existing_set) < target_count and candidate <= upper_bound:
-            if candidate not in existing_set:
+            if candidate not in existing_set and candidate not in excluded:
                 existing_set.add(candidate)
             candidate += 1
+
+        # اگر باز هم به تعداد نرسید (مثلاً تمام روزها پر بودند)، از انتهای دوره پر می‌کنیم
+        for cand in range(upper_bound, 0, -1):
+            if len(existing_set) >= target_count:
+                break
+            if cand not in existing_set:
+                existing_set.add(cand)
         return cls.format_days_list(existing_set)
 
     @classmethod
@@ -996,21 +1040,25 @@ class AbsenceService:
                         if u_created.date() > target_date:
                             continue
 
-                    # آیا کاربر برای این روز یا این تاریخ لاگی ثبت کرده است؟
+                    # آیا کاربر برای این روز یا این تاریخ در چله فعلی لاگ معتبری ثبت کرده است؟
                     has_log = (
                         db.query(ActivityLog)
                         .filter(
                             ActivityLog.user_id == u.id,
                             ActivityLog.league_id == lg.id,
-                            (ActivityLog.log_date == dt_str)
+                            (ActivityLog.cycle_id == active_cycle.id)
                             | (
-                                (ActivityLog.cycle_id == active_cycle.id)
-                                & (ActivityLog.league_day == day_num)
+                                (ActivityLog.cycle_id == None)
+                                & (ActivityLog.cycle_number == lg.cycle_number)
                             ),
+                            (ActivityLog.log_date == dt_str)
+                            | (ActivityLog.league_day == day_num),
+                            ActivityLog.minutes > 0,
                         )
                         .first()
                     )
                     if not has_log:
+                        from database import set_system_state
                         absent_days = cls.parse_days_list(u.absent_days_list)
                         late_days = cls.parse_days_list(u.late_days_list)
                         if day_num not in absent_days and day_num not in late_days:
@@ -1018,6 +1066,7 @@ class AbsenceService:
                             u.absent_days_list = cls.format_days_list(absent_days)
                             u.no_study_days = len(absent_days)
                             u.streak = 0
+                            set_system_state(db, f"streak_offset_{u.id}", "0")
                             total_absences_recorded += 1
 
         db.commit()
@@ -1074,7 +1123,11 @@ class AbsenceService:
                 .filter(
                     ActivityLog.user_id == u.id,
                     ActivityLog.league_id == lg.id,
-                    (ActivityLog.cycle_id == cyc.id) | (ActivityLog.cycle_number == lg.cycle_number),
+                    (ActivityLog.cycle_id == cyc.id)
+                    | (
+                        (ActivityLog.cycle_id == None)
+                        & (ActivityLog.cycle_number == lg.cycle_number)
+                    ),
                     ActivityLog.minutes > 0,
                 )
                 .all()
@@ -1083,9 +1136,9 @@ class AbsenceService:
             logged_days = set()
             start_d = DateService.shamsi_to_date(cyc.start_shamsi or lg.start_shamsi)
             for log in logs:
-                if log.league_day and 1 <= int(log.league_day) <= settings.LEAGUE_DURATION:
+                if log.league_day is not None and 1 <= int(log.league_day) <= settings.LEAGUE_DURATION:
                     logged_days.add(int(log.league_day))
-                elif log.log_date and start_d:
+                elif log.league_day is None and log.log_date and start_d:
                     try:
                         ld = datetime.strptime(log.log_date[:10], "%Y-%m-%d").date()
                         d_num = (ld - start_d).days + 1
@@ -1107,6 +1160,95 @@ class AbsenceService:
         return updated_count
 
     @classmethod
+    def _compute_raw_streak_from_logs(
+        cls,
+        db: Session,
+        u: User,
+        lg: League,
+        cyc: Cycle,
+    ) -> int:
+        """محاسبه زنجیره خام صرفاً بر اساس پیوستگی لاگ‌های ثبت‌شده در چله فعال"""
+        today_str = DateService.today_str()
+        yesterday_str = DateService.yesterday_str()
+
+        logs = (
+            db.query(ActivityLog)
+            .filter(
+                ActivityLog.user_id == u.id,
+                ActivityLog.league_id == lg.id,
+                (ActivityLog.cycle_id == cyc.id)
+                | (
+                    (ActivityLog.cycle_id == None)
+                    & (ActivityLog.cycle_number == lg.cycle_number)
+                ),
+                ActivityLog.minutes > 0,
+            )
+            .all()
+        )
+
+        start_d = DateService.shamsi_to_date(cyc.start_shamsi or lg.start_shamsi)
+        end_d = (start_d + timedelta(days=settings.LEAGUE_DURATION - 1)) if start_d else None
+        logged_dates = set()
+        for log in logs:
+            if log.log_date and (
+                log.league_day is None or 1 <= int(log.league_day) <= settings.LEAGUE_DURATION
+            ):
+                try:
+                    ld_obj = datetime.strptime(log.log_date[:10], "%Y-%m-%d").date()
+                    if start_d and ld_obj < start_d:
+                        continue
+                    if end_d and ld_obj > end_d:
+                        continue
+                    logged_dates.add(log.log_date[:10])
+                except ValueError:
+                    logged_dates.add(log.log_date[:10])
+        logged_days = {
+            int(log.league_day)
+            for log in logs
+            if log.league_day is not None and 1 <= int(log.league_day) <= settings.LEAGUE_DURATION
+        }
+
+        raw_current_day = DateService.calculate_raw_league_day(
+            cyc.start_shamsi or lg.start_shamsi
+        )
+        current_day = min(raw_current_day, settings.LEAGUE_DURATION)
+
+        if raw_current_day <= settings.LEAGUE_DURATION:
+            if current_day in logged_days or today_str in logged_dates:
+                anchor_day = current_day
+                anchor_date = DateService.today_date()
+            elif (
+                current_day > 1
+                and ((current_day - 1) in logged_days or yesterday_str in logged_dates)
+            ):
+                anchor_day = current_day - 1
+                anchor_date = DateService.yesterday_date()
+            else:
+                return 0
+        else:
+            last_cycle_day = settings.LEAGUE_DURATION
+            end_date_str = end_d.strftime("%Y-%m-%d") if end_d else yesterday_str
+            if last_cycle_day in logged_days or end_date_str in logged_dates:
+                anchor_day = last_cycle_day
+                anchor_date = end_d or DateService.yesterday_date()
+            else:
+                return 0
+
+        streak_by_day = 0
+        d_cursor = anchor_day
+        while d_cursor >= 1 and d_cursor in logged_days:
+            streak_by_day += 1
+            d_cursor -= 1
+
+        streak_by_date = 0
+        dt_cursor = anchor_date
+        while dt_cursor.strftime("%Y-%m-%d") in logged_dates:
+            streak_by_date += 1
+            dt_cursor -= timedelta(days=1)
+
+        return max(streak_by_day, streak_by_date)
+
+    @classmethod
     def reconcile_streaks(
         cls,
         db: Session,
@@ -1115,9 +1257,9 @@ class AbsenceService:
     ) -> int:
         """
         محاسبه مجدد زنجیره استمرار (Streak) بر اساس پیوستگی واقعی لاگ‌های کاربر در چله جاری
-        منتهی به امروز (در صورت ثبت امروز) یا دیروز (در صورت عدم ثبت امروز).
+        با حفظ آفست ویرایش دستی ادمین در صورت برقرار بودن زنجیره.
         """
-        from database import get_or_create_active_cycle
+        from database import get_or_create_active_cycle, get_system_state, set_system_state
 
         if user is not None:
             users_to_check = [user]
@@ -1130,8 +1272,6 @@ class AbsenceService:
         else:
             users_to_check = db.query(User).filter(User.is_active == True, User.league_id.isnot(None)).all()
 
-        today_str = DateService.today_str()
-        yesterday_str = DateService.yesterday_str()
         last_streak = 0
 
         for u in users_to_check:
@@ -1146,65 +1286,29 @@ class AbsenceService:
                 continue
 
             cyc = get_or_create_active_cycle(db, lg)
-            logs = (
-                db.query(ActivityLog)
-                .filter(
-                    ActivityLog.user_id == u.id,
-                    ActivityLog.league_id == lg.id,
-                    (ActivityLog.cycle_id == cyc.id) | (ActivityLog.cycle_number == lg.cycle_number),
-                    ActivityLog.minutes > 0,
+            raw_streak = cls._compute_raw_streak_from_logs(db, u, lg, cyc)
+
+            raw_offset_str = get_system_state(db, f"streak_offset_{u.id}", "0")
+            try:
+                offset = int(raw_offset_str or "0")
+            except ValueError:
+                offset = 0
+
+            if raw_streak == 0:
+                raw_current_day = DateService.calculate_raw_league_day(
+                    cyc.start_shamsi or lg.start_shamsi
                 )
-                .all()
-            )
-
-            start_d = DateService.shamsi_to_date(cyc.start_shamsi or lg.start_shamsi)
-            end_d = (start_d + timedelta(days=settings.LEAGUE_DURATION - 1)) if start_d else None
-            logged_dates = set()
-            for log in logs:
-                if log.log_date and (not log.league_day or int(log.league_day) <= settings.LEAGUE_DURATION):
-                    try:
-                        ld_obj = datetime.strptime(log.log_date[:10], "%Y-%m-%d").date()
-                        if start_d and ld_obj < start_d:
-                            continue
-                        if end_d and ld_obj > end_d:
-                            continue
-                        logged_dates.add(log.log_date[:10])
-                    except ValueError:
-                        logged_dates.add(log.log_date[:10])
-            logged_days = {
-                int(log.league_day)
-                for log in logs
-                if log.league_day and 1 <= int(log.league_day) <= settings.LEAGUE_DURATION
-            }
-
-            current_day = DateService.calculate_league_day(cyc.start_shamsi or lg.start_shamsi)
-
-            # محاسبه بر اساس شماره روزهای چله یا تاریخ‌های متوالی
-            if current_day in logged_days or today_str in logged_dates:
-                anchor_day = current_day
-                anchor_date = DateService.today_date()
-            elif (current_day - 1) in logged_days or yesterday_str in logged_dates:
-                anchor_day = current_day - 1
-                anchor_date = DateService.yesterday_date()
+                yesterday_day = raw_current_day - 1
+                absent_days = cls.parse_days_list(u.absent_days_list)
+                if offset > 0 and (yesterday_day < 1 or yesterday_day not in absent_days):
+                    u.streak = offset
+                else:
+                    u.streak = 0
+                    if offset != 0:
+                        set_system_state(db, f"streak_offset_{u.id}", "0")
             else:
-                u.streak = 0
-                last_streak = 0
-                continue
+                u.streak = max(0, raw_streak + offset)
 
-            # شمارش معکوس پیوستگی بر اساس روز چله و تاریخ
-            streak_by_day = 0
-            d_cursor = anchor_day
-            while d_cursor >= 1 and d_cursor in logged_days:
-                streak_by_day += 1
-                d_cursor -= 1
-
-            streak_by_date = 0
-            dt_cursor = anchor_date
-            while dt_cursor.strftime("%Y-%m-%d") in logged_dates:
-                streak_by_date += 1
-                dt_cursor -= timedelta(days=1)
-
-            u.streak = max(streak_by_day, streak_by_date)
             last_streak = u.streak
 
         db.commit()
