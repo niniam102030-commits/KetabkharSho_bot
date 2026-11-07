@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy import (
+    Index,
     Column,
     Integer,
     String,
@@ -37,6 +38,9 @@ class GroupAdmin(Base):
     """مدل مدیران اختصاصی هر مجموعه"""
 
     __tablename__ = "group_admins"
+    __table_args__ = (
+        Index("ix_group_admins_group_user", "group_id", "user_id"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     group_id = Column(
@@ -54,6 +58,11 @@ class User(Base):
     """
 
     __tablename__ = "users"
+    __table_args__ = (
+        Index("ix_users_league_active", "league_id", "is_active"),
+        Index("ix_users_tg_active", "telegram_id", "is_active"),
+        Index("ix_users_group_active", "group_id", "is_active"),
+    )
 
     id = Column(String(100), primary_key=True, index=True)
     telegram_id = Column(String(100), index=True, nullable=False)
@@ -113,6 +122,9 @@ class League(Base):
     """مدل لیگ‌های کتابخوانی هر مجموعه"""
 
     __tablename__ = "leagues"
+    __table_args__ = (
+        Index("ix_leagues_group_flags", "group_id", "is_deleted", "is_active"),
+    )
 
     id = Column(String(50), primary_key=True, default=generate_league_id)
     telegram_id = Column(String(100), nullable=True)
@@ -136,6 +148,9 @@ class Cycle(Base):
     """مدل چله‌های ۴۰ روزه هر لیگ"""
 
     __tablename__ = "cycles"
+    __table_args__ = (
+        Index("ix_cycles_league_status", "league_id", "status"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     league_id = Column(
@@ -154,6 +169,11 @@ class ActivityLog(Base):
     """مدل لاگ‌های ثبت مطالعه روزانه کاربران"""
 
     __tablename__ = "activity_logs"
+    __table_args__ = (
+        Index("ix_actlog_user_league_date", "user_id", "league_id", "log_date"),
+        Index("ix_actlog_league_cycle_day", "league_id", "cycle_id", "league_day"),
+        Index("ix_actlog_league_date", "league_id", "log_date"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(

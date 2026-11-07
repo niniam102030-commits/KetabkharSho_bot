@@ -1,12 +1,17 @@
 import os
+import time
 import asyncio
 import logging
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Tuple
+from typing import Any, List, Optional, Dict, Tuple
 
 from aiogram import Router, F, Bot
-from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
+from aiogram.exceptions import (
+    TelegramRetryAfter,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+)
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -16,7 +21,8 @@ from aiogram.types import (
     ReplyKeyboardRemove,
     FSInputFile,
 )
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, load_only
 
 from config import settings
 from database import (
@@ -98,6 +104,56 @@ RESERVED_MENU_TEXTS = {
 # ===========================================================================
 _user_locks: Dict[str, asyncio.Lock] = {}
 
+PWD_MAX_FAILS_PER_USER = 5
+PWD_USER_LOCK_SECONDS = 600
+PWD_GLOBAL_MAX_FAILS_PER_HOUR = 100
+PWD_GLOBAL_LOCK_SECONDS = 3600
+
+
+def _state_int(db: Session, key: str, default: int = 0) -> int:
+    try:
+        return int(get_system_state(db, key, str(default)) or default)
+    except ValueError:
+        return default
+
+
+def _pwd_is_locked(db: Session, tg_key: str) -> bool:
+    """بررسی قفل پایدار تلاش رمز: هم برای همین کاربر و هم قفل سراسری"""
+    now = int(time.time())
+    if now < _state_int(db, f"pwd_lock_{tg_key}"):
+        return True
+    if now < _state_int(db, "pwd_global_lock"):
+        return True
+    return False
+
+
+def _pwd_register_failure(db: Session, tg_key: str) -> str:
+    """ثبت یک تلاش ناموفق. خروجی: 'ok' یا 'user_locked' یا 'global_locked'"""
+    now = int(time.time())
+
+    # شمارنده سراسری (پنجره ۱ ساعته)
+    g_start = _state_int(db, "pwd_global_start")
+    g_count = _state_int(db, "pwd_global_count")
+    if g_start == 0 or now - g_start > 3600:
+        g_start, g_count = now, 0
+    g_count += 1
+    set_system_state(db, "pwd_global_start", str(g_start))
+    set_system_state(db, "pwd_global_count", str(g_count))
+    if g_count >= PWD_GLOBAL_MAX_FAILS_PER_HOUR:
+        set_system_state(db, "pwd_global_lock", str(now + PWD_GLOBAL_LOCK_SECONDS))
+        set_system_state(db, "pwd_global_count", "0")
+        logger.warning("Global group-password lock triggered: too many failed attempts.")
+        return "global_locked"
+
+    # شمارنده اختصاصی کاربر
+    fails = _state_int(db, f"pwd_fail_{tg_key}") + 1
+    if fails >= PWD_MAX_FAILS_PER_USER:
+        set_system_state(db, f"pwd_fail_{tg_key}", "0")
+        set_system_state(db, f"pwd_lock_{tg_key}", str(now + PWD_USER_LOCK_SECONDS))
+        return "user_locked"
+    set_system_state(db, f"pwd_fail_{tg_key}", str(fails))
+    return "ok"
+
 
 def _get_user_lock(user_key: str | int) -> asyncio.Lock:
     """دریافت قفل اختصاصی هر کاربر جهت جلوگیری از شرایط رقابتی (Race Condition)"""
@@ -139,6 +195,9 @@ async def safe_send(
         except Exception as retry_exc:
             logger.debug(f"خطا پس از انتظار FloodWait در ارسال به {chat_id}: {retry_exc}")
             return None
+    except TelegramForbiddenError:
+        logger.debug(f"کاربر {chat_id} ربات را بلاک کرده یا چت در دسترس نیست.")
+        return None
     except TelegramBadRequest:
         try:
             return await bot.send_message(
@@ -201,31 +260,121 @@ async def safe_answer(
             return None
 
 
+class BroadcastThrottle:
+    """
+    کنترل نرخ ارسال انبوه (Staggered Sending):
+    بین هر پیام msg_delay ثانیه و پس از هر batch_size پیام batch_pause ثانیه توقف می‌کند
+    تا نرخ ارسال حدود ۲۰ تا ۳۰ پیام در ثانیه بماند.
+    """
+
+    def __init__(
+        self,
+        batch_size: Optional[int] = None,
+        msg_delay: Optional[float] = None,
+        batch_pause: Optional[float] = None,
+    ) -> None:
+        self.batch_size = max(
+            1, int(batch_size if batch_size is not None else settings.BROADCAST_BATCH_SIZE)
+        )
+        self.msg_delay = max(
+            0.0, float(msg_delay if msg_delay is not None else settings.BROADCAST_MSG_DELAY)
+        )
+        self.batch_pause = max(
+            0.0, float(batch_pause if batch_pause is not None else settings.BROADCAST_BATCH_PAUSE)
+        )
+        self._count = 0
+
+    async def tick(self) -> None:
+        """فراخوانی پس از هر ارسال؛ تاخیر کنترل‌شده بین پیام‌ها و دسته‌ها"""
+        self._count += 1
+        if self.msg_delay > 0:
+            await asyncio.sleep(self.msg_delay)
+        if self.batch_pause > 0 and self._count % self.batch_size == 0:
+            await asyncio.sleep(self.batch_pause)
+
+
+async def safe_send_document(
+    bot: Bot,
+    chat_id: int | str,
+    file_path: str,
+    caption: Optional[str] = None,
+    throttle: Optional[BroadcastThrottle] = None,
+) -> bool:
+    """ارسال ایمن سند با یک بار تلاش مجدد پس از TelegramRetryAfter؛ هرگز استثنا پرتاب نمی‌کند"""
+    ok = False
+    for _attempt in range(2):
+        try:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=FSInputFile(file_path),
+                caption=caption,
+            )
+            ok = True
+            break
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(min(exc.retry_after, 30))
+            continue
+        except TelegramForbiddenError:
+            break
+        except Exception as exc:
+            logger.warning(f"عدم امکان ارسال سند به {chat_id}: {exc}")
+            break
+    if throttle is not None:
+        await throttle.tick()
+    return ok
+
+
+async def dispatch_outbox(
+    bot: Bot,
+    outbox: List[Tuple[str, str, Any]],
+    throttle: Optional[BroadcastThrottle] = None,
+) -> int:
+    """
+    ارسال پلکانی لیستی از (chat_id, text, reply_markup).
+    خطای هر پیام فقط همان پیام را رد می‌کند و حلقه ادامه می‌یابد. خروجی: تعداد ارسال موفق.
+    """
+    throttle = throttle or BroadcastThrottle()
+    sent = 0
+    for chat_id, text, markup in outbox:
+        try:
+            res = await safe_send(bot, chat_id, text, reply_markup=markup)
+            if res:
+                sent += 1
+        except Exception as exc:
+            logger.warning(f"خطای پیش‌بینی‌نشده در ارسال به {chat_id}: {exc}")
+        await throttle.tick()
+    return sent
+
+
 async def send_text_chunks(
     bot: Bot,
     chat_id: int | str,
     full_text: str,
     max_len: int = 3500,
     reply_markup=None,
+    throttle: Optional[BroadcastThrottle] = None,
 ) -> None:
-    """تقسیم خط‌به‌خط متن‌های طولانی (بیش از ۳۵۰۰ کاراکتر) و ارسال متوالی آن‌ها"""
+    """تقسیم خط‌به‌خط متن‌های طولانی (بیش از ۳۵۰۰ کاراکتر) و ارسال متوالی آن‌ها (با throttle اختیاری)"""
     if len(full_text) <= max_len:
         await safe_send(bot, chat_id, full_text, reply_markup=reply_markup)
+        if throttle is not None:
+            await throttle.tick()
         return
 
-    lines = full_text.split("\n")
+    lines = full_text.splitlines()
     chunks: List[str] = []
     current_chunk: List[str] = []
     current_len = 0
 
     for line in lines:
-        if current_len + len(line) + 1 > max_len and current_chunk:
+        line_len = len(line) + 1
+        if current_len + line_len > max_len and current_chunk:
             chunks.append("\n".join(current_chunk))
             current_chunk = [line]
-            current_len = len(line) + 1
+            current_len = line_len
         else:
             current_chunk.append(line)
-            current_len += len(line) + 1
+            current_len += line_len
 
     if current_chunk:
         chunks.append("\n".join(current_chunk))
@@ -233,8 +382,8 @@ async def send_text_chunks(
     for idx, ch in enumerate(chunks):
         kb = reply_markup if idx == len(chunks) - 1 else None
         await safe_send(bot, chat_id, ch, reply_markup=kb)
-
-
+        if throttle is not None:
+            await throttle.tick()
 def user_can_log_late(db: Session, user: Optional[User]) -> bool:
     """
     بررسی شرط فعال بودن دکمه «ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)»:
@@ -305,7 +454,9 @@ def build_user_main_menu(db: Session, telegram_id: str | int, active_user: Optio
     )
 
 
-def format_league_leaderboard(db: Session, league: League) -> str:
+def format_league_leaderboard(
+    db: Session, league: League, exclude_user_ids: Optional[set] = None
+) -> str:
     """
     ساخت متن جدول آنلاین لیگ مطابق فرمت استاندارد:
     👑 *جدول آنلاین لیگ: {league.name}* 🌸
@@ -320,6 +471,8 @@ def format_league_leaderboard(db: Session, league: League) -> str:
         .filter(User.league_id == league.id, User.is_active == True)
         .all()
     )
+    if exclude_user_ids:
+        users = [u for u in users if u.id not in exclude_user_ids]
     ranked = ScoringService.rank_users(users, league.floor)
 
     header = (
@@ -457,6 +610,15 @@ async def cb_join_new_group_prompt(callback: CallbackQuery, state: FSMContext) -
 
 @user_router.message(StudyStates.waiting_for_group_password)
 async def process_group_password(message: Message, state: FSMContext) -> None:
+    tg_key = str(message.from_user.id)
+    with get_db() as db_chk:
+        locked = _pwd_is_locked(db_chk, tg_key)
+    if locked:
+        await safe_answer(
+            message,
+            "⛔️ به دلیل تلاشهای ناموفق زیاد، موقتاً امکان وارد کردن رمز وجود ندارد. چند دقیقه دیگر تلاش کنید.",
+        )
+        return
     raw_pwd = DateService.normalize_digits(message.text or "")
     with get_db() as db:
         grp = (
@@ -465,6 +627,15 @@ async def process_group_password(message: Message, state: FSMContext) -> None:
             .first()
         )
         if not grp:
+            verdict = _pwd_register_failure(db, tg_key)
+            if verdict != "ok":
+                await state.clear()
+                await safe_answer(
+                    message,
+                    "⛔️ تعداد تلاشهای ناموفق زیاد بود. چند دقیقه دیگر دوباره تلاش کنید.",
+                    reply_markup=get_start_menu(),
+                )
+                return
             await safe_answer(
                 message,
                 "❌ رمز عبور اشتباه است.\n\n"
@@ -474,6 +645,8 @@ async def process_group_password(message: Message, state: FSMContext) -> None:
             return
         group_id = grp.id
 
+    with get_db() as db_ok:
+        set_system_state(db_ok, f"pwd_fail_{message.from_user.id}", "0")
     await state.update_data(reg_group_id=group_id)
     await state.set_state(StudyStates.register_name)
     await safe_answer(message, "لطفاً فقط نام (کوچک) خود را وارد کنید:")
@@ -701,7 +874,12 @@ async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> No
             target_user.created_at = datetime.now(timezone.utc)
             db.query(ActivityLog).filter(
                 ActivityLog.user_id == target_user.id,
-                ActivityLog.cycle_id == cycle.id,
+                ActivityLog.league_id == league.id,
+                (ActivityLog.cycle_id == cycle.id)
+                | (
+                    (ActivityLog.cycle_id == None)
+                    & (ActivityLog.cycle_number == league.cycle_number)
+                ),
             ).delete(synchronize_session=False)
             db.commit()
         else:
@@ -1721,8 +1899,8 @@ async def send_startup_notification(bot: Bot) -> int:
 async def send_daily_admin_reports(bot: Bot, force: bool = False) -> None:
     """
     ۲. جاب ساعت 01:00 بامداد:
-    ارسال گزارش متنی رتبه‌بندی روز گذشته (📊 آرشیو چله X روز Y لیگ: ...)
-    برای ادمین‌های هر مجموعه، سوپرادمین‌ها و کانال آرشیو در صورت تنظیم.
+    ارسال گزارش متنی رتبه‌بندی روز گذشته به صورت پلکانی و لیگ به لیگ،
+    با حداقل اشغال نشست دیتابیس و کنترل نرخ ارسال.
     """
     today_str = DateService.today_str()
     with get_db() as db:
@@ -1730,8 +1908,9 @@ async def send_daily_admin_reports(bot: Bot, force: bool = False) -> None:
         if last_run == today_str and not force:
             return
 
-        leagues = (
-            db.query(League)
+        league_ids = [
+            r[0]
+            for r in db.query(League.id)
             .filter(
                 League.is_deleted == False,
                 League.is_active == True,
@@ -1739,50 +1918,66 @@ async def send_daily_admin_reports(bot: Bot, force: bool = False) -> None:
             )
             .order_by(League.id.asc())
             .all()
-        )
-
-        reports_to_send: List[Tuple[List[str], str]] = []
-        for lg in leagues:
-            cyc = get_or_create_active_cycle(db, lg)
-            curr_day = DateService.calculate_league_day(
-                cyc.start_shamsi or lg.start_shamsi
-            )
-            archived_day = max(1, curr_day - 1)
-            table_txt = format_league_leaderboard(db, lg)
-            report_text = (
-                f"📊 *آرشیو چله {cyc.cycle_number} روز {archived_day} لیگ: {escape_md(lg.name)}*\n\n"
-                f"{table_txt}"
-            )
-            report_text = MessageService.apply_terms(db, lg.group_id, report_text)
-
-            group_admins = (
-                db.query(GroupAdmin)
-                .filter(GroupAdmin.group_id == lg.group_id)
-                .all()
-            )
-            recipients = {str(a.user_id) for a in group_admins}
-            for sa in settings.ADMIN_IDS:
-                recipients.add(str(sa))
-            if settings.ARCHIVE_CHANNEL:
-                recipients.add(settings.ARCHIVE_CHANNEL)
-
-            reports_to_send.append((list(recipients), report_text))
-
+        ]
         set_system_state(db, "last_daily_admin_report_date", today_str)
 
-    for recipients, rep_txt in reports_to_send:
+    throttle = BroadcastThrottle()
+    for league_id in league_ids:
+        recipients: List[str] = []
+        report_text = ""
+        try:
+            with get_db() as db:
+                lg = db.get(League, league_id)
+                if (
+                    not lg
+                    or lg.is_deleted
+                    or not lg.is_active
+                    or not lg.archive_enabled
+                ):
+                    continue
+                cyc = get_or_create_active_cycle(db, lg)
+                curr_day = DateService.calculate_league_day(
+                    cyc.start_shamsi or lg.start_shamsi
+                )
+                archived_day = max(1, curr_day - 1)
+                table_txt = format_league_leaderboard(db, lg)
+                report_text = (
+                    f"📊 *آرشیو چله {cyc.cycle_number} روز {archived_day} لیگ: {escape_md(lg.name)}*\n\n"
+                    f"{table_txt}"
+                )
+                report_text = MessageService.apply_terms(db, lg.group_id, report_text)
+
+                group_admins = (
+                    db.query(GroupAdmin.user_id)
+                    .filter(GroupAdmin.group_id == lg.group_id)
+                    .all()
+                )
+                rcpt_set = {str(a[0]) for a in group_admins}
+                for sa in settings.ADMIN_IDS:
+                    rcpt_set.add(str(sa))
+                if settings.ARCHIVE_CHANNEL:
+                    rcpt_set.add(settings.ARCHIVE_CHANNEL)
+                recipients = sorted(rcpt_set)
+        except Exception as exc:
+            logger.error(f"خطا در ساخت گزارش آرشیو لیگ {league_id}: {exc}", exc_info=True)
+            continue
+
         for rcpt in recipients:
-            await send_text_chunks(bot, rcpt, rep_txt)
+            try:
+                await send_text_chunks(bot, rcpt, report_text, throttle=throttle)
+            except Exception as exc:
+                logger.warning(f"خطا در ارسال گزارش آرشیو به {rcpt}: {exc}")
 
-
-async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, active_cycle: Cycle) -> None:
+async def _complete_and_rollover_cycle(
+    bot: Bot, db: Session, league: League, active_cycle: Cycle
+) -> Dict[str, Any]:
     """
     فرآیند کامل پایان چله ۴۰ روزه در ساعت ۸ صبح روز ۴۱ام:
-    ۱. تفکیک مطالعات صبحگاهی سحرخیزان در روز ۴۱ام (early_morning_logs).
+    ۱. تفکیک مطالعات صبحگاهی سحرخیزان در روز ۴۱ام.
     ۲. ثبت رکوردهای CycleResult و بستن چله فعلی.
-    ۳. ارسال جدول نهایی متنی و فایل اکسل نهایی چله به ادمین‌ها و کاربران و پیام cycle_finished.
-    ۴. ساخت چله جدید (cycle_number + 1) از روز ۱ با تاریخ شمسی امروز.
-    ۵. بازنشانی آمار دوره کاربران و سهمیه‌ها و انتقال مطالعات صبحگاهی سحرخیزان به روز ۱ چله جدید.
+    ۳. ساخت چله جدید (cycle_number + 1) از روز ۱ با تاریخ شمسی امروز.
+    ۴. بازنشانی آمار دوره کاربران و سهمیه‌ها و انتقال مطالعات صبحگاهی سحرخیزان به روز ۱ چله جدید.
+    خروجی: دیکشنری اطلاعات کارنامه نهایی جهت ارسال امن و پلکانی در خارج از نشست دیتابیس.
     """
     today_str = DateService.today_str()
     today_shamsi = DateService.today_shamsi()
@@ -1793,21 +1988,24 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
         .all()
     )
 
-    # ۱. شناسایی و جداسازی لاگ‌های صبحگاهی امروز (روز ۴۱ قبل از ساعت ۸ صبح)
+    # ۱. شناسایی و جداسازی لاگ‌های صبحگاهی امروز با یک کوئری سریع
+    today_logs_map: Dict[str, ActivityLog] = {}
+    for t_log in (
+        db.query(ActivityLog)
+        .filter(
+            ActivityLog.league_id == league.id,
+            ActivityLog.log_date == today_str,
+        )
+        .order_by(ActivityLog.id.asc())
+        .all()
+    ):
+        today_logs_map.setdefault(t_log.user_id, t_log)
+
     early_morning_logs: Dict[str, ActivityLog] = {}
     for u in users:
-        today_log = (
-            db.query(ActivityLog)
-            .filter(
-                ActivityLog.user_id == u.id,
-                ActivityLog.league_id == league.id,
-                ActivityLog.log_date == today_str,
-            )
-            .first()
-        )
+        today_log = today_logs_map.get(u.id)
         if today_log:
             early_morning_logs[u.id] = today_log
-            # کسر موقت مقادیر صبح امروز از آمار چله قبلی تا کارنامه چله ۴۰ روزه دقیق باشد
             u.points = max(
                 0.0, round(float(u.points or 0.0) - float(today_log.points_earned or 0.0), 1)
             )
@@ -1831,7 +2029,7 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
     AbsenceService.reconcile_historical_gaps(db, league=league)
     AbsenceService.reconcile_streaks(db, league=league)
 
-    # ۲. آماده‌سازی جدول نهایی و اکسل نهایی چله قدیم (قبل از بستن چله و قبل از صفر شدن آمار)
+    # ۲. آماده‌سازی جدول نهایی و اکسل نهایی چله قدیم
     old_cycle_number = active_cycle.cycle_number
     league_name_snapshot = league.name
     group_id_snapshot = league.group_id
@@ -1951,11 +2149,11 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
     for u in users:
         set_system_state(db, f"streak_offset_{u.id}", "0")
 
-    # ارسال پیام پایان چله، جدول نهایی و فایل اکسل به ادمین‌ها و اعضا
+    # آماده‌سازی گیرندگان؛ ارسال واقعی خارج از نشست دیتابیس و به صورت پلکانی انجام می‌شود
     group_admins = (
-        db.query(GroupAdmin).filter(GroupAdmin.group_id == league.group_id).all()
+        db.query(GroupAdmin.user_id).filter(GroupAdmin.group_id == league.group_id).all()
     )
-    admin_recipients = {str(a.user_id) for a in group_admins} | {
+    admin_recipients = {str(a[0]) for a in group_admins} | {
         str(sa) for sa in settings.ADMIN_IDS
     }
     user_recipients = {str(u.telegram_id or u.id) for u in users}
@@ -1966,22 +2164,36 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
         league.group_id,
         f"🏆 کارنامه نهایی چله {old_cycle_number} لیگ «{league_name_snapshot}»",
     )
+    return {
+        "recipients": sorted(all_recipients),
+        "cycle_finished_msg": cycle_finished_msg,
+        "final_table_text": final_table_text,
+        "excel_path": final_excel_path,
+        "caption": final_caption,
+    }
+
+
+async def _dispatch_cycle_rollover(bot: Bot, payload: Dict[str, Any]) -> None:
+    """ارسال پلکانی پیام پایان چله، جدول نهایی و اکسل؛ حذف فایل اکسل در هر حالت"""
+    throttle = BroadcastThrottle()
+    excel_path = payload["excel_path"]
     try:
-        for rcpt in all_recipients:
-            await safe_send(bot, rcpt, cycle_finished_msg)
-            await send_text_chunks(bot, rcpt, final_table_text)
+        for rcpt in payload["recipients"]:
             try:
-                await bot.send_document(
-                    chat_id=rcpt,
-                    document=FSInputFile(final_excel_path),
-                    caption=final_caption,
+                await safe_send(bot, rcpt, payload["cycle_finished_msg"])
+                await throttle.tick()
+                await send_text_chunks(
+                    bot, rcpt, payload["final_table_text"], throttle=throttle
+                )
+                await safe_send_document(
+                    bot, rcpt, excel_path, caption=payload["caption"], throttle=throttle
                 )
             except Exception as exc:
-                logger.debug(f"عدم امکان ارسال اکسل پایان چله به {rcpt}: {exc}")
+                logger.warning(f"خطا در ارسال کارنامه پایان چله به {rcpt}: {exc}")
     finally:
-        if os.path.exists(final_excel_path):
+        if os.path.exists(excel_path):
             try:
-                os.remove(final_excel_path)
+                os.remove(excel_path)
             except OSError:
                 pass
 
@@ -1994,12 +2206,125 @@ async def send_daily_user_reports(bot: Bot, force: bool = False) -> None:
     async with _daily_user_reports_lock:
         await _send_daily_user_reports_impl(bot, force=force)
 
+def _build_morning_cards(
+    db: Session,
+    lg: League,
+    cyc: Cycle,
+    current_day: int,
+    yesterday_str: str,
+    force: bool,
+    admin_ids: set,
+    profile_counts: Dict[str, int],
+) -> List[Tuple[str, str, Any]]:
+    """
+    ساخت کارنامه‌های صبحگاهی یک لیگ (همگام، بدون هیچ I/O شبکه‌ای).
+    کاربران با Keyset Pagination خوانده می‌شوند و فقط رشته‌های نهایی در حافظه می‌مانند.
+    """
+    yesterday_day = max(1, current_day - 1)
+    terms = MessageService.get_terms(db, lg.group_id)
+
+    # رتبه‌بندی با ستون‌های حداقلی (فقط فیلدهای مورد نیاز کلید مرتب‌سازی)
+    ranking_users = (
+        db.query(User)
+        .options(
+            load_only(User.id, User.points, User.user_floor, User.total_minutes)
+        )
+        .filter(User.league_id == lg.id, User.is_active == True)
+        .all()
+    )
+    rank_map = {u.id: rnk for rnk, u in ScoringService.rank_users(ranking_users, lg.floor)}
+    del ranking_users
+    db.expunge_all()
+
+    # لاگ‌های دیروز کل لیگ با یک کوئری (به جای یک کوئری برای هر کاربر)
+    y_logs: Dict[str, Tuple[int, float]] = {}
+    log_query = db.query(
+        ActivityLog.user_id, ActivityLog.minutes, ActivityLog.points_earned
+    ).filter(
+        ActivityLog.league_id == lg.id,
+        (ActivityLog.cycle_id == cyc.id) | (ActivityLog.cycle_number == lg.cycle_number),
+        (ActivityLog.log_date == yesterday_str) | (ActivityLog.league_day == yesterday_day),
+        ActivityLog.minutes > 0,
+    )
+    for uid, mins, pts in log_query.yield_per(1000):
+        y_logs.setdefault(uid, (mins, pts))
+
+    outbox: List[Tuple[str, str, Any]] = []
+    chunk_size = max(50, int(settings.DB_CHUNK_SIZE))
+    last_id = ""
+    while True:
+        chunk = (
+            db.query(User)
+            .filter(
+                User.league_id == lg.id,
+                User.is_active == True,
+                User.id > last_id,
+            )
+            .order_by(User.id.asc())
+            .limit(chunk_size)
+            .all()
+        )
+        if not chunk:
+            break
+        last_id = chunk[-1].id
+
+        for u in chunk:
+            joined_before = DateService.user_joined_before_today(u)
+            if not joined_before and not force:
+                continue
+
+            y_info = y_logs.get(u.id)
+            late_days = AbsenceService.parse_days_list(u.late_days_list)
+            if y_info:
+                y_minutes, y_points = y_info
+                if yesterday_day in late_days:
+                    y_status = f"⚠️ ثبت با تاخیر ({y_minutes} دقیقه | {y_points} امتیاز)"
+                else:
+                    y_status = f"✅ ثبت موفق ({y_minutes} دقیقه | {y_points} امتیاز)"
+                hint_line = "✨ خداقوت! امروز هم مطالعه خود را به موقع ثبت کنید."
+            else:
+                y_status = "❌ عدم ثبت (غیبت)"
+                hint_line = (
+                    "💡 *راهنمایی:* اگر دیروز مطالعه داشته‌اید اما فراموش کردید ثبت کنید، "
+                    "همین امروز می‌توانید از دکمه «⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)» در منوی اصلی استفاده کنید تا غیبت دیروز شما حذف شود."
+                )
+
+            u_rank = rank_map.get(u.id, 1)
+            report_card = (
+                f"☀️ *کارنامه صبحگاهی باشگاه کتابخوارشو*\n"
+                f"🏆 لیگ: *{escape_md(lg.name)}* (چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION})\n"
+                f"───────────────────\n"
+                f"👤 نام: *{escape_md(u.name)}*\n"
+                f"📌 وضعیت دیروز (روز {yesterday_day}): {y_status}\n"
+                f"🏅 رتبه فعلی شما: *{u_rank}*\n"
+                f"⭐️ امتیاز کل: *{round(float(u.points or 0.0), 1)}*\n"
+                f"🔥 زنجیره استمرار: *{u.streak}* روز\n"
+                f"❌ تعداد غیبت دوره: *{u.no_study_days}* روز\n\n"
+                f"{hint_line}"
+            )
+            report_card = MessageService.apply_terms(
+                db, lg.group_id, report_card, terms=terms
+            )
+            tg_target = str(u.telegram_id or u.id)
+            can_late = (not y_info) and current_day > 1 and joined_before
+            kb = get_main_menu(
+                is_admin=(tg_target in admin_ids),
+                has_multiple_profiles=(profile_counts.get(tg_target, 1) > 1),
+                can_log_late=can_late,
+            )
+            outbox.append((tg_target, report_card, kb))
+
+        db.expunge_all()
+
+    return outbox
+
 
 async def _send_daily_user_reports_impl(bot: Bot, force: bool = False) -> None:
     """
     ۴. جاب ساعت 08:00 صبح:
     - بررسی پایان چله ۴۰ روزه (raw_current_day > settings.LEAGUE_DURATION).
-    - ارسال کارنامه صبحگاهی مطالعه دیروز به تک‌تک کاربران فعال در هر لیگ.
+    - ارسال کارنامه صبحگاهی مطالعه دیروز به کاربران فعال، لیگ به لیگ و به صورت پلکانی.
+    - هر لیگ نشست دیتابیس مستقل دارد و ارسال شبکه‌ای پس از بسته شدن نشست انجام می‌شود.
     """
     today_str = DateService.today_str()
     yesterday_str = DateService.yesterday_str()
@@ -2009,14 +2334,37 @@ async def _send_daily_user_reports_impl(bot: Bot, force: bool = False) -> None:
         if last_run == today_str and not force:
             return
 
-        active_leagues = (
-            db.query(League)
+        league_ids = [
+            r[0]
+            for r in db.query(League.id)
             .filter(League.is_deleted == False, League.is_active == True)
+            .order_by(League.id.asc())
             .all()
-        )
+        ]
+        admin_ids = {str(a).strip() for a in settings.ADMIN_IDS if str(a).strip()}
+        admin_ids |= {
+            str(r[0]).strip()
+            for r in db.query(GroupAdmin.user_id).all()
+            if r[0]
+        }
+        profile_counts: Dict[str, int] = {
+            str(tg): int(cnt)
+            for tg, cnt in db.query(User.telegram_id, func.count(User.id))
+            .filter(User.is_active == True)
+            .group_by(User.telegram_id)
+            .all()
+        }
+        set_system_state(db, "last_daily_user_report_date", today_str)
 
-        for lg in active_leagues:
-            try:
+    throttle = BroadcastThrottle()
+    for league_id in league_ids:
+        outbox: List[Tuple[str, str, Any]] = []
+        rollover_payload: Optional[Dict[str, Any]] = None
+        try:
+            with get_db() as db:
+                lg = db.get(League, league_id)
+                if not lg or lg.is_deleted or not lg.is_active:
+                    continue
                 cyc = get_or_create_active_cycle(db, lg)
                 raw_current_day = DateService.calculate_raw_league_day(
                     cyc.start_shamsi or lg.start_shamsi
@@ -2024,142 +2372,133 @@ async def _send_daily_user_reports_impl(bot: Bot, force: bool = False) -> None:
 
                 # اگر در صبح روز ۴۱ام هستیم، چله قبلی بسته و چله جدید از روز ۱ آغاز شود
                 if raw_current_day > settings.LEAGUE_DURATION:
-                    await _complete_and_rollover_cycle(bot, db, lg, cyc)
-                    continue
-
-                current_day = min(raw_current_day, settings.LEAGUE_DURATION)
-                if current_day <= 1 and not force:
-                    continue
-
-                yesterday_day = max(1, current_day - 1)
-                users = (
-                    db.query(User)
-                    .filter(User.league_id == lg.id, User.is_active == True)
-                    .all()
-                )
-                ranked_users = ScoringService.rank_users(users, lg.floor)
-                rank_map = {u.id: rnk for rnk, u in ranked_users}
-
-                for u in users:
-                    if not DateService.user_joined_before_today(u) and not force:
-                        continue
-
-                    y_log = (
-                        db.query(ActivityLog)
-                        .filter(
-                            ActivityLog.user_id == u.id,
-                            ActivityLog.league_id == lg.id,
-                            (ActivityLog.cycle_id == cyc.id)
-                            | (ActivityLog.cycle_number == lg.cycle_number),
-                            (ActivityLog.log_date == yesterday_str)
-                            | (ActivityLog.league_day == yesterday_day),
-                            ActivityLog.minutes > 0,
+                    rollover_payload = await _complete_and_rollover_cycle(bot, db, lg, cyc)
+                else:
+                    current_day = min(raw_current_day, settings.LEAGUE_DURATION)
+                    if current_day > 1 or force:
+                        outbox = _build_morning_cards(
+                            db,
+                            lg,
+                            cyc,
+                            current_day,
+                            yesterday_str,
+                            force,
+                            admin_ids,
+                            profile_counts,
                         )
-                        .first()
-                    )
-                    late_days = AbsenceService.parse_days_list(u.late_days_list)
-                    if y_log:
-                        if yesterday_day in late_days:
-                            y_status = f"⚠️ ثبت با تاخیر ({y_log.minutes} دقیقه | {y_log.points_earned} امتیاز)"
-                        else:
-                            y_status = f"✅ ثبت موفق ({y_log.minutes} دقیقه | {y_log.points_earned} امتیاز)"
-                        hint_line = "✨ خداقوت! امروز هم مطالعه خود را به موقع ثبت کنید."
-                    else:
-                        y_status = "❌ عدم ثبت (غیبت)"
-                        hint_line = (
-                            "💡 *راهنمایی:* اگر دیروز مطالعه داشته‌اید اما فراموش کردید ثبت کنید، "
-                            "همین امروز می‌توانید از دکمه «⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)» در منوی اصلی استفاده کنید تا غیبت دیروز شما حذف شود."
-                        )
+        except Exception as exc:
+            logger.error(f"خطا در پردازش گزارش صبحگاهی لیگ {league_id}: {exc}", exc_info=True)
+            continue
 
-                    u_rank = rank_map.get(u.id, 1)
-                    report_card = (
-                        f"☀️ *کارنامه صبحگاهی باشگاه کتابخوارشو*\n"
-                        f"🏆 لیگ: *{escape_md(lg.name)}* (چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION})\n"
-                        f"───────────────────\n"
-                        f"👤 نام: *{escape_md(u.name)}*\n"
-                        f"📌 وضعیت دیروز (روز {yesterday_day}): {y_status}\n"
-                        f"🏅 رتبه فعلی شما: *{u_rank}*\n"
-                        f"⭐️ امتیاز کل: *{round(float(u.points or 0.0), 1)}*\n"
-                        f"🔥 زنجیره استمرار: *{u.streak}* روز\n"
-                        f"❌ تعداد غیبت دوره: *{u.no_study_days}* روز\n\n"
-                        f"{hint_line}"
-                    )
-                    report_card = MessageService.apply_terms(db, lg.group_id, report_card)
-                    tg_target = u.telegram_id or u.id
-                    kb = build_user_main_menu(db, tg_target)
-                    await safe_send(bot, tg_target, report_card, reply_markup=kb)
-            except Exception as exc:
-                logger.error(f"خطا در پردازش گزارش صبحگاهی لیگ {lg.id}: {exc}", exc_info=True)
-
-        set_system_state(db, "last_daily_user_report_date", today_str)
+        if rollover_payload:
+            await _dispatch_cycle_rollover(bot, rollover_payload)
+        if outbox:
+            await dispatch_outbox(bot, outbox, throttle)
+        del outbox
 
 
 async def send_study_reminders(bot: Bot, force: bool = False) -> None:
     """
     ۵. جاب ساعت 22:00 شب:
     ارسال پیام یادآوری شبانه به کاربرانی که امروز مطالعه ثبت نکرده‌اند.
-    اگر یک کاربر در چند لیگ عضو است و ثبت نکرده، وضعیت تمام لیگ‌های ثبت‌نشده او
-    در یک پیام واحد تجمیع و ارسال می‌شود.
+    با خواندن دسته‌ای (Chunks) و کش واژه‌نامه‌ها، بدون ایجاد کوئری N+1 و با ارسال پلکانی.
     """
     today_str = DateService.today_str()
+    outbox: List[Tuple[str, str, Any]] = []
+
     with get_db() as db:
         last_run = get_system_state(db, "last_reminder_date")
         if last_run == today_str and not force:
             return
 
-        users = (
-            db.query(User)
-            .filter(
-                User.is_active == True,
-                User.reminder_enabled == True,
-                User.league_id.isnot(None),
-            )
+        # لیگ‌های فعال (تعدادشان محدود است) فقط با ستون‌های موردنیاز
+        league_map: Dict[str, Tuple[str, int, Optional[int]]] = {
+            r[0]: (r[1], r[2], r[3])
+            for r in db.query(League.id, League.name, League.floor, League.group_id)
+            .filter(League.is_deleted == False, League.is_active == True)
             .all()
-        )
+        }
+
+        terms_cache: Dict[Optional[int], Dict[str, str]] = {}
+        base_cache: Dict[Optional[int], str] = {}
+
+        def _terms(gid: Optional[int]) -> Dict[str, str]:
+            if gid not in terms_cache:
+                terms_cache[gid] = MessageService.get_terms(db, gid)
+            return terms_cache[gid]
+
+        def _base(gid: Optional[int]) -> str:
+            if gid not in base_cache:
+                base_cache[gid] = MessageService.get_message(db, gid, "reminder_night")
+            return base_cache[gid]
 
         # گروه‌بندی پروفایل‌های ثبت‌نشده امروز بر اساس telegram_id
-        unlogged_by_tg: Dict[str, List[Tuple[User, League]]] = {}
-        for u in users:
-            if u.last_log_date == today_str and int(u.today_minutes or 0) > 0:
-                continue
-            lg = (
-                db.query(League)
-                .filter(
-                    League.id == u.league_id,
-                    League.is_deleted == False,
-                    League.is_active == True,
+        # هر عضو: (میثاق موثر، نام لیگ، شناسه گروه)
+        unlogged_by_tg: Dict[str, List[Tuple[int, str, Optional[int]]]] = {}
+        chunk_size = max(50, int(settings.DB_CHUNK_SIZE))
+        last_id = ""
+        while True:
+            chunk = (
+                db.query(User)
+                .options(
+                    load_only(
+                        User.id,
+                        User.telegram_id,
+                        User.league_id,
+                        User.user_floor,
+                        User.last_log_date,
+                        User.today_minutes,
+                    )
                 )
-                .first()
+                .filter(
+                    User.is_active == True,
+                    User.reminder_enabled == True,
+                    User.league_id.isnot(None),
+                    User.id > last_id,
+                )
+                .order_by(User.id.asc())
+                .limit(chunk_size)
+                .all()
             )
-            if not lg:
-                continue
-            tg_id = str(u.telegram_id or u.id)
-            unlogged_by_tg.setdefault(tg_id, []).append((u, lg))
+            if not chunk:
+                break
+            last_id = chunk[-1].id
 
-        messages_to_dispatch: List[Tuple[str, str]] = []
+            for u in chunk:
+                if u.last_log_date == today_str and int(u.today_minutes or 0) > 0:
+                    continue
+                lg_info = league_map.get(u.league_id)
+                if not lg_info:
+                    continue
+                lg_name, lg_floor, lg_group = lg_info
+                tg_id = str(u.telegram_id or u.id)
+                unlogged_by_tg.setdefault(tg_id, []).append(
+                    (u.get_effective_floor(lg_floor), lg_name, lg_group)
+                )
+            db.expunge_all()
+
         for tg_id, prof_list in unlogged_by_tg.items():
-            first_user, first_league = prof_list[0]
-            base_reminder = MessageService.get_message(
-                db, first_league.group_id, "reminder_night"
-            )
+            first_floor, first_name, first_group = prof_list[0]
+            base_reminder = _base(first_group)
             if len(prof_list) == 1:
-                eff_fl = first_user.get_effective_floor(first_league.floor)
-                extra = f"\n\n🏆 لیگ: *{escape_md(first_league.name)}* (میثاق: {eff_fl} دقیقه)"
-                extra = MessageService.apply_terms(db, first_league.group_id, extra)
+                extra = f"\n\n🏆 لیگ: *{escape_md(first_name)}* (میثاق: {first_floor} دقیقه)"
+                extra = MessageService.apply_terms(
+                    db, first_group, extra, terms=_terms(first_group)
+                )
                 full_msg = base_reminder + extra
             else:
                 league_lines = ["\n\n📌 *لیگ‌های ثبت‌نشده امروز شما:*"]
-                for u_prof, lg_obj in prof_list:
-                    eff_fl = u_prof.get_effective_floor(lg_obj.floor)
-                    line = f"🔸 لیگ *{escape_md(lg_obj.name)}* (میثاق: {eff_fl} دقیقه)"
+                for eff_fl, lg_name, lg_group in prof_list:
+                    line = f"🔸 لیگ *{escape_md(lg_name)}* (میثاق: {eff_fl} دقیقه)"
                     league_lines.append(
-                        MessageService.apply_terms(db, lg_obj.group_id, line)
+                        MessageService.apply_terms(
+                            db, lg_group, line, terms=_terms(lg_group)
+                        )
                     )
                 full_msg = base_reminder + "\n".join(league_lines)
 
-            messages_to_dispatch.append((tg_id, full_msg))
+            outbox.append((tg_id, full_msg, None))
 
         set_system_state(db, "last_reminder_date", today_str)
 
-    for tg_id, msg_text in messages_to_dispatch:
-        await safe_send(bot, tg_id, msg_text)
+    await dispatch_outbox(bot, outbox, BroadcastThrottle())

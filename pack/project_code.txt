@@ -63,6 +63,245 @@ weekly_report.py
 <files>
 This section contains the contents of the repository's files.
 
+<file path=".env.example">
+# توکن بازوی پیام‌رسان بله (دریافتی از @BotFather در بله)
+BOT_TOKEN=123456789:ABCDEF1234567890abcdef1234567890
+
+# آدرس سرور API بله
+BALE_API_URL=https://tapi.bale.ai
+
+# شناسه‌های عددی سوپرادمین‌ها (جداشده با کاما)
+ADMIN_IDS=111111111,222222222
+
+# منطقه زمانی و تنظیمات پیش‌فرض چله
+TIMEZONE=Asia/Tehran
+CYCLE_DAYS=40
+DEFAULT_HALF_COUPONS=5
+DEFAULT_ONE_MIN_COUPONS=1
+DEFAULT_LEAGUE_FLOOR=10
+
+# آدرس دیتابیس: تولید = PostgreSQL ، توسعه/تست = SQLite
+# DATABASE_URL=postgresql://user:password@127.0.0.1:5432/ketabkharsho
+DATABASE_URL=sqlite:///./data/ketabkharsho.db
+DB_POOL_SIZE=20
+DB_MAX_OVERFLOW=30
+DB_POOL_TIMEOUT=30
+DB_POOL_RECYCLE=1800
+# فعال‌سازی بکاپ خودکار PostgreSQL با pg_dump (نیازمند نصب pg_dump روی سرور)
+PG_DUMP_ENABLED=false
+
+# ارسال پلکانی پیام‌ها (حدود ۲۰ تا ۳۰ پیام در ثانیه)
+BROADCAST_BATCH_SIZE=40
+BROADCAST_MSG_DELAY=0.05
+BROADCAST_BATCH_PAUSE=1.0
+DB_CHUNK_SIZE=500
+
+# مسیر ذخیره‌سازی بکاپ‌ها
+BACKUP_DIR=data/backups
+REPORTS_DIR=data/reports
+</file>
+
+<file path=".gitattributes">
+graphify-out/graph.json merge=graphify
+</file>
+
+<file path=".gitignore">
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment and sensitive files
+.env
+
+# Databases and data
+*.db
+*.sqlite
+data/
+backups/
+code_backups/
+
+# Logs
+logs/
+*.log
+
+# Temporary fix files
+AAAFIX*.py
+
+# Graphify cache
+graphify-out/cache/
+*.tmp
+
+# IDE & OS files
+.idea/
+.vscode/
+Thumbs.db
+</file>
+
+<file path="config.py">
+import os
+import logging
+from pathlib import Path
+from typing import List
+from dotenv import load_dotenv
+
+# بارگذاری متغیرهای محیطی از فایل .env
+load_dotenv()
+
+
+class Config:
+    """کلاس مدیریت تنظیمات سراسری پروژه کتابخوارشو"""
+
+    def __init__(self) -> None:
+        self.BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
+        self.API_URL: str = os.getenv("API_URL", "https://tapi.bale.ai").strip().rstrip("/")
+
+        raw_admin_ids: str = os.getenv("ADMIN_IDS", "").strip()
+        self.ADMIN_IDS: List[str] = [
+            adm.strip() for adm in raw_admin_ids.split(",") if adm.strip()
+        ]
+
+        self.ARCHIVE_CHANNEL: str = os.getenv("ARCHIVE_CHANNEL", "").strip()
+        raw_db_url: str = os.getenv(
+            "DATABASE_URL", "sqlite:///./data/ketabkharsho.db"
+        ).strip()
+        self.DATABASE_URL: str = self._normalize_database_url(raw_db_url)
+
+        # تنظیمات QueuePool مخصوص PostgreSQL
+        self.DB_POOL_SIZE: int = self._get_int("DB_POOL_SIZE", 20)
+        self.DB_MAX_OVERFLOW: int = self._get_int("DB_MAX_OVERFLOW", 30)
+        self.DB_POOL_TIMEOUT: int = self._get_int("DB_POOL_TIMEOUT", 30)
+        self.DB_POOL_RECYCLE: int = self._get_int("DB_POOL_RECYCLE", 1800)
+
+        # پشتیبان‌گیری
+        self.BACKUP_DIR: str = os.getenv("BACKUP_DIR", "./backups").strip() or "./backups"
+        self.PG_DUMP_ENABLED: bool = os.getenv("PG_DUMP_ENABLED", "false").strip().lower() in (
+            "true",
+            "1",
+            "yes",
+            "on",
+        )
+
+        # ارسال پلکانی (Staggered) و خواندن دسته‌ای از دیتابیس
+        self.BROADCAST_BATCH_SIZE: int = max(1, self._get_int("BROADCAST_BATCH_SIZE", 40))
+        self.BROADCAST_MSG_DELAY: float = max(0.0, self._get_float("BROADCAST_MSG_DELAY", 0.05))
+        self.BROADCAST_BATCH_PAUSE: float = max(0.0, self._get_float("BROADCAST_BATCH_PAUSE", 1.0))
+        self.DB_CHUNK_SIZE: int = max(50, self._get_int("DB_CHUNK_SIZE", 500))
+
+        self.DEFAULT_FLOOR: int = self._get_int("DEFAULT_FLOOR", 10)
+        self.LEAGUE_DURATION: int = self._get_int("LEAGUE_DURATION", 40)
+        self.DEFAULT_HALF_COUPONS: int = self._get_int("DEFAULT_HALF_COUPONS", 5)
+        self.DEFAULT_ONE_MIN_COUPONS: int = self._get_int("DEFAULT_ONE_MIN_COUPONS", 1)
+
+        self.REMINDER_HOUR: int = self._get_int("REMINDER_HOUR", 22)
+        self.DAILY_REPORT_HOUR: int = self._get_int("DAILY_REPORT_HOUR", 8)
+        self.ADMIN_REPORT_HOUR: int = self._get_int("ADMIN_REPORT_HOUR", 1)
+        self.WEEKLY_REPORT_HOUR: int = self._get_int("WEEKLY_REPORT_HOUR", 2)
+
+        self.DEBUG: bool = os.getenv("DEBUG", "False").strip().lower() in (
+            "true",
+            "1",
+            "yes",
+            "on",
+        )
+        self.LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+
+        # ساخت پوشه‌های موردنیاز پروژه
+        self._ensure_directories()
+
+    @staticmethod
+    def _normalize_database_url(url: str) -> str:
+        """یکسان‌سازی آدرس PostgreSQL با درایور psycopg2 (SQLAlchemy 2.x)"""
+        if url.startswith("postgres://"):
+            return "postgresql+psycopg2://" + url[len("postgres://"):]
+        if url.startswith("postgresql://"):
+            return "postgresql+psycopg2://" + url[len("postgresql://"):]
+        return url
+
+    @property
+    def is_sqlite(self) -> bool:
+        """آیا دیتابیس فعلی SQLite است (حالت توسعه/تست)؟"""
+        return self.DATABASE_URL.startswith("sqlite")
+
+    @staticmethod
+    def _get_float(env_key: str, default: float) -> float:
+        val = os.getenv(env_key)
+        if val is None or not val.strip():
+            return default
+        try:
+            return float(val.strip())
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _get_int(env_key: str, default: int) -> int:
+        val = os.getenv(env_key)
+        if val is None or not val.strip():
+            return default
+        try:
+            return int(val.strip())
+        except ValueError:
+            return default
+
+    def _ensure_directories(self) -> None:
+        """ایجاد دایرکتوری‌های داده، بکاپ و گزارش‌های اکسل"""
+        for folder in ("./data", "./backups", "./reports"):
+            Path(folder).mkdir(parents=True, exist_ok=True)
+
+        if self.DATABASE_URL.startswith("sqlite:///"):
+            db_file_path = self.DATABASE_URL.replace("sqlite:///", "", 1)
+            db_parent = Path(db_file_path).parent
+            db_parent.mkdir(parents=True, exist_ok=True)
+
+    def validate(self) -> None:
+        """اعتبارسنجی مقادیر حیاتی تنظیمات در بدو اجرای برنامه"""
+        if not self.BOT_TOKEN:
+            raise ValueError("خطا: متغیر محیطی BOT_TOKEN در فایل .env تنظیم نشده است.")
+        if not self.ADMIN_IDS:
+            raise ValueError("خطا: متغیر محیطی ADMIN_IDS در فایل .env تنظیم نشده است.")
+        if self.DEFAULT_FLOOR < 1:
+            raise ValueError("خطا: مقدار DEFAULT_FLOOR باید حداقل 1 دقیقه باشد.")
+        if self.LEAGUE_DURATION < 1:
+            raise ValueError("خطا: مقدار LEAGUE_DURATION باید حداقل 1 روز باشد.")
+        for hour_name, hour_val in [
+            ("REMINDER_HOUR", self.REMINDER_HOUR),
+            ("DAILY_REPORT_HOUR", self.DAILY_REPORT_HOUR),
+            ("ADMIN_REPORT_HOUR", self.ADMIN_REPORT_HOUR),
+            ("WEEKLY_REPORT_HOUR", self.WEEKLY_REPORT_HOUR),
+        ]:
+            if not (0 <= hour_val <= 23):
+                raise ValueError(f"خطا: ساعت {hour_name} باید عددی بین 0 تا 23 باشد.")
+
+    def is_super_admin(self, user_id: str | int) -> bool:
+        """بررسی مدیر ارشد بودن کاربر"""
+        return str(user_id).strip() in self.ADMIN_IDS
+
+
+settings = Config()
+
+# تنظیمات پایه لاگینگ
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+)
+</file>
+
+<file path="requirements.txt">
+aiogram==3.31.0
+python-dotenv==1.0.1
+SQLAlchemy==2.0.52
+psycopg2-binary==2.9.10
+openpyxl==3.1.5
+aiosqlite==0.22.1
+APScheduler==3.10.4
+aiohttp==3.13.2
+</file>
+
 <file path="run_bot.bat">
 @echo off
 chcp 65001 >nul
@@ -116,69 +355,619 @@ echo.
 pause
 </file>
 
-<file path=".env.example">
-# توکن بازوی پیام‌رسان بله (دریافتی از @BotFather در بله)
-BOT_TOKEN=123456789:ABCDEF1234567890abcdef1234567890
+<file path="run_tests.py">
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+اسکریپت تست سرتاسری خودکار (Automated E2E Test Suite) پروژه «کتابخوارشو»
+شامل شبیه‌سازی کامل ۱۰ سناریوی اصلی با دیتابیس موقت SQLite و MockBot
+"""
 
-# آدرس سرور API بله
-BALE_API_URL=https://tapi.bale.ai
+import os
+import sys
+import tempfile
+import asyncio
+from pathlib import Path
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
 
-# شناسه‌های عددی سوپرادمین‌ها (جداشده با کاما)
-ADMIN_IDS=111111111,222222222
+# تنظیم متغیرهای محیطی پیش از ایمپورت ماژول‌های پروژه
+TEMP_DB_DIR = tempfile.mkdtemp(prefix="ketabkharsho_e2e_")
+TEMP_DB_PATH = os.path.join(TEMP_DB_DIR, "test_ketabkharsho.db")
 
-# منطقه زمانی و تنظیمات پیش‌فرض چله
-TIMEZONE=Asia/Tehran
-CYCLE_DAYS=40
-DEFAULT_HALF_COUPONS=5
-DEFAULT_ONE_MIN_COUPONS=1
-DEFAULT_LEAGUE_FLOOR=10
+os.environ["BOT_TOKEN"] = "123456789:AAH_TEST_TOKEN_KETABKHARSHO"
+os.environ["API_URL"] = "https://tapi.bale.ai"
+os.environ["ADMIN_IDS"] = "900001,900002"
+os.environ["DATABASE_URL"] = f"sqlite:///{TEMP_DB_PATH}"
+os.environ["DEFAULT_FLOOR"] = "20"
+os.environ["LEAGUE_DURATION"] = "40"
+os.environ["DEFAULT_HALF_COUPONS"] = "5"
+os.environ["DEFAULT_ONE_MIN_COUPONS"] = "1"
 
-# مسیر ذخیره‌سازی دیتابیس و پشتیبان‌ها
-DB_PATH=data/ketabkharsho.db
-BACKUP_DIR=data/backups
-REPORTS_DIR=data/reports
-</file>
+from openpyxl import load_workbook
+from aiogram import Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
 
-<file path=".gitattributes">
-graphify-out/graph.json merge=graphify
-</file>
+from config import settings
+from database import (
+    init_db,
+    get_db,
+    get_active_user,
+    get_user_profiles,
+    get_or_create_active_cycle,
+    is_user_admin,
+)
+from models import (
+    Group,
+    GroupAdmin,
+    League,
+    Cycle,
+    User,
+    ActivityLog,
+    CycleResult,
+)
+from services import DateService, ScoringService, ReportService, AbsenceService
+from message_service import MessageService
+from admin_handlers import (
+    admin_router,
+    AdminStates,
+    cmd_create_group,
+    process_cg_name,
+    process_cg_password,
+    cb_select_group_for_password,
+    process_pg_new_password,
+    cb_select_group_for_name,
+    process_ng_new_name,
+    cb_make_user_group_admin,
+    cb_confirm_remove_group_admin,
+    cmd_global_stats,
+    cmd_add_league,
+    cb_select_group_for_new_league,
+    process_al_league_name,
+    process_al_league_floor,
+    cb_league_edit_floor,
+    process_league_new_floor,
+    cb_league_edit_cycle,
+    process_league_new_cycle,
+    cb_league_edit_date,
+    process_league_new_date,
+    cb_em_edit_term,
+    process_em_new_term,
+    cb_em_edit_msg,
+    process_em_new_msg,
+    cb_execute_user_add_second_league,
+)
+from handlers import (
+    user_router,
+    StudyStates,
+    cmd_start,
+    start_registration_or_new_group,
+    process_group_password,
+    process_register_first_name,
+    process_register_last_name,
+    cb_join_league,
+    handle_log_study_today,
+    handle_edit_study_today,
+    handle_append_study_today,
+    handle_log_study_yesterday,
+    process_study_minutes,
+    process_study_pages,
+    handle_league_leaderboard,
+    handle_user_profile,
+    cb_switch_profile,
+    midnight_job,
+    send_daily_admin_reports,
+    send_daily_user_reports,
+    send_study_reminders,
+)
+from weekly_report import send_weekly_reports
 
-<file path=".gitignore">
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
 
-# Virtual environments
-.venv/
-venv/
-env/
+# ===========================================================================
+# کلاس‌های شبیه‌ساز (MockBot, MockMessage, MockCallbackQuery)
+# ===========================================================================
+class MockUser:
+    def __init__(self, user_id: int | str, first_name: str = "کاربر", last_name: str = "تست"):
+        self.id = int(user_id)
+        self.first_name = first_name
+        self.last_name = last_name
+        self.full_name = f"{first_name} {last_name}".strip()
 
-# Environment and sensitive files
-.env
 
-# Databases and data
-*.db
-*.sqlite
-data/
-backups/
-code_backups/
+class MockChat:
+    def __init__(self, chat_id: int | str):
+        self.id = int(chat_id)
 
-# Logs
-logs/
-*.log
 
-# Temporary fix files
-AAAFIX*.py
+class MockBot:
+    def __init__(self):
+        self.id = 999999
+        self.sent_messages: List[Dict[str, Any]] = []
+        self.sent_documents: List[Dict[str, Any]] = []
+        self.edited_messages: List[Dict[str, Any]] = []
 
-# Graphify cache
-graphify-out/cache/
-*.tmp
+    async def send_message(
+        self,
+        chat_id: int | str,
+        text: str,
+        reply_markup=None,
+        parse_mode: Optional[str] = None,
+        **kwargs,
+    ):
+        entry = {
+            "chat_id": str(chat_id),
+            "text": text,
+            "reply_markup": reply_markup,
+            "parse_mode": parse_mode,
+        }
+        self.sent_messages.append(entry)
+        return MockMessage(self, chat_id, text=text)
 
-# IDE & OS files
-.idea/
-.vscode/
-Thumbs.db
+    async def send_document(
+        self,
+        chat_id: int | str,
+        document: Any,
+        caption: Optional[str] = None,
+        **kwargs,
+    ):
+        file_path = getattr(document, "path", None)
+        exists = bool(file_path and os.path.exists(file_path))
+        size = os.path.getsize(file_path) if exists else 0
+        entry = {
+            "chat_id": str(chat_id),
+            "file_path": str(file_path),
+            "exists_at_send": exists,
+            "size": size,
+            "caption": caption or "",
+        }
+        self.sent_documents.append(entry)
+        return entry
+
+
+class MockMessage:
+    def __init__(self, bot: MockBot, user_id: int | str, text: str = ""):
+        self.bot = bot
+        self.from_user = MockUser(user_id)
+        self.chat = MockChat(user_id)
+        self.text = text
+
+    async def answer(self, text: str, reply_markup=None, parse_mode: Optional[str] = None, **kwargs):
+        return await self.bot.send_message(
+            chat_id=self.chat.id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+
+    async def edit_text(self, text: str, reply_markup=None, parse_mode: Optional[str] = None, **kwargs):
+        entry = {
+            "chat_id": str(self.chat.id),
+            "text": text,
+            "reply_markup": reply_markup,
+            "parse_mode": parse_mode,
+        }
+        self.bot.edited_messages.append(entry)
+        return self
+
+
+class MockCallbackQuery:
+    def __init__(self, bot: MockBot, user_id: int | str, data: str):
+        self.bot = bot
+        self.from_user = MockUser(user_id)
+        self.message = MockMessage(bot, user_id, text="")
+        self.data = data
+        self.answered = False
+
+    async def answer(self, text: Optional[str] = None, show_alert: bool = False, **kwargs):
+        self.answered = True
+
+
+def make_fsm(storage: MemoryStorage, bot_id: int, user_id: int | str) -> FSMContext:
+    key = StorageKey(bot_id=bot_id, chat_id=int(user_id), user_id=int(user_id))
+    return FSMContext(storage=storage, key=key)
+
+
+# ===========================================================================
+# اجرای ۱۰ سناریوی تست سرتاسری (E2E)
+# ===========================================================================
+async def run_all_tests() -> None:
+    bot = MockBot()
+    storage = MemoryStorage()
+
+    SUPER_ADMIN_ID = 900001
+    GROUP_ADMIN_ID = 800001
+    USER_1_ID = 700001
+    EARLY_USER_ID = 700002
+
+    # -----------------------------------------------------------------------
+    # سناریو ۱: راه‌اندازی اولیه (init_db)، ساخت گروه پیش‌فرض ۱ با رمز 1234 و ثبت سوپرادمین‌ها
+    # -----------------------------------------------------------------------
+    init_db()
+    with get_db() as db:
+        g1 = db.query(Group).filter(Group.id == 1).first()
+        assert g1 is not None and g1.password == "1234", "گروه ۱ با رمز 1234 ساخته نشد"
+        sa_rows = db.query(GroupAdmin).filter(GroupAdmin.group_id == 1).all()
+        sa_ids = {r.user_id for r in sa_rows}
+        assert "900001" in sa_ids and "900002" in sa_ids, "سوپرادمین‌ها در گروه ۱ ثبت نشدند"
+    print("✅ [PASS] Scenario 1: init_db, default group 1 (pwd 1234), and superadmins verified.")
+
+    # -----------------------------------------------------------------------
+    # سناریو ۱.۵: تست ارسال خودکار پیام استارتاپ/فعال‌سازی به ادمین‌ها
+    # -----------------------------------------------------------------------
+    from handlers import send_startup_notification
+    before_startup_count = len(bot.sent_messages)
+    sent_count = await send_startup_notification(bot)
+    assert sent_count >= 2, f"پیام فعال‌سازی باید حداقل به ۲ ادمین ارسال شود، ولی برای {sent_count} ارسال شد"
+    startup_msgs = bot.sent_messages[before_startup_count:]
+    startup_recipients = {str(m["chat_id"]) for m in startup_msgs}
+    assert "900001" in startup_recipients and "900002" in startup_recipients
+    sample_notif = startup_msgs[0]["text"]
+    assert "فعال شد" in sample_notif
+    assert DateService.today_shamsi() in sample_notif
+    assert DateService.now_iran_time_str()[:5] in sample_notif
+    print("✅ [PASS] Scenario 1.5: Startup notification to admins with Shamsi date & Iran time verified.")
+
+    # تست دستور /test_startup توسط ادمین
+    from admin_handlers import cmd_test_startup_notification
+    before_test_cmd = len(bot.sent_messages)
+    await cmd_test_startup_notification(MockMessage(bot, SUPER_ADMIN_ID, "/test_startup"))
+    assert len(bot.sent_messages) > before_test_cmd
+    print("✅ [PASS] Scenario 1.6: /test_startup admin command verified.")
+
+    # -----------------------------------------------------------------------
+    # سناریو ۲: تست دستورات سوپرادمین (cg, رد رمز تکراری 1234, رمز 5678, pg, ng, ag, rg, gs)
+    # -----------------------------------------------------------------------
+    sa_fsm = make_fsm(storage, bot.id, SUPER_ADMIN_ID)
+    await cmd_create_group(MockMessage(bot, SUPER_ADMIN_ID, "cg"), sa_fsm)
+    assert await sa_fsm.get_state() == AdminStates.cg_waiting_name
+
+    # تست عدم تداخل حروف دوحرفی ادمین (مثلاً "al") هنگامی که ادمین در استیت وارد کردن نام مجموعه است
+    await process_cg_name(MockMessage(bot, SUPER_ADMIN_ID, "مجموعه فرهیختگان"), sa_fsm)
+    assert await sa_fsm.get_state() == AdminStates.cg_waiting_password
+
+    # تست رد شدن رمز کوتاه (کمتر از ۶ رقم)
+    await process_cg_password(MockMessage(bot, SUPER_ADMIN_ID, "1234"), sa_fsm)
+    assert await sa_fsm.get_state() == AdminStates.cg_waiting_password
+    assert "۶" in bot.sent_messages[-1]["text"]
+
+    # ثبت رمز معتبر ۶ رقمی
+    await process_cg_password(MockMessage(bot, SUPER_ADMIN_ID, "567890"), sa_fsm)
+    assert await sa_fsm.get_state() is None
+
+    with get_db() as db:
+        g2 = db.query(Group).filter(Group.id == 2).first()
+        assert g2 is not None and g2.password == "567890" and g2.name == "مجموعه فرهیختگان"
+
+    # تغییر رمز با pg به 9876 و برگشت به 5678
+    await cb_select_group_for_password(MockCallbackQuery(bot, SUPER_ADMIN_ID, "adm_pwgrp_2"), sa_fsm)
+    await process_pg_new_password(MockMessage(bot, SUPER_ADMIN_ID, "987654"), sa_fsm)
+    with get_db() as db:
+        assert db.query(Group).filter(Group.id == 2).first().password == "987654"
+    await cb_select_group_for_password(MockCallbackQuery(bot, SUPER_ADMIN_ID, "adm_pwgrp_2"), sa_fsm)
+    await process_pg_new_password(MockMessage(bot, SUPER_ADMIN_ID, "567890"), sa_fsm)
+
+    # تغییر نام با ng
+    await cb_select_group_for_name(MockCallbackQuery(bot, SUPER_ADMIN_ID, "adm_nggrp_2"), sa_fsm)
+    await process_ng_new_name(MockMessage(bot, SUPER_ADMIN_ID, "باشگاه اندیشه"), sa_fsm)
+    with get_db() as db:
+        assert db.query(Group).filter(Group.id == 2).first().name == "باشگاه اندیشه"
+
+    # افزودن ادمین با ag و حذف با rg
+    await cb_make_user_group_admin(MockCallbackQuery(bot, SUPER_ADMIN_ID, f"adm_mkadm_{GROUP_ADMIN_ID}_1"))
+    with get_db() as db:
+        assert is_user_admin(db, GROUP_ADMIN_ID, 1) is True
+    await cb_confirm_remove_group_admin(MockCallbackQuery(bot, SUPER_ADMIN_ID, f"adm_rmad_1_{GROUP_ADMIN_ID}"))
+    with get_db() as db:
+        assert is_user_admin(db, GROUP_ADMIN_ID, 1) is False
+    # ثبت مجدد ادمین مجموعه ۱ برای سناریوی ۳
+    await cb_make_user_group_admin(MockCallbackQuery(bot, SUPER_ADMIN_ID, f"adm_mkadm_{GROUP_ADMIN_ID}_1"))
+
+    # آمار کلان gs
+    await cmd_global_stats(MockMessage(bot, SUPER_ADMIN_ID, "gs"))
+    assert "آمار کلان" in bot.sent_messages[-1]["text"]
+    print("✅ [PASS] Scenario 2: Superadmin commands (cg, unique password, pg, ng, ag, rg, gs) verified.")
+
+    # -----------------------------------------------------------------------
+    # سناریو ۳: دستورات ادمین مجموعه (ساخت ۲ لیگ با al، ویرایش با el، شخصی‌سازی واژه‌نامه و پیام با em)
+    # -----------------------------------------------------------------------
+    ga_fsm = make_fsm(storage, bot.id, GROUP_ADMIN_ID)
+    # ساخت لیگ ۱ در مجموعه ۱
+    await cmd_add_league(MockMessage(bot, GROUP_ADMIN_ID, "al"), ga_fsm)
+    assert await ga_fsm.get_state() == AdminStates.al_waiting_name
+    await process_al_league_name(MockMessage(bot, GROUP_ADMIN_ID, "لیگ ستارگان"), ga_fsm)
+    await process_al_league_floor(MockMessage(bot, GROUP_ADMIN_ID, "20"), ga_fsm)
+
+    # ساخت لیگ ۲ در مجموعه ۱
+    await cmd_add_league(MockMessage(bot, GROUP_ADMIN_ID, "al"), ga_fsm)
+    await process_al_league_name(MockMessage(bot, GROUP_ADMIN_ID, "لیگ نخبگان"), ga_fsm)
+    await process_al_league_floor(MockMessage(bot, GROUP_ADMIN_ID, "30"), ga_fsm)
+
+    with get_db() as db:
+        leagues_g1 = db.query(League).filter(League.group_id == 1).order_by(League.created_at.asc()).all()
+        assert len(leagues_g1) == 2
+        lg1_id, lg2_id = leagues_g1[0].id, leagues_g1[1].id
+
+    # ویرایش کف مطالعه، شماره چله و تاریخ شروع شمسی لیگ ۱ (به ۴ روز قبل تا روز جاری = ۵ شود)
+    await cb_league_edit_floor(MockCallbackQuery(bot, GROUP_ADMIN_ID, f"leagedit_floor_{lg1_id}"), ga_fsm)
+    await process_league_new_floor(MockMessage(bot, GROUP_ADMIN_ID, "20"), ga_fsm)
+
+    await cb_league_edit_cycle(MockCallbackQuery(bot, GROUP_ADMIN_ID, f"leagedit_cycle_{lg1_id}"), ga_fsm)
+    await process_league_new_cycle(MockMessage(bot, GROUP_ADMIN_ID, "2"), ga_fsm)
+
+    four_days_ago_shamsi = DateService.date_to_shamsi(DateService.today_date() - timedelta(days=4))
+    await cb_league_edit_date(MockCallbackQuery(bot, GROUP_ADMIN_ID, f"leagedit_date_{lg1_id}"), ga_fsm)
+    await process_league_new_date(MockMessage(bot, GROUP_ADMIN_ID, four_days_ago_shamsi), ga_fsm)
+
+    with get_db() as db:
+        lg1 = db.query(League).filter(League.id == lg1_id).first()
+        assert lg1.floor == 20 and lg1.cycle_number == 2 and lg1.current_day == 5
+
+    # شخصی‌سازی واژه‌نامه (میثاق -> عهد) و پیام خوش‌آمدگویی با em
+    await cb_em_edit_term(MockCallbackQuery(bot, GROUP_ADMIN_ID, "em_edterm_1_meesaq"), ga_fsm)
+    await process_em_new_term(MockMessage(bot, GROUP_ADMIN_ID, "عهد"), ga_fsm)
+
+    await cb_em_edit_msg(MockCallbackQuery(bot, GROUP_ADMIN_ID, "em_edmsg_1_study_logged"), ga_fsm)
+    await process_em_new_msg(MockMessage(bot, GROUP_ADMIN_ID, "📝 *ثبت مطالعه انجام شد!* (میثاق رعایت شد)"), ga_fsm)
+
+    with get_db() as db:
+        assert MessageService.get_term(db, 1, "meesaq") == "عهد"
+        assert "عهد" in MessageService.get_message(db, 1, "study_logged")
+    print("✅ [PASS] Scenario 3: Group admin commands (al, el floor/cycle/date, em terms & messages) verified.")
+
+    # -----------------------------------------------------------------------
+    # سناریو ۴: ثبت‌نام کاربر در مجموعه ۱، انتخاب لیگ ۱ و دریافت امتیاز هدیه همگام‌سازی (5 - 1) * 10 = 40
+    # -----------------------------------------------------------------------
+    u1_fsm = make_fsm(storage, bot.id, USER_1_ID)
+    await start_registration_or_new_group(MockMessage(bot, USER_1_ID, "🚀 شروع ثبت نام"), u1_fsm)
+    await process_group_password(MockMessage(bot, USER_1_ID, "۱۲۳۴"), u1_fsm)
+    await process_register_first_name(MockMessage(bot, USER_1_ID, "علی"), u1_fsm)
+    await process_register_last_name(MockMessage(bot, USER_1_ID, "محمدی"), u1_fsm)
+
+    await cb_join_league(MockCallbackQuery(bot, USER_1_ID, f"join_{lg1_id}"), u1_fsm)
+    with get_db() as db:
+        u1 = get_active_user(db, USER_1_ID)
+        assert u1 is not None and u1.id == str(USER_1_ID)
+        assert u1.league_id == lg1_id
+        assert u1.points == 40.0, f"امتیاز هدیه نادرست است: {u1.points}"
+    print("✅ [PASS] Scenario 4: User registration, league selection, and sync gift points (40.0) verified.")
+
+    # -----------------------------------------------------------------------
+    # سناریو ۵ و ۶: تست ۴ حالت امتیازدهی، ویرایش مطالعه (edit)، افزودن زمان (append) و خروج با دکمه‌های منو
+    # -----------------------------------------------------------------------
+    # الف) تست خروج از استیت waiting_for_minutes با زدن دکمه «🏆 جدول لیگ» بدون دریافت خطای عدد
+    await handle_log_study_today(MockMessage(bot, USER_1_ID, "📝 ثبت مطالعه امروز"), u1_fsm)
+    assert await u1_fsm.get_state() == StudyStates.waiting_for_minutes
+    await process_study_minutes(MockMessage(bot, USER_1_ID, "🏆 جدول لیگ"), u1_fsm)
+    assert await u1_fsm.get_state() is None
+    assert "جدول آنلاین" in bot.sent_messages[-1]["text"]
+
+    # ب) حالت ۱: رسیدن کامل به میثاق (۲۰ دقیقه -> ۱۰ امتیاز، بدون مصرف سهمیه)
+    await handle_log_study_today(MockMessage(bot, USER_1_ID, "📝 ثبت مطالعه امروز"), u1_fsm)
+    await process_study_minutes(MockMessage(bot, USER_1_ID, "20"), u1_fsm)
+    await process_study_pages(MockMessage(bot, USER_1_ID, "15"), u1_fsm)
+    with get_db() as db:
+        u1 = get_active_user(db, USER_1_ID)
+        assert u1.points == 50.0 and u1.half_coupons == 5 and u1.one_min_coupons == 1
+
+    # ج) حالت ۲ (از طریق ویرایش مطالعه امروز edit): نصف میثاق (۱۰ دقیقه -> ۱۰ امتیاز با مصرف ۱ سهمیه نصف میثاق)
+    await handle_edit_study_today(MockMessage(bot, USER_1_ID, "🔄 ویرایش مطالعه امروز"), u1_fsm)
+    await process_study_minutes(MockMessage(bot, USER_1_ID, "10"), u1_fsm)
+    await process_study_pages(MockMessage(bot, USER_1_ID, "8"), u1_fsm)
+    with get_db() as db:
+        u1 = get_active_user(db, USER_1_ID)
+        assert u1.points == 50.0 and u1.today_minutes == 10 and u1.half_coupons == 4 and u1.one_min_coupons == 1
+
+    # د) تست افزودن زمان به ثبت امروز (append): افزودن ۱۰ دقیقه دیگر (مجموع ۲۰ دقیقه -> بازگشت سهمیه نصف میثاق به ۵!)
+    await handle_append_study_today(MockMessage(bot, USER_1_ID, "➕ افزودن زمان به ثبت امروز"), u1_fsm)
+    await process_study_minutes(MockMessage(bot, USER_1_ID, "10"), u1_fsm)
+    await process_study_pages(MockMessage(bot, USER_1_ID, "7"), u1_fsm)
+    with get_db() as db:
+        u1 = get_active_user(db, USER_1_ID)
+        assert u1.points == 50.0 and u1.today_minutes == 20 and u1.today_pages == 15
+        assert u1.half_coupons == 5 and u1.one_min_coupons == 1
+
+    # هـ) حالت ۳: ۱ دقیقه با مصرف سهمیه طلایی پس از اتمام سهمیه‌های نصف میثاق
+    with get_db() as db:
+        u1 = get_active_user(db, USER_1_ID)
+        u1.half_coupons = 0
+        u1.today_half_used = 0
+        db.commit()
+    await handle_edit_study_today(MockMessage(bot, USER_1_ID, "🔄 ویرایش مطالعه امروز"), u1_fsm)
+    await process_study_minutes(MockMessage(bot, USER_1_ID, "2"), u1_fsm)
+    await process_study_pages(MockMessage(bot, USER_1_ID, "2"), u1_fsm)
+    with get_db() as db:
+        u1 = get_active_user(db, USER_1_ID)
+        assert u1.points == 50.0 and u1.one_min_coupons == 0 and u1.today_one_min_used == 1
+
+    # و) حالت ۴: امتیاز تناسبی پس از اتمام تمام سهمیه‌ها (۵ دقیقه از ۲۰ دقیقه = ۲.۵ امتیاز)
+    with get_db() as db:
+        u1 = get_active_user(db, USER_1_ID)
+        u1.today_one_min_used = 0
+        u1.one_min_coupons = 0
+        u1.half_coupons = 0
+        db.commit()
+    await handle_edit_study_today(MockMessage(bot, USER_1_ID, "🔄 ویرایش مطالعه امروز"), u1_fsm)
+    await process_study_minutes(MockMessage(bot, USER_1_ID, "5"), u1_fsm)
+    await process_study_pages(MockMessage(bot, USER_1_ID, "3"), u1_fsm)
+    with get_db() as db:
+        u1 = get_active_user(db, USER_1_ID)
+        assert u1.points == 42.5 and u1.today_points == 2.5
+    print("✅ [PASS] Scenario 5 & 6: All 4 scoring modes, edit/append coupon refund, and menu interruption verified.")
+
+    # -----------------------------------------------------------------------
+    # سناریو ۷: جاب نیمه‌شب (midnight_job)، ثبت غیبت، ثبت مطالعه دیروز (late)، حذف از absent و بازسازی streak
+    # -----------------------------------------------------------------------
+    with get_db() as db:
+        u1 = get_active_user(db, USER_1_ID)
+        # تنظیم تاریخ عضویت به ۳ روز قبل و حذف لاگ دیروز تا جاب نیمه‌شب برای دیروز (روز ۴ چله) غیبت ثبت کند
+        u1.created_at = datetime.utcnow() - timedelta(days=3)
+        db.commit()
+
+    await midnight_job(bot, force=True)
+    with get_db() as db:
+        u1 = get_active_user(db, USER_1_ID)
+        assert "4" in AbsenceService.parse_days_list(u1.absent_days_list) or 4 in AbsenceService.parse_days_list(u1.absent_days_list)
+        assert u1.no_study_days >= 1
+
+    # ثبت مطالعه دیروز با کسر ۵۰٪ امتیاز (۲۰ دقیقه -> ۱۰ امتیاز / ۲ = ۵ امتیاز)
+    await handle_log_study_yesterday(MockMessage(bot, USER_1_ID, "⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)"), u1_fsm)
+    assert await u1_fsm.get_state() == StudyStates.waiting_for_minutes
+    await process_study_minutes(MockMessage(bot, USER_1_ID, "20"), u1_fsm)
+    await process_study_pages(MockMessage(bot, USER_1_ID, "12"), u1_fsm)
+
+    with get_db() as db:
+        u1 = get_active_user(db, USER_1_ID)
+        assert 4 not in AbsenceService.parse_days_list(u1.absent_days_list), "روز ۴ از لیست غیبت حذف نشد"
+        assert 4 in AbsenceService.parse_days_list(u1.late_days_list), "روز ۴ به لیست تاخیر اضافه نشد"
+        assert u1.streak >= 2, f"زنجیره پس از ثبت دیروز بازسازی نشد: {u1.streak}"
+    print("✅ [PASS] Scenario 7: midnight_job absence recording, late study logging, and streak reconstruction verified.")
+
+    # -----------------------------------------------------------------------
+    # سناریو ۸: چندپروفایلی (عضویت در لیگ دوم، switchprof_، و تجمیع یادآوری شبانه برای هر دو لیگ)
+    # -----------------------------------------------------------------------
+    await cb_execute_user_add_second_league(
+        MockCallbackQuery(bot, GROUP_ADMIN_ID, f"adm_doaddl_{lg2_id}_{USER_1_ID}")
+    )
+    with get_db() as db:
+        profs = get_user_profiles(db, USER_1_ID, only_active=True)
+        assert len(profs) == 2, "پروفایل دوم ساخته نشد"
+        prof2_id = [p.id for p in profs if p.id != str(USER_1_ID)][0]
+
+    # تغییر پروفایل فعال به پروفایل اول
+    await cb_switch_profile(MockCallbackQuery(bot, USER_1_ID, f"switchprof_{USER_1_ID}"), u1_fsm)
+    with get_db() as db:
+        assert get_active_user(db, USER_1_ID).id == str(USER_1_ID)
+
+    # صفر کردن ثبت امروز هر دو پروفایل برای تست تجمیع یادآوری شبانه
+    with get_db() as db:
+        for p in get_user_profiles(db, USER_1_ID, only_active=True):
+            p.last_log_date = None
+            p.today_minutes = 0
+        db.commit()
+
+    before_msg_count = len(bot.sent_messages)
+    await send_study_reminders(bot, force=True)
+    new_msgs = [m for m in bot.sent_messages[before_msg_count:] if m["chat_id"] == str(USER_1_ID)]
+    assert len(new_msgs) == 1, "یادآوری شبانه باید در یک پیام واحد تجمیع شود"
+    assert "لیگ ستارگان" in new_msgs[0]["text"] and "لیگ نخبگان" in new_msgs[0]["text"]
+    print("✅ [PASS] Scenario 8: Multi-profile creation, profile switching, and aggregated night reminders verified.")
+
+    # -----------------------------------------------------------------------
+    # سناریو ۹: تست تولید هر ۳ نوع فایل اکسل و اعتبارسنجی با openpyxl
+    # -----------------------------------------------------------------------
+    with get_db() as db:
+        users_orm = db.query(User).filter(User.league_id == lg1_id).all()
+        p1 = ReportService.generate_excel("لیگ ستارگان", users_orm, cycle_number=2, current_day=5, league_floor=20)
+        p2 = ReportService.generate_excel(
+            "لیگ دیکشنری",
+            [{"name": "کاربر تستی", "points": 85.5, "minutes": 120, "pages": 60, "no_study": 1}],
+            cycle_number=1,
+            current_day=10,
+            league_floor=20,
+        )
+        p3 = ReportService.generate_weekly_excel("لیگ ستارگان", users_orm, cycle_number=2, current_day=5, league_floor=20)
+        p4 = ReportService.generate_cycle_history_excel(db, group_ids=[1])
+
+    for excel_file in (p1, p2, p3, p4):
+        assert os.path.exists(excel_file), f"فایل اکسل تولید نشد: {excel_file}"
+        wb = load_workbook(excel_file)
+        assert len(wb.sheetnames) >= 1
+        ws = wb.active
+        assert ws.sheet_view.rightToLeft is True
+        wb.close()
+        os.remove(excel_file)
+    print("✅ [PASS] Scenario 9: All 3 Excel generators (User ORM, dict, weekly, multi-sheet history) verified.")
+
+    # -----------------------------------------------------------------------
+    # سناریو ۱۰: تست کامل پایان چله ۴۰ روزه در روز ۴۱ام به همراه کاربر سحرخیز قبل از ساعت ۸ صبح
+    # -----------------------------------------------------------------------
+    day_41_start_shamsi = DateService.date_to_shamsi(DateService.today_date() - timedelta(days=40))
+    with get_db() as db:
+        lg1 = db.query(League).filter(League.id == lg1_id).first()
+        cyc1 = get_or_create_active_cycle(db, lg1)
+        lg1.start_shamsi = day_41_start_shamsi
+        cyc1.start_shamsi = day_41_start_shamsi
+        lg1.cycle_number = 2
+        cyc1.cycle_number = 2
+
+        # ایجاد یک کاربر سحرخیز در لیگ ۱ که در چله قدیم ۱۰۰ امتیاز داشته و صبح روز ۴۱ام ۳۰ دقیقه مطالعه ثبت می‌کند
+        early_user = User(
+            id=str(EARLY_USER_ID),
+            telegram_id=str(EARLY_USER_ID),
+            group_id=1,
+            name="سحرخیز کتابخوان",
+            first_name="سحرخیز",
+            last_name="کتابخوان",
+            league_id=lg1_id,
+            points=100.0,
+            total_minutes=400,
+            total_pages=200,
+            streak=5,
+            no_study_days=0,
+            half_coupons=4,
+            one_min_coupons=1,
+            is_active=True,
+        )
+        db.add(early_user)
+
+        # پاکسازی لاگ مطالعه امروز برای u1 تا به عنوان کاربر عادی بدون مطالعه صبحگاهی در سناریو ۱۰ بررسی شود
+        db.query(ActivityLog).filter(
+            ActivityLog.user_id == str(USER_1_ID),
+            ActivityLog.log_date == DateService.today_str(),
+        ).delete()
+        u1_rec = db.query(User).filter(User.id == str(USER_1_ID)).first()
+        u1_rec.today_minutes = 0
+        u1_rec.today_pages = 0
+        u1_rec.today_points = 0.0
+        u1_rec.last_log_date = None
+        db.commit()
+
+    # ثبت مطالعه صبحگاهی توسط کاربر سحرخیز در روز ۴۱ قبل از ساعت ۸ صبح
+    early_fsm = make_fsm(storage, bot.id, EARLY_USER_ID)
+    await handle_log_study_today(MockMessage(bot, EARLY_USER_ID, "📝 ثبت مطالعه امروز"), early_fsm)
+    await process_study_minutes(MockMessage(bot, EARLY_USER_ID, "30"), early_fsm)
+    await process_study_pages(MockMessage(bot, EARLY_USER_ID, "25"), early_fsm)
+
+    # اجرای جاب ساعت ۸ صبح روز ۴۱ام
+    await send_daily_user_reports(bot, force=True)
+
+    with get_db() as db:
+        lg1 = db.query(League).filter(League.id == lg1_id).first()
+        assert lg1.cycle_number == 3 and lg1.current_day == 1, "چله جدید از روز ۱ آغاز نشد"
+
+        # بررسی اینکه فقط یک چله active برای لیگ وجود دارد
+        active_cycles = db.query(Cycle).filter(Cycle.league_id == lg1_id, Cycle.status == "active").all()
+        assert len(active_cycles) == 1 and active_cycles[0].cycle_number == 3, "تعداد چله‌های فعال نادرست است"
+
+        # بررسی کارنامه ذخیره شده چله ۲ برای کاربر سحرخیز (باید بدون ۳۰ دقیقه صبح امروز یعنی ۱۰۰ امتیاز و ۴۰۰ دقیقه باشد)
+        finished_cyc = db.query(Cycle).filter(Cycle.league_id == lg1_id, Cycle.cycle_number == 2).first()
+        assert finished_cyc is not None and finished_cyc.status == "finished"
+        early_res = (
+            db.query(CycleResult)
+            .filter(CycleResult.cycle_id == finished_cyc.id, CycleResult.user_id == str(EARLY_USER_ID))
+            .first()
+        )
+        assert early_res is not None
+        assert early_res.points == 100.0 and early_res.total_minutes == 400, (
+            f"آمار چله قدیم سحرخیز به درستی تفکیک نشد: points={early_res.points}, mins={early_res.total_minutes}"
+        )
+
+        # بررسی انتقال مطالعه صبحگاهی سحرخیز به روز ۱ چله ۳
+        eu_after = db.query(User).filter(User.id == str(EARLY_USER_ID)).first()
+        assert eu_after.points == 10.0 and eu_after.total_minutes == 30 and eu_after.today_minutes == 30
+        assert eu_after.streak == 1
+
+        # بررسی صفر شدن آمار و زنجیره کاربر عادی برای چله ۳
+        u1_after = db.query(User).filter(User.id == str(USER_1_ID)).first()
+        assert u1_after.points == 0.0 and u1_after.total_minutes == 0 and u1_after.streak == 0
+
+    print("✅ [PASS] Scenario 10: 40-day cycle rollover on Day 41 and early-riser log migration verified.")
+
+
+if __name__ == "__main__":
+    asyncio.run(run_all_tests())
 </file>
 
 <file path="admin_handlers.py">
@@ -442,6 +1231,18 @@ def _get_league_edit_keyboard(league_id: str) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def _get_user_past_days(db: Session, u: User) -> set[int]:
+    """روزهای گذشتهٔ چلهٔ فعال کاربر (۱ تا دیروز؛ در بامداد روز ۴۱ شامل روز ۴۰ هم میشود)"""
+    if not u.league_id:
+        return set()
+    lg = db.query(League).filter(League.id == u.league_id).first()
+    if not lg:
+        return set()
+    cyc = get_or_create_active_cycle(db, lg)
+    raw_day = DateService.calculate_raw_league_day(cyc.start_shamsi or lg.start_shamsi)
+    return set(range(1, min(settings.LEAGUE_DURATION, raw_day - 1) + 1))
 
 
 def _get_user_manage_keyboard(user_id: str) -> InlineKeyboardMarkup:
@@ -775,7 +1576,7 @@ async def process_cg_name(message: Message, state: FSMContext) -> None:
     await safe_reply(
         message,
         f"🔑 نام مجموعه: *{escape_md(name)}*\n\n"
-        "حالا *رمز ورود مجموعه* (یک عدد ۴ تا ۸ رقمی یکتا) را وارد کنید:",
+        "حالا *رمز ورود مجموعه* (یک عدد ۶ تا ۸ رقمی یکتا) را وارد کنید:",
         reply_markup=get_inline_cancel_keyboard(show_back=True),
     )
 
@@ -783,10 +1584,10 @@ async def process_cg_name(message: Message, state: FSMContext) -> None:
 @admin_router.message(AdminStates.cg_waiting_password)
 async def process_cg_password(message: Message, state: FSMContext) -> None:
     pwd = DateService.normalize_digits(message.text or "")
-    if not (pwd.isdigit() and 4 <= len(pwd) <= 8):
+    if not (pwd.isdigit() and 6 <= len(pwd) <= 8):
         await safe_reply(
             message,
-            "❌ رمز ورود باید فقط شامل اعداد و بین ۴ تا ۸ رقم باشد. لطفاً مجدداً وارد کنید:",
+            "❌ رمز ورود باید فقط شامل اعداد و بین ۶ تا ۸ رقم باشد. لطفاً مجدداً وارد کنید:",
         )
         return
 
@@ -868,7 +1669,7 @@ async def cmd_change_group_password(message: Message, state: FSMContext) -> None
             await safe_reply(
                 message,
                 f"🔑 تغییر رمز مجموعه *{escape_md(g.name)}* (رمز فعلی: `{g.password}`)\n\n"
-                "لطفاً رمز جدید (عدد ۴ تا ۸ رقمی) را وارد کنید:",
+                "لطفاً رمز جدید (عدد ۶ تا ۸ رقمی) را وارد کنید:",
                 reply_markup=get_inline_cancel_keyboard(),
             )
             return
@@ -907,7 +1708,7 @@ async def cb_select_group_for_password(callback: CallbackQuery, state: FSMContex
         callback.bot,
         callback.message.chat.id,
         f"🔑 تغییر رمز مجموعه *{escape_md(g_name)}* (رمز فعلی: `{g_pwd}`)\n\n"
-        "لطفاً رمز جدید (عدد ۴ تا ۸ رقمی) را وارد کنید:",
+        "لطفاً رمز جدید (عدد ۶ تا ۸ رقمی) را وارد کنید:",
         reply_markup=get_inline_cancel_keyboard(),
     )
     await callback.answer()
@@ -916,10 +1717,10 @@ async def cb_select_group_for_password(callback: CallbackQuery, state: FSMContex
 @admin_router.message(AdminStates.pg_waiting_password)
 async def process_pg_new_password(message: Message, state: FSMContext) -> None:
     pwd = DateService.normalize_digits(message.text or "")
-    if not (pwd.isdigit() and 4 <= len(pwd) <= 8):
+    if not (pwd.isdigit() and 6 <= len(pwd) <= 8):
         await safe_reply(
             message,
-            "❌ رمز ورود باید فقط شامل اعداد و بین ۴ تا ۸ رقم باشد. لطفاً مجدداً وارد کنید:",
+            "❌ رمز ورود باید فقط شامل اعداد و بین ۶ تا ۸ رقم باشد. لطفاً مجدداً وارد کنید:",
         )
         return
 
@@ -2199,6 +3000,15 @@ async def cb_execute_user_move_league(callback: CallbackQuery) -> None:
                 u.today_half_used = 0
                 u.today_one_min_used = 0
                 u.created_at = datetime.now(timezone.utc)
+                db.query(ActivityLog).filter(
+                    ActivityLog.user_id == u.id,
+                    ActivityLog.league_id == lg.id,
+                    (ActivityLog.cycle_id == cyc.id)
+                    | (
+                        (ActivityLog.cycle_id == None)
+                        & (ActivityLog.cycle_number == lg.cycle_number)
+                    ),
+                ).delete(synchronize_session=False)
                 db.commit()
 
                 set_system_state(db, f"streak_offset_{u.id}", "0")
@@ -2560,6 +3370,7 @@ async def process_user_new_no_study(message: Message, state: FSMContext) -> None
         return
 
     new_count = int(raw)
+    note = ""
     data = await state.get_data()
     target_uid = data.get("target_user_id")
     with get_db() as db:
@@ -2576,20 +3387,30 @@ async def process_user_new_no_study(message: Message, state: FSMContext) -> None
                 .all()
                 if r.league_day
             }
-            u.no_study_days = new_count
+            past_days = _get_user_past_days(db, u)
+            future_days = set(range(1, settings.LEAGUE_DURATION + 1)) - past_days
+            allowed_days = past_days - logged_days
+            eff_count = min(new_count, len(allowed_days))
+            if eff_count < new_count:
+                note = (
+                    "\n⚠️ عدد واردشده بیشتر از تعداد روزهای گذشتهٔ بدون ثبت در این چله بود؛ "
+                    f"مقدار روی {eff_count} تنظیم شد."
+                )
             u.absent_days_list = AbsenceService.sync_days_list_with_count(
                 u.absent_days_list,
-                new_count,
+                eff_count,
                 max_day=settings.LEAGUE_DURATION,
-                exclude_days=logged_days,
+                exclude_days=logged_days | future_days,
+                preferred_days=sorted(allowed_days),
             )
+            u.no_study_days = len(AbsenceService.parse_days_list(u.absent_days_list))
             db.commit()
             card = _format_user_admin_card(db, u)
         else:
             card = "کاربر یافت نشد."
 
     await state.clear()
-    await safe_reply(message, f"✅ تعداد غیبت و لیست روزهای غیبت همگام‌سازی شد.\n\n{card}", reply_markup=_get_user_manage_keyboard(target_uid))
+    await safe_reply(message, f"✅ تعداد غیبت و لیست روزهای غیبت همگام‌سازی شد.{note}\n\n{card}", reply_markup=_get_user_manage_keyboard(target_uid))
 
 
 @admin_router.callback_query(F.data.startswith("adm_edit_late_"))
@@ -2614,17 +3435,28 @@ async def process_user_new_late(message: Message, state: FSMContext) -> None:
         return
 
     new_count = int(raw)
+    note = ""
     data = await state.get_data()
     target_uid = data.get("target_user_id")
     with get_db() as db:
         u = db.query(User).filter(User.id == target_uid).first()
         if u:
             absent_days = set(AbsenceService.parse_days_list(u.absent_days_list))
+            past_days_l = _get_user_past_days(db, u)
+            future_days_l = set(range(1, settings.LEAGUE_DURATION + 1)) - past_days_l
+            allowed_late = past_days_l - absent_days
+            eff_late = min(new_count, len(allowed_late))
+            if eff_late < new_count:
+                note = (
+                    "\n⚠️ عدد واردشده بیشتر از تعداد روزهای گذشتهٔ قابلثبت در این چله بود؛ "
+                    f"مقدار روی {eff_late} تنظیم شد."
+                )
             u.late_days_list = AbsenceService.sync_days_list_with_count(
                 u.late_days_list,
-                new_count,
+                eff_late,
                 max_day=settings.LEAGUE_DURATION,
-                exclude_days=absent_days,
+                exclude_days=absent_days | future_days_l,
+                preferred_days=sorted(allowed_late),
             )
             db.commit()
             card = _format_user_admin_card(db, u)
@@ -2632,7 +3464,7 @@ async def process_user_new_late(message: Message, state: FSMContext) -> None:
             card = "کاربر یافت نشد."
 
     await state.clear()
-    await safe_reply(message, f"✅ تعداد ثبت‌های با تاخیر همگام‌سازی شد.\n\n{card}", reply_markup=_get_user_manage_keyboard(target_uid))
+    await safe_reply(message, f"✅ تعداد ثبت‌های با تاخیر همگام‌سازی شد.{note}\n\n{card}", reply_markup=_get_user_manage_keyboard(target_uid))
 
 
 @admin_router.callback_query(F.data.startswith("adm_userfloor_"))
@@ -2749,15 +3581,16 @@ async def cb_menu_stats(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-# --- دستور ex و دکمه شیشه‌ای adm_menu_excel (دریافت خروجی اکسل لیگ‌های فعال) ---
-async def _send_active_leagues_excel(bot: Bot, chat_id: int | str, user_id: str) -> None:
-    export_tasks: List[Dict[str, Any]] = []
+# --- توابع کمکی خروجی اکسل و هندلرهای ex / adm_menu_excel ---
+def _collect_admin_league_ids_sync(user_id: str) -> Optional[List[str]]:
+    """شناسه لیگ‌های فعال تحت مدیریت ادمین؛ None یعنی ادمین نیست (اجرا در ترد)"""
     with get_db() as db:
         if not is_user_admin(db, user_id):
-            return
+            return None
         group_ids = get_admin_group_ids(db, user_id)
-        leagues = (
-            db.query(League)
+        return [
+            r[0]
+            for r in db.query(League.id)
             .filter(
                 League.group_id.in_(group_ids),
                 League.is_deleted == False,
@@ -2765,65 +3598,106 @@ async def _send_active_leagues_excel(bot: Bot, chat_id: int | str, user_id: str)
             )
             .order_by(League.id.asc())
             .all()
-        )
-        if not leagues:
-            await safe_send_message(bot, chat_id, "📭 هیچ لیگ فعالی برای تولید اکسل یافت نشد.")
-            return
+        ]
 
-        for lg in leagues:
-            cyc = get_or_create_active_cycle(db, lg)
-            curr_day = DateService.calculate_league_day(cyc.start_shamsi or lg.start_shamsi)
-            users = (
+
+def _collect_league_export_sync(league_id: str) -> Optional[Dict[str, Any]]:
+    """جمع‌آوری داده اکسل یک لیگ با خواندن دسته‌ای کاربران (اجرا در ترد با نشست مستقل)"""
+    with get_db() as db:
+        lg = db.get(League, league_id)
+        if not lg or lg.is_deleted or not lg.is_active:
+            return None
+        cyc = get_or_create_active_cycle(db, lg)
+        curr_day = DateService.calculate_league_day(cyc.start_shamsi or lg.start_shamsi)
+
+        users_data: List[Dict[str, Any]] = []
+        chunk_size = max(50, int(settings.DB_CHUNK_SIZE))
+        last_id = ""
+        while True:
+            chunk = (
                 db.query(User)
-                .filter(User.league_id == lg.id, User.is_active == True)
+                .filter(
+                    User.league_id == lg.id,
+                    User.is_active == True,
+                    User.id > last_id,
+                )
+                .order_by(User.id.asc())
+                .limit(chunk_size)
                 .all()
             )
-            export_tasks.append(
-                {
-                    "id": lg.id,
-                    "name": lg.name,
-                    "cycle_number": lg.cycle_number,
-                    "current_day": curr_day,
-                    "floor": lg.floor,
-                    "users_data": [
-                        ReportService._extract_row_dict(u, league_floor=lg.floor)
-                        for u in users
-                    ],
-                }
+            if not chunk:
+                break
+            last_id = chunk[-1].id
+            users_data.extend(
+                ReportService._extract_row_dict(u, league_floor=lg.floor) for u in chunk
             )
+            db.expunge_all()
 
-    for task in export_tasks:
-        file_path = await asyncio.to_thread(
-            ReportService.generate_excel,
-            league_name=task["name"],
-            users_data=task["users_data"],
-            cycle_number=task["cycle_number"],
-            current_day=task["current_day"],
-            league_floor=task["floor"],
-        )
+        return {
+            "id": lg.id,
+            "name": lg.name,
+            "cycle_number": lg.cycle_number,
+            "current_day": curr_day,
+            "floor": lg.floor,
+            "users_data": users_data,
+        }
+
+
+async def _send_active_leagues_excel(bot: Bot, chat_id: int | str, user_id: str) -> None:
+    from handlers import safe_send_document
+
+    league_ids = await asyncio.to_thread(_collect_admin_league_ids_sync, user_id)
+    if league_ids is None:
+        return
+    if not league_ids:
+        await safe_send_message(bot, chat_id, "📭 هیچ لیگ فعالی برای تولید اکسل یافت نشد.")
+        return
+
+    # هر بار فقط داده یک لیگ در حافظه است و پس از ارسال آزاد می‌شود
+    for league_id in league_ids:
+        task = await asyncio.to_thread(_collect_league_export_sync, league_id)
+        if not task:
+            continue
+
+        file_path = ""
         try:
-            await bot.send_document(
-                chat_id=chat_id,
-                document=FSInputFile(file_path),
-                caption=(
-                    f"📥 گزارش اکسل لیگ «{task['name']}»\n"
-                    f"🏆 چله {task['cycle_number']} | روز {task['current_day']}"
-                ),
+            file_path = await asyncio.to_thread(
+                ReportService.generate_excel,
+                league_name=task["name"],
+                users_data=task["users_data"],
+                cycle_number=task["cycle_number"],
+                current_day=task["current_day"],
+                league_floor=task["floor"],
             )
+            task["users_data"] = []
+            caption = f"📥 گزارش اکسل لیگ «{task['name']}»\n🏆 چله {task['cycle_number']} | روز {task['current_day']}"
+            ok = await safe_send_document(
+                bot,
+                chat_id,
+                file_path,
+                caption=caption,
+            )
+            if not ok:
+                logger.error(f"خطا در ارسال فایل اکسل لیگ {task['id']}")
+                await safe_send_message(
+                    bot,
+                    chat_id,
+                    f"❌ در ارسال فایل اکسل لیگ «{escape_md(task['name'])}» خطایی رخ داد.",
+                )
         except Exception as exc:
-            logger.error(f"خطا در ارسال فایل اکسل لیگ {task['id']}: {exc}")
+            logger.error(f"خطا در تولید/ارسال اکسل لیگ {task['id']}: {exc}")
             await safe_send_message(
                 bot,
                 chat_id,
-                f"❌ در ارسال فایل اکسل لیگ «{escape_md(task['name'])}» خطایی رخ داد: {escape_md(str(exc))}",
+                f"❌ در تولید فایل اکسل لیگ «{escape_md(task['name'])}» خطایی رخ داد: {escape_md(str(exc))}",
             )
         finally:
-            if os.path.exists(file_path):
+            if file_path and os.path.exists(file_path):
                 try:
                     os.remove(file_path)
                 except OSError:
                     pass
-
+            task = None
 
 @admin_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "ex"))
 async def cmd_export_excel(message: Message) -> None:
@@ -3375,119 +4249,21 @@ async def cmd_test_startup_notification(message: Message) -> None:
     )
 </file>
 
-<file path="config.py">
-import os
-import logging
-from pathlib import Path
-from typing import List
-from dotenv import load_dotenv
-
-# بارگذاری متغیرهای محیطی از فایل .env
-load_dotenv()
-
-
-class Config:
-    """کلاس مدیریت تنظیمات سراسری پروژه کتابخوارشو"""
-
-    def __init__(self) -> None:
-        self.BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
-        self.API_URL: str = os.getenv("API_URL", "https://tapi.bale.ai").strip().rstrip("/")
-
-        raw_admin_ids: str = os.getenv("ADMIN_IDS", "").strip()
-        self.ADMIN_IDS: List[str] = [
-            adm.strip() for adm in raw_admin_ids.split(",") if adm.strip()
-        ]
-
-        self.ARCHIVE_CHANNEL: str = os.getenv("ARCHIVE_CHANNEL", "").strip()
-        self.DATABASE_URL: str = os.getenv(
-            "DATABASE_URL", "sqlite:///./data/ketabkharsho.db"
-        ).strip()
-
-        self.DEFAULT_FLOOR: int = self._get_int("DEFAULT_FLOOR", 10)
-        self.LEAGUE_DURATION: int = self._get_int("LEAGUE_DURATION", 40)
-        self.DEFAULT_HALF_COUPONS: int = self._get_int("DEFAULT_HALF_COUPONS", 5)
-        self.DEFAULT_ONE_MIN_COUPONS: int = self._get_int("DEFAULT_ONE_MIN_COUPONS", 1)
-
-        self.REMINDER_HOUR: int = self._get_int("REMINDER_HOUR", 22)
-        self.DAILY_REPORT_HOUR: int = self._get_int("DAILY_REPORT_HOUR", 8)
-        self.ADMIN_REPORT_HOUR: int = self._get_int("ADMIN_REPORT_HOUR", 1)
-        self.WEEKLY_REPORT_HOUR: int = self._get_int("WEEKLY_REPORT_HOUR", 2)
-
-        self.DEBUG: bool = os.getenv("DEBUG", "False").strip().lower() in (
-            "true",
-            "1",
-            "yes",
-            "on",
-        )
-        self.LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").strip().upper()
-
-        # ساخت پوشه‌های موردنیاز پروژه
-        self._ensure_directories()
-
-    @staticmethod
-    def _get_int(env_key: str, default: int) -> int:
-        val = os.getenv(env_key)
-        if val is None or not val.strip():
-            return default
-        try:
-            return int(val.strip())
-        except ValueError:
-            return default
-
-    def _ensure_directories(self) -> None:
-        """ایجاد دایرکتوری‌های داده، بکاپ و گزارش‌های اکسل"""
-        for folder in ("./data", "./backups", "./reports"):
-            Path(folder).mkdir(parents=True, exist_ok=True)
-
-        if self.DATABASE_URL.startswith("sqlite:///"):
-            db_file_path = self.DATABASE_URL.replace("sqlite:///", "", 1)
-            db_parent = Path(db_file_path).parent
-            db_parent.mkdir(parents=True, exist_ok=True)
-
-    def validate(self) -> None:
-        """اعتبارسنجی مقادیر حیاتی تنظیمات در بدو اجرای برنامه"""
-        if not self.BOT_TOKEN:
-            raise ValueError("خطا: متغیر محیطی BOT_TOKEN در فایل .env تنظیم نشده است.")
-        if not self.ADMIN_IDS:
-            raise ValueError("خطا: متغیر محیطی ADMIN_IDS در فایل .env تنظیم نشده است.")
-        if self.DEFAULT_FLOOR < 1:
-            raise ValueError("خطا: مقدار DEFAULT_FLOOR باید حداقل 1 دقیقه باشد.")
-        if self.LEAGUE_DURATION < 1:
-            raise ValueError("خطا: مقدار LEAGUE_DURATION باید حداقل 1 روز باشد.")
-        for hour_name, hour_val in [
-            ("REMINDER_HOUR", self.REMINDER_HOUR),
-            ("DAILY_REPORT_HOUR", self.DAILY_REPORT_HOUR),
-            ("ADMIN_REPORT_HOUR", self.ADMIN_REPORT_HOUR),
-            ("WEEKLY_REPORT_HOUR", self.WEEKLY_REPORT_HOUR),
-        ]:
-            if not (0 <= hour_val <= 23):
-                raise ValueError(f"خطا: ساعت {hour_name} باید عددی بین 0 تا 23 باشد.")
-
-    def is_super_admin(self, user_id: str | int) -> bool:
-        """بررسی مدیر ارشد بودن کاربر"""
-        return str(user_id).strip() in self.ADMIN_IDS
-
-
-settings = Config()
-
-# تنظیمات پایه لاگینگ
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL, logging.INFO),
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-)
-</file>
-
 <file path="database.py">
+import os
 import shutil
 import sqlite3
 import logging
+import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from typing import Generator, Optional, List
 
 from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.pool import QueuePool
 
 from config import settings
 from models import (
@@ -3503,19 +4279,19 @@ from models import (
 logger = logging.getLogger(__name__)
 
 # تنظیم موتور SQLite با پشتیبانی از چندرشته‌ای و WAL Mode
-connect_args = {"check_same_thread": False, "timeout": 30} if "sqlite" in settings.DATABASE_URL else {}
+IS_SQLITE: bool = settings.is_sqlite
 
-engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args=connect_args,
-    pool_pre_ping=True,
-)
+if IS_SQLITE:
+    # حالت توسعه/تست: SQLite با پشتیبانی چندرشته‌ای و WAL Mode
+    engine = create_engine(
+        settings.DATABASE_URL,
+        connect_args={"check_same_thread": False, "timeout": 30},
+        pool_pre_ping=True,
+    )
 
-
-@event.listens_for(engine, "connect")
-def set_sqlite_pragma(dbapi_connection, connection_record) -> None:
-    """فعال‌سازی WAL Mode و کلیدهای خارجی در SQLite برای کارایی و پایداری بالا"""
-    if "sqlite" in settings.DATABASE_URL:
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record) -> None:
+        """فعال‌سازی WAL Mode و کلیدهای خارجی؛ فقط برای SQLite"""
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute("PRAGMA synchronous=NORMAL;")
@@ -3523,7 +4299,17 @@ def set_sqlite_pragma(dbapi_connection, connection_record) -> None:
         cursor.execute("PRAGMA busy_timeout=30000;")
         cursor.execute("PRAGMA temp_store=MEMORY;")
         cursor.close()
-
+else:
+    # حالت تولید: PostgreSQL با کانکشن پولینگ استاندارد
+    engine = create_engine(
+        settings.DATABASE_URL,
+        poolclass=QueuePool,
+        pool_size=settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_MAX_OVERFLOW,
+        pool_timeout=settings.DB_POOL_TIMEOUT,
+        pool_recycle=settings.DB_POOL_RECYCLE,
+        pool_pre_ping=True,
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
 
@@ -3541,11 +4327,67 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-def backup_database() -> Optional[str]:
-    """تهیه نسخه پشتیبان خودکار از فایل دیتابیس SQLite در پوشه backups/"""
-    if not settings.DATABASE_URL.startswith("sqlite:///"):
+def _backup_postgres() -> Optional[str]:
+    """
+    پشتیبان‌گیری PostgreSQL با pg_dump (در صورت PG_DUMP_ENABLED=true).
+    در غیر این صورت صرفاً لاگ می‌شود تا بکاپ توسط زیرساخت (cron/managed backup) مدیریت گردد.
+    """
+    if not settings.PG_DUMP_ENABLED:
+        logger.info(
+            "دیتابیس PostgreSQL است؛ بکاپ فایلی انجام نشد (PG_DUMP_ENABLED=false). "
+            "بکاپ را از طریق pg_dump زمان‌بندی‌شده یا سرویس مدیریت‌شده انجام دهید."
+        )
         return None
 
+    pg_dump_bin = shutil.which("pg_dump")
+    if not pg_dump_bin:
+        logger.warning("ابزار pg_dump روی سرور یافت نشد؛ بکاپ PostgreSQL انجام نشد.")
+        return None
+
+    try:
+        url = make_url(settings.DATABASE_URL)
+        backup_dir = Path(settings.BACKUP_DIR)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_file = backup_dir / f"ketabkharsho_pg_backup_{timestamp}.dump"
+
+        cmd = [pg_dump_bin, "--format=custom", "--no-owner", "--file", str(out_file)]
+        if url.host:
+            cmd += ["--host", str(url.host)]
+        if url.port:
+            cmd += ["--port", str(url.port)]
+        if url.username:
+            cmd += ["--username", str(url.username)]
+        cmd += ["--dbname", str(url.database or "")]
+
+        env = dict(os.environ)
+        if url.password:
+            env["PGPASSWORD"] = str(url.password)
+
+        subprocess.run(cmd, env=env, check=True, timeout=600, capture_output=True)
+        logger.info(f"نسخه پشتیبان PostgreSQL ایجاد شد: {out_file}")
+
+        backups = sorted(
+            backup_dir.glob("ketabkharsho_pg_backup_*.dump"), key=lambda p: p.stat().st_mtime
+        )
+        if len(backups) > 30:
+            for old_bkp in backups[:-30]:
+                try:
+                    old_bkp.unlink()
+                except OSError:
+                    pass
+        return str(out_file)
+    except Exception as exc:
+        logger.error(f"خطا در تهیه بکاپ PostgreSQL: {exc}")
+        return None
+
+
+def backup_database() -> Optional[str]:
+    """تهیه نسخه پشتیبان خودکار: فایلی برای SQLite و pg_dump اختیاری برای PostgreSQL"""
+    if not settings.is_sqlite:
+        return _backup_postgres()
+    if not settings.DATABASE_URL.startswith("sqlite:///"):
+        return None
     db_file_str = settings.DATABASE_URL.replace("sqlite:///", "", 1)
     db_path = Path(db_file_str)
     if not db_path.exists() or db_path.stat().st_size == 0:
@@ -3582,7 +4424,9 @@ def backup_database() -> Optional[str]:
 
 
 def _run_migrations() -> None:
-    """بررسی و افزودن خودکار ستون‌های احتمالی جاافتاده در دیتابیس‌های قدیمی"""
+    """بررسی و افزودن خودکار ستون‌های احتمالی جاافتاده در دیتابیس‌های قدیمی (فقط SQLite)"""
+    if not IS_SQLITE:
+        return
     inspector = inspect(engine)
     existing_tables = inspector.get_table_names()
 
@@ -3722,11 +4566,65 @@ def get_or_create_active_cycle(db: Session, league: League, default_start_shamsi
     return new_cycle
 
 
+_INDEX_DDL = [
+    ("ix_users_league_active", "users", "league_id, is_active"),
+    ("ix_users_tg_active", "users", "telegram_id, is_active"),
+    ("ix_users_group_active", "users", "group_id, is_active"),
+    ("ix_leagues_group_flags", "leagues", "group_id, is_deleted, is_active"),
+    ("ix_cycles_league_status", "cycles", "league_id, status"),
+    ("ix_group_admins_group_user", "group_admins", "group_id, user_id"),
+    ("ix_actlog_user_league_date", "activity_logs", "user_id, league_id, log_date"),
+    ("ix_actlog_league_cycle_day", "activity_logs", "league_id, cycle_id, league_day"),
+    ("ix_actlog_league_date", "activity_logs", "league_id, log_date"),
+]
+
+
+def _ensure_indexes() -> None:
+    """ساخت ایندکس‌های ترکیبی (idempotent) روی SQLite و PostgreSQL"""
+    for idx_name, table, cols in _INDEX_DDL:
+        try:
+            # هر ایندکس در تراکنش جداگانه تا خطای احتمالی PostgreSQL بقیه را خراب نکند
+            with engine.begin() as conn:
+                conn.execute(text(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} ({cols})"))
+        except Exception as exc:
+            logger.warning(f"عدم امکان ساخت ایندکس {idx_name}: {exc}")
+
+
+def _sync_postgres_sequences(db: Session) -> None:
+    """
+    همگام‌سازی sequence ها در PostgreSQL پس از درج دستی رکورد با id مشخص (مثل گروه ۱)،
+    تا درج بعدی با خطای کلید تکراری مواجه نشود.
+    """
+    if IS_SQLITE:
+        return
+    for table in (
+        "groups",
+        "group_admins",
+        "cycles",
+        "activity_logs",
+        "cycle_results",
+        "group_messages",
+        "group_terms",
+    ):
+        try:
+            db.execute(
+                text(
+                    f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
+                    f"COALESCE((SELECT MAX(id) FROM {table}), 0) + 1, false)"
+                )
+            )
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"عدم امکان همگام‌سازی sequence جدول {table}: {exc}")
+    db.commit()
+
+
 def init_db() -> None:
     """راه‌اندازی اولیه دیتابیس، بکاپ‌گیری، مایگریشن، ساخت گروه ۱ و تضمین چله‌های فعال"""
     backup_database()
     Base.metadata.create_all(bind=engine)
     _run_migrations()
+    _ensure_indexes()
 
     from services import DateService
 
@@ -3751,6 +4649,15 @@ def init_db() -> None:
             db.commit()
             db.refresh(default_group)
             logger.info("گروه پیش‌فرض شماره ۱ (مدرسه مجازی امام حسین ع) ایجاد شد.")
+
+        for weak_group in db.query(Group).filter(Group.is_deleted == False).all():
+            if len(weak_group.password or "") < 6:
+                logger.warning(
+                    f"رمز مجموعه «{weak_group.name}» (ID={weak_group.id}) کمتر از ۶ رقم است؛ "
+                    "قبل از ثبتنام عمومی آن را با دستور pg تغییر دهید."
+                )
+
+        _sync_postgres_sequences(db)
 
         # ۲. ثبت تمام ADMIN_IDS به عنوان ادمین گروه ۱
         for admin_id in settings.ADMIN_IDS:
@@ -3920,14 +4827,19 @@ def is_user_admin(db: Session, telegram_id: str | int, group_id: Optional[int] =
 
 <file path="handlers.py">
 import os
+import time
 import asyncio
 import logging
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Tuple
+from typing import Any, List, Optional, Dict, Tuple
 
 from aiogram import Router, F, Bot
-from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
+from aiogram.exceptions import (
+    TelegramRetryAfter,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+)
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -3937,7 +4849,8 @@ from aiogram.types import (
     ReplyKeyboardRemove,
     FSInputFile,
 )
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, load_only
 
 from config import settings
 from database import (
@@ -4019,6 +4932,56 @@ RESERVED_MENU_TEXTS = {
 # ===========================================================================
 _user_locks: Dict[str, asyncio.Lock] = {}
 
+PWD_MAX_FAILS_PER_USER = 5
+PWD_USER_LOCK_SECONDS = 600
+PWD_GLOBAL_MAX_FAILS_PER_HOUR = 100
+PWD_GLOBAL_LOCK_SECONDS = 3600
+
+
+def _state_int(db: Session, key: str, default: int = 0) -> int:
+    try:
+        return int(get_system_state(db, key, str(default)) or default)
+    except ValueError:
+        return default
+
+
+def _pwd_is_locked(db: Session, tg_key: str) -> bool:
+    """بررسی قفل پایدار تلاش رمز: هم برای همین کاربر و هم قفل سراسری"""
+    now = int(time.time())
+    if now < _state_int(db, f"pwd_lock_{tg_key}"):
+        return True
+    if now < _state_int(db, "pwd_global_lock"):
+        return True
+    return False
+
+
+def _pwd_register_failure(db: Session, tg_key: str) -> str:
+    """ثبت یک تلاش ناموفق. خروجی: 'ok' یا 'user_locked' یا 'global_locked'"""
+    now = int(time.time())
+
+    # شمارنده سراسری (پنجره ۱ ساعته)
+    g_start = _state_int(db, "pwd_global_start")
+    g_count = _state_int(db, "pwd_global_count")
+    if g_start == 0 or now - g_start > 3600:
+        g_start, g_count = now, 0
+    g_count += 1
+    set_system_state(db, "pwd_global_start", str(g_start))
+    set_system_state(db, "pwd_global_count", str(g_count))
+    if g_count >= PWD_GLOBAL_MAX_FAILS_PER_HOUR:
+        set_system_state(db, "pwd_global_lock", str(now + PWD_GLOBAL_LOCK_SECONDS))
+        set_system_state(db, "pwd_global_count", "0")
+        logger.warning("Global group-password lock triggered: too many failed attempts.")
+        return "global_locked"
+
+    # شمارنده اختصاصی کاربر
+    fails = _state_int(db, f"pwd_fail_{tg_key}") + 1
+    if fails >= PWD_MAX_FAILS_PER_USER:
+        set_system_state(db, f"pwd_fail_{tg_key}", "0")
+        set_system_state(db, f"pwd_lock_{tg_key}", str(now + PWD_USER_LOCK_SECONDS))
+        return "user_locked"
+    set_system_state(db, f"pwd_fail_{tg_key}", str(fails))
+    return "ok"
+
 
 def _get_user_lock(user_key: str | int) -> asyncio.Lock:
     """دریافت قفل اختصاصی هر کاربر جهت جلوگیری از شرایط رقابتی (Race Condition)"""
@@ -4060,6 +5023,9 @@ async def safe_send(
         except Exception as retry_exc:
             logger.debug(f"خطا پس از انتظار FloodWait در ارسال به {chat_id}: {retry_exc}")
             return None
+    except TelegramForbiddenError:
+        logger.debug(f"کاربر {chat_id} ربات را بلاک کرده یا چت در دسترس نیست.")
+        return None
     except TelegramBadRequest:
         try:
             return await bot.send_message(
@@ -4122,31 +5088,121 @@ async def safe_answer(
             return None
 
 
+class BroadcastThrottle:
+    """
+    کنترل نرخ ارسال انبوه (Staggered Sending):
+    بین هر پیام msg_delay ثانیه و پس از هر batch_size پیام batch_pause ثانیه توقف می‌کند
+    تا نرخ ارسال حدود ۲۰ تا ۳۰ پیام در ثانیه بماند.
+    """
+
+    def __init__(
+        self,
+        batch_size: Optional[int] = None,
+        msg_delay: Optional[float] = None,
+        batch_pause: Optional[float] = None,
+    ) -> None:
+        self.batch_size = max(
+            1, int(batch_size if batch_size is not None else settings.BROADCAST_BATCH_SIZE)
+        )
+        self.msg_delay = max(
+            0.0, float(msg_delay if msg_delay is not None else settings.BROADCAST_MSG_DELAY)
+        )
+        self.batch_pause = max(
+            0.0, float(batch_pause if batch_pause is not None else settings.BROADCAST_BATCH_PAUSE)
+        )
+        self._count = 0
+
+    async def tick(self) -> None:
+        """فراخوانی پس از هر ارسال؛ تاخیر کنترل‌شده بین پیام‌ها و دسته‌ها"""
+        self._count += 1
+        if self.msg_delay > 0:
+            await asyncio.sleep(self.msg_delay)
+        if self.batch_pause > 0 and self._count % self.batch_size == 0:
+            await asyncio.sleep(self.batch_pause)
+
+
+async def safe_send_document(
+    bot: Bot,
+    chat_id: int | str,
+    file_path: str,
+    caption: Optional[str] = None,
+    throttle: Optional[BroadcastThrottle] = None,
+) -> bool:
+    """ارسال ایمن سند با یک بار تلاش مجدد پس از TelegramRetryAfter؛ هرگز استثنا پرتاب نمی‌کند"""
+    ok = False
+    for _attempt in range(2):
+        try:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=FSInputFile(file_path),
+                caption=caption,
+            )
+            ok = True
+            break
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(min(exc.retry_after, 30))
+            continue
+        except TelegramForbiddenError:
+            break
+        except Exception as exc:
+            logger.warning(f"عدم امکان ارسال سند به {chat_id}: {exc}")
+            break
+    if throttle is not None:
+        await throttle.tick()
+    return ok
+
+
+async def dispatch_outbox(
+    bot: Bot,
+    outbox: List[Tuple[str, str, Any]],
+    throttle: Optional[BroadcastThrottle] = None,
+) -> int:
+    """
+    ارسال پلکانی لیستی از (chat_id, text, reply_markup).
+    خطای هر پیام فقط همان پیام را رد می‌کند و حلقه ادامه می‌یابد. خروجی: تعداد ارسال موفق.
+    """
+    throttle = throttle or BroadcastThrottle()
+    sent = 0
+    for chat_id, text, markup in outbox:
+        try:
+            res = await safe_send(bot, chat_id, text, reply_markup=markup)
+            if res:
+                sent += 1
+        except Exception as exc:
+            logger.warning(f"خطای پیش‌بینی‌نشده در ارسال به {chat_id}: {exc}")
+        await throttle.tick()
+    return sent
+
+
 async def send_text_chunks(
     bot: Bot,
     chat_id: int | str,
     full_text: str,
     max_len: int = 3500,
     reply_markup=None,
+    throttle: Optional[BroadcastThrottle] = None,
 ) -> None:
-    """تقسیم خط‌به‌خط متن‌های طولانی (بیش از ۳۵۰۰ کاراکتر) و ارسال متوالی آن‌ها"""
+    """تقسیم خط‌به‌خط متن‌های طولانی (بیش از ۳۵۰۰ کاراکتر) و ارسال متوالی آن‌ها (با throttle اختیاری)"""
     if len(full_text) <= max_len:
         await safe_send(bot, chat_id, full_text, reply_markup=reply_markup)
+        if throttle is not None:
+            await throttle.tick()
         return
 
-    lines = full_text.split("\n")
+    lines = full_text.splitlines()
     chunks: List[str] = []
     current_chunk: List[str] = []
     current_len = 0
 
     for line in lines:
-        if current_len + len(line) + 1 > max_len and current_chunk:
+        line_len = len(line) + 1
+        if current_len + line_len > max_len and current_chunk:
             chunks.append("\n".join(current_chunk))
             current_chunk = [line]
-            current_len = len(line) + 1
+            current_len = line_len
         else:
             current_chunk.append(line)
-            current_len += len(line) + 1
+            current_len += line_len
 
     if current_chunk:
         chunks.append("\n".join(current_chunk))
@@ -4154,8 +5210,8 @@ async def send_text_chunks(
     for idx, ch in enumerate(chunks):
         kb = reply_markup if idx == len(chunks) - 1 else None
         await safe_send(bot, chat_id, ch, reply_markup=kb)
-
-
+        if throttle is not None:
+            await throttle.tick()
 def user_can_log_late(db: Session, user: Optional[User]) -> bool:
     """
     بررسی شرط فعال بودن دکمه «ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)»:
@@ -4226,7 +5282,9 @@ def build_user_main_menu(db: Session, telegram_id: str | int, active_user: Optio
     )
 
 
-def format_league_leaderboard(db: Session, league: League) -> str:
+def format_league_leaderboard(
+    db: Session, league: League, exclude_user_ids: Optional[set] = None
+) -> str:
     """
     ساخت متن جدول آنلاین لیگ مطابق فرمت استاندارد:
     👑 *جدول آنلاین لیگ: {league.name}* 🌸
@@ -4241,6 +5299,8 @@ def format_league_leaderboard(db: Session, league: League) -> str:
         .filter(User.league_id == league.id, User.is_active == True)
         .all()
     )
+    if exclude_user_ids:
+        users = [u for u in users if u.id not in exclude_user_ids]
     ranked = ScoringService.rank_users(users, league.floor)
 
     header = (
@@ -4378,6 +5438,15 @@ async def cb_join_new_group_prompt(callback: CallbackQuery, state: FSMContext) -
 
 @user_router.message(StudyStates.waiting_for_group_password)
 async def process_group_password(message: Message, state: FSMContext) -> None:
+    tg_key = str(message.from_user.id)
+    with get_db() as db_chk:
+        locked = _pwd_is_locked(db_chk, tg_key)
+    if locked:
+        await safe_answer(
+            message,
+            "⛔️ به دلیل تلاشهای ناموفق زیاد، موقتاً امکان وارد کردن رمز وجود ندارد. چند دقیقه دیگر تلاش کنید.",
+        )
+        return
     raw_pwd = DateService.normalize_digits(message.text or "")
     with get_db() as db:
         grp = (
@@ -4386,6 +5455,15 @@ async def process_group_password(message: Message, state: FSMContext) -> None:
             .first()
         )
         if not grp:
+            verdict = _pwd_register_failure(db, tg_key)
+            if verdict != "ok":
+                await state.clear()
+                await safe_answer(
+                    message,
+                    "⛔️ تعداد تلاشهای ناموفق زیاد بود. چند دقیقه دیگر دوباره تلاش کنید.",
+                    reply_markup=get_start_menu(),
+                )
+                return
             await safe_answer(
                 message,
                 "❌ رمز عبور اشتباه است.\n\n"
@@ -4395,6 +5473,8 @@ async def process_group_password(message: Message, state: FSMContext) -> None:
             return
         group_id = grp.id
 
+    with get_db() as db_ok:
+        set_system_state(db_ok, f"pwd_fail_{message.from_user.id}", "0")
     await state.update_data(reg_group_id=group_id)
     await state.set_state(StudyStates.register_name)
     await safe_answer(message, "لطفاً فقط نام (کوچک) خود را وارد کنید:")
@@ -4622,7 +5702,12 @@ async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> No
             target_user.created_at = datetime.now(timezone.utc)
             db.query(ActivityLog).filter(
                 ActivityLog.user_id == target_user.id,
-                ActivityLog.cycle_id == cycle.id,
+                ActivityLog.league_id == league.id,
+                (ActivityLog.cycle_id == cycle.id)
+                | (
+                    (ActivityLog.cycle_id == None)
+                    & (ActivityLog.cycle_number == league.cycle_number)
+                ),
             ).delete(synchronize_session=False)
             db.commit()
         else:
@@ -5642,8 +6727,8 @@ async def send_startup_notification(bot: Bot) -> int:
 async def send_daily_admin_reports(bot: Bot, force: bool = False) -> None:
     """
     ۲. جاب ساعت 01:00 بامداد:
-    ارسال گزارش متنی رتبه‌بندی روز گذشته (📊 آرشیو چله X روز Y لیگ: ...)
-    برای ادمین‌های هر مجموعه، سوپرادمین‌ها و کانال آرشیو در صورت تنظیم.
+    ارسال گزارش متنی رتبه‌بندی روز گذشته به صورت پلکانی و لیگ به لیگ،
+    با حداقل اشغال نشست دیتابیس و کنترل نرخ ارسال.
     """
     today_str = DateService.today_str()
     with get_db() as db:
@@ -5651,8 +6736,9 @@ async def send_daily_admin_reports(bot: Bot, force: bool = False) -> None:
         if last_run == today_str and not force:
             return
 
-        leagues = (
-            db.query(League)
+        league_ids = [
+            r[0]
+            for r in db.query(League.id)
             .filter(
                 League.is_deleted == False,
                 League.is_active == True,
@@ -5660,50 +6746,66 @@ async def send_daily_admin_reports(bot: Bot, force: bool = False) -> None:
             )
             .order_by(League.id.asc())
             .all()
-        )
-
-        reports_to_send: List[Tuple[List[str], str]] = []
-        for lg in leagues:
-            cyc = get_or_create_active_cycle(db, lg)
-            curr_day = DateService.calculate_league_day(
-                cyc.start_shamsi or lg.start_shamsi
-            )
-            archived_day = max(1, curr_day - 1)
-            table_txt = format_league_leaderboard(db, lg)
-            report_text = (
-                f"📊 *آرشیو چله {cyc.cycle_number} روز {archived_day} لیگ: {escape_md(lg.name)}*\n\n"
-                f"{table_txt}"
-            )
-            report_text = MessageService.apply_terms(db, lg.group_id, report_text)
-
-            group_admins = (
-                db.query(GroupAdmin)
-                .filter(GroupAdmin.group_id == lg.group_id)
-                .all()
-            )
-            recipients = {str(a.user_id) for a in group_admins}
-            for sa in settings.ADMIN_IDS:
-                recipients.add(str(sa))
-            if settings.ARCHIVE_CHANNEL:
-                recipients.add(settings.ARCHIVE_CHANNEL)
-
-            reports_to_send.append((list(recipients), report_text))
-
+        ]
         set_system_state(db, "last_daily_admin_report_date", today_str)
 
-    for recipients, rep_txt in reports_to_send:
+    throttle = BroadcastThrottle()
+    for league_id in league_ids:
+        recipients: List[str] = []
+        report_text = ""
+        try:
+            with get_db() as db:
+                lg = db.get(League, league_id)
+                if (
+                    not lg
+                    or lg.is_deleted
+                    or not lg.is_active
+                    or not lg.archive_enabled
+                ):
+                    continue
+                cyc = get_or_create_active_cycle(db, lg)
+                curr_day = DateService.calculate_league_day(
+                    cyc.start_shamsi or lg.start_shamsi
+                )
+                archived_day = max(1, curr_day - 1)
+                table_txt = format_league_leaderboard(db, lg)
+                report_text = (
+                    f"📊 *آرشیو چله {cyc.cycle_number} روز {archived_day} لیگ: {escape_md(lg.name)}*\n\n"
+                    f"{table_txt}"
+                )
+                report_text = MessageService.apply_terms(db, lg.group_id, report_text)
+
+                group_admins = (
+                    db.query(GroupAdmin.user_id)
+                    .filter(GroupAdmin.group_id == lg.group_id)
+                    .all()
+                )
+                rcpt_set = {str(a[0]) for a in group_admins}
+                for sa in settings.ADMIN_IDS:
+                    rcpt_set.add(str(sa))
+                if settings.ARCHIVE_CHANNEL:
+                    rcpt_set.add(settings.ARCHIVE_CHANNEL)
+                recipients = sorted(rcpt_set)
+        except Exception as exc:
+            logger.error(f"خطا در ساخت گزارش آرشیو لیگ {league_id}: {exc}", exc_info=True)
+            continue
+
         for rcpt in recipients:
-            await send_text_chunks(bot, rcpt, rep_txt)
+            try:
+                await send_text_chunks(bot, rcpt, report_text, throttle=throttle)
+            except Exception as exc:
+                logger.warning(f"خطا در ارسال گزارش آرشیو به {rcpt}: {exc}")
 
-
-async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, active_cycle: Cycle) -> None:
+async def _complete_and_rollover_cycle(
+    bot: Bot, db: Session, league: League, active_cycle: Cycle
+) -> Dict[str, Any]:
     """
     فرآیند کامل پایان چله ۴۰ روزه در ساعت ۸ صبح روز ۴۱ام:
-    ۱. تفکیک مطالعات صبحگاهی سحرخیزان در روز ۴۱ام (early_morning_logs).
+    ۱. تفکیک مطالعات صبحگاهی سحرخیزان در روز ۴۱ام.
     ۲. ثبت رکوردهای CycleResult و بستن چله فعلی.
-    ۳. ارسال جدول نهایی متنی و فایل اکسل نهایی چله به ادمین‌ها و کاربران و پیام cycle_finished.
-    ۴. ساخت چله جدید (cycle_number + 1) از روز ۱ با تاریخ شمسی امروز.
-    ۵. بازنشانی آمار دوره کاربران و سهمیه‌ها و انتقال مطالعات صبحگاهی سحرخیزان به روز ۱ چله جدید.
+    ۳. ساخت چله جدید (cycle_number + 1) از روز ۱ با تاریخ شمسی امروز.
+    ۴. بازنشانی آمار دوره کاربران و سهمیه‌ها و انتقال مطالعات صبحگاهی سحرخیزان به روز ۱ چله جدید.
+    خروجی: دیکشنری اطلاعات کارنامه نهایی جهت ارسال امن و پلکانی در خارج از نشست دیتابیس.
     """
     today_str = DateService.today_str()
     today_shamsi = DateService.today_shamsi()
@@ -5714,21 +6816,24 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
         .all()
     )
 
-    # ۱. شناسایی و جداسازی لاگ‌های صبحگاهی امروز (روز ۴۱ قبل از ساعت ۸ صبح)
+    # ۱. شناسایی و جداسازی لاگ‌های صبحگاهی امروز با یک کوئری سریع
+    today_logs_map: Dict[str, ActivityLog] = {}
+    for t_log in (
+        db.query(ActivityLog)
+        .filter(
+            ActivityLog.league_id == league.id,
+            ActivityLog.log_date == today_str,
+        )
+        .order_by(ActivityLog.id.asc())
+        .all()
+    ):
+        today_logs_map.setdefault(t_log.user_id, t_log)
+
     early_morning_logs: Dict[str, ActivityLog] = {}
     for u in users:
-        today_log = (
-            db.query(ActivityLog)
-            .filter(
-                ActivityLog.user_id == u.id,
-                ActivityLog.league_id == league.id,
-                ActivityLog.log_date == today_str,
-            )
-            .first()
-        )
+        today_log = today_logs_map.get(u.id)
         if today_log:
             early_morning_logs[u.id] = today_log
-            # کسر موقت مقادیر صبح امروز از آمار چله قبلی تا کارنامه چله ۴۰ روزه دقیق باشد
             u.points = max(
                 0.0, round(float(u.points or 0.0) - float(today_log.points_earned or 0.0), 1)
             )
@@ -5752,7 +6857,7 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
     AbsenceService.reconcile_historical_gaps(db, league=league)
     AbsenceService.reconcile_streaks(db, league=league)
 
-    # ۲. آماده‌سازی جدول نهایی و اکسل نهایی چله قدیم (قبل از بستن چله و قبل از صفر شدن آمار)
+    # ۲. آماده‌سازی جدول نهایی و اکسل نهایی چله قدیم
     old_cycle_number = active_cycle.cycle_number
     league_name_snapshot = league.name
     group_id_snapshot = league.group_id
@@ -5872,11 +6977,11 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
     for u in users:
         set_system_state(db, f"streak_offset_{u.id}", "0")
 
-    # ارسال پیام پایان چله، جدول نهایی و فایل اکسل به ادمین‌ها و اعضا
+    # آماده‌سازی گیرندگان؛ ارسال واقعی خارج از نشست دیتابیس و به صورت پلکانی انجام می‌شود
     group_admins = (
-        db.query(GroupAdmin).filter(GroupAdmin.group_id == league.group_id).all()
+        db.query(GroupAdmin.user_id).filter(GroupAdmin.group_id == league.group_id).all()
     )
-    admin_recipients = {str(a.user_id) for a in group_admins} | {
+    admin_recipients = {str(a[0]) for a in group_admins} | {
         str(sa) for sa in settings.ADMIN_IDS
     }
     user_recipients = {str(u.telegram_id or u.id) for u in users}
@@ -5887,22 +6992,36 @@ async def _complete_and_rollover_cycle(bot: Bot, db: Session, league: League, ac
         league.group_id,
         f"🏆 کارنامه نهایی چله {old_cycle_number} لیگ «{league_name_snapshot}»",
     )
+    return {
+        "recipients": sorted(all_recipients),
+        "cycle_finished_msg": cycle_finished_msg,
+        "final_table_text": final_table_text,
+        "excel_path": final_excel_path,
+        "caption": final_caption,
+    }
+
+
+async def _dispatch_cycle_rollover(bot: Bot, payload: Dict[str, Any]) -> None:
+    """ارسال پلکانی پیام پایان چله، جدول نهایی و اکسل؛ حذف فایل اکسل در هر حالت"""
+    throttle = BroadcastThrottle()
+    excel_path = payload["excel_path"]
     try:
-        for rcpt in all_recipients:
-            await safe_send(bot, rcpt, cycle_finished_msg)
-            await send_text_chunks(bot, rcpt, final_table_text)
+        for rcpt in payload["recipients"]:
             try:
-                await bot.send_document(
-                    chat_id=rcpt,
-                    document=FSInputFile(final_excel_path),
-                    caption=final_caption,
+                await safe_send(bot, rcpt, payload["cycle_finished_msg"])
+                await throttle.tick()
+                await send_text_chunks(
+                    bot, rcpt, payload["final_table_text"], throttle=throttle
+                )
+                await safe_send_document(
+                    bot, rcpt, excel_path, caption=payload["caption"], throttle=throttle
                 )
             except Exception as exc:
-                logger.debug(f"عدم امکان ارسال اکسل پایان چله به {rcpt}: {exc}")
+                logger.warning(f"خطا در ارسال کارنامه پایان چله به {rcpt}: {exc}")
     finally:
-        if os.path.exists(final_excel_path):
+        if os.path.exists(excel_path):
             try:
-                os.remove(final_excel_path)
+                os.remove(excel_path)
             except OSError:
                 pass
 
@@ -5915,12 +7034,125 @@ async def send_daily_user_reports(bot: Bot, force: bool = False) -> None:
     async with _daily_user_reports_lock:
         await _send_daily_user_reports_impl(bot, force=force)
 
+def _build_morning_cards(
+    db: Session,
+    lg: League,
+    cyc: Cycle,
+    current_day: int,
+    yesterday_str: str,
+    force: bool,
+    admin_ids: set,
+    profile_counts: Dict[str, int],
+) -> List[Tuple[str, str, Any]]:
+    """
+    ساخت کارنامه‌های صبحگاهی یک لیگ (همگام، بدون هیچ I/O شبکه‌ای).
+    کاربران با Keyset Pagination خوانده می‌شوند و فقط رشته‌های نهایی در حافظه می‌مانند.
+    """
+    yesterday_day = max(1, current_day - 1)
+    terms = MessageService.get_terms(db, lg.group_id)
+
+    # رتبه‌بندی با ستون‌های حداقلی (فقط فیلدهای مورد نیاز کلید مرتب‌سازی)
+    ranking_users = (
+        db.query(User)
+        .options(
+            load_only(User.id, User.points, User.user_floor, User.total_minutes)
+        )
+        .filter(User.league_id == lg.id, User.is_active == True)
+        .all()
+    )
+    rank_map = {u.id: rnk for rnk, u in ScoringService.rank_users(ranking_users, lg.floor)}
+    del ranking_users
+    db.expunge_all()
+
+    # لاگ‌های دیروز کل لیگ با یک کوئری (به جای یک کوئری برای هر کاربر)
+    y_logs: Dict[str, Tuple[int, float]] = {}
+    log_query = db.query(
+        ActivityLog.user_id, ActivityLog.minutes, ActivityLog.points_earned
+    ).filter(
+        ActivityLog.league_id == lg.id,
+        (ActivityLog.cycle_id == cyc.id) | (ActivityLog.cycle_number == lg.cycle_number),
+        (ActivityLog.log_date == yesterday_str) | (ActivityLog.league_day == yesterday_day),
+        ActivityLog.minutes > 0,
+    )
+    for uid, mins, pts in log_query.yield_per(1000):
+        y_logs.setdefault(uid, (mins, pts))
+
+    outbox: List[Tuple[str, str, Any]] = []
+    chunk_size = max(50, int(settings.DB_CHUNK_SIZE))
+    last_id = ""
+    while True:
+        chunk = (
+            db.query(User)
+            .filter(
+                User.league_id == lg.id,
+                User.is_active == True,
+                User.id > last_id,
+            )
+            .order_by(User.id.asc())
+            .limit(chunk_size)
+            .all()
+        )
+        if not chunk:
+            break
+        last_id = chunk[-1].id
+
+        for u in chunk:
+            joined_before = DateService.user_joined_before_today(u)
+            if not joined_before and not force:
+                continue
+
+            y_info = y_logs.get(u.id)
+            late_days = AbsenceService.parse_days_list(u.late_days_list)
+            if y_info:
+                y_minutes, y_points = y_info
+                if yesterday_day in late_days:
+                    y_status = f"⚠️ ثبت با تاخیر ({y_minutes} دقیقه | {y_points} امتیاز)"
+                else:
+                    y_status = f"✅ ثبت موفق ({y_minutes} دقیقه | {y_points} امتیاز)"
+                hint_line = "✨ خداقوت! امروز هم مطالعه خود را به موقع ثبت کنید."
+            else:
+                y_status = "❌ عدم ثبت (غیبت)"
+                hint_line = (
+                    "💡 *راهنمایی:* اگر دیروز مطالعه داشته‌اید اما فراموش کردید ثبت کنید، "
+                    "همین امروز می‌توانید از دکمه «⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)» در منوی اصلی استفاده کنید تا غیبت دیروز شما حذف شود."
+                )
+
+            u_rank = rank_map.get(u.id, 1)
+            report_card = (
+                f"☀️ *کارنامه صبحگاهی باشگاه کتابخوارشو*\n"
+                f"🏆 لیگ: *{escape_md(lg.name)}* (چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION})\n"
+                f"───────────────────\n"
+                f"👤 نام: *{escape_md(u.name)}*\n"
+                f"📌 وضعیت دیروز (روز {yesterday_day}): {y_status}\n"
+                f"🏅 رتبه فعلی شما: *{u_rank}*\n"
+                f"⭐️ امتیاز کل: *{round(float(u.points or 0.0), 1)}*\n"
+                f"🔥 زنجیره استمرار: *{u.streak}* روز\n"
+                f"❌ تعداد غیبت دوره: *{u.no_study_days}* روز\n\n"
+                f"{hint_line}"
+            )
+            report_card = MessageService.apply_terms(
+                db, lg.group_id, report_card, terms=terms
+            )
+            tg_target = str(u.telegram_id or u.id)
+            can_late = (not y_info) and current_day > 1 and joined_before
+            kb = get_main_menu(
+                is_admin=(tg_target in admin_ids),
+                has_multiple_profiles=(profile_counts.get(tg_target, 1) > 1),
+                can_log_late=can_late,
+            )
+            outbox.append((tg_target, report_card, kb))
+
+        db.expunge_all()
+
+    return outbox
+
 
 async def _send_daily_user_reports_impl(bot: Bot, force: bool = False) -> None:
     """
     ۴. جاب ساعت 08:00 صبح:
     - بررسی پایان چله ۴۰ روزه (raw_current_day > settings.LEAGUE_DURATION).
-    - ارسال کارنامه صبحگاهی مطالعه دیروز به تک‌تک کاربران فعال در هر لیگ.
+    - ارسال کارنامه صبحگاهی مطالعه دیروز به کاربران فعال، لیگ به لیگ و به صورت پلکانی.
+    - هر لیگ نشست دیتابیس مستقل دارد و ارسال شبکه‌ای پس از بسته شدن نشست انجام می‌شود.
     """
     today_str = DateService.today_str()
     yesterday_str = DateService.yesterday_str()
@@ -5930,14 +7162,37 @@ async def _send_daily_user_reports_impl(bot: Bot, force: bool = False) -> None:
         if last_run == today_str and not force:
             return
 
-        active_leagues = (
-            db.query(League)
+        league_ids = [
+            r[0]
+            for r in db.query(League.id)
             .filter(League.is_deleted == False, League.is_active == True)
+            .order_by(League.id.asc())
             .all()
-        )
+        ]
+        admin_ids = {str(a).strip() for a in settings.ADMIN_IDS if str(a).strip()}
+        admin_ids |= {
+            str(r[0]).strip()
+            for r in db.query(GroupAdmin.user_id).all()
+            if r[0]
+        }
+        profile_counts: Dict[str, int] = {
+            str(tg): int(cnt)
+            for tg, cnt in db.query(User.telegram_id, func.count(User.id))
+            .filter(User.is_active == True)
+            .group_by(User.telegram_id)
+            .all()
+        }
+        set_system_state(db, "last_daily_user_report_date", today_str)
 
-        for lg in active_leagues:
-            try:
+    throttle = BroadcastThrottle()
+    for league_id in league_ids:
+        outbox: List[Tuple[str, str, Any]] = []
+        rollover_payload: Optional[Dict[str, Any]] = None
+        try:
+            with get_db() as db:
+                lg = db.get(League, league_id)
+                if not lg or lg.is_deleted or not lg.is_active:
+                    continue
                 cyc = get_or_create_active_cycle(db, lg)
                 raw_current_day = DateService.calculate_raw_league_day(
                     cyc.start_shamsi or lg.start_shamsi
@@ -5945,145 +7200,136 @@ async def _send_daily_user_reports_impl(bot: Bot, force: bool = False) -> None:
 
                 # اگر در صبح روز ۴۱ام هستیم، چله قبلی بسته و چله جدید از روز ۱ آغاز شود
                 if raw_current_day > settings.LEAGUE_DURATION:
-                    await _complete_and_rollover_cycle(bot, db, lg, cyc)
-                    continue
-
-                current_day = min(raw_current_day, settings.LEAGUE_DURATION)
-                if current_day <= 1 and not force:
-                    continue
-
-                yesterday_day = max(1, current_day - 1)
-                users = (
-                    db.query(User)
-                    .filter(User.league_id == lg.id, User.is_active == True)
-                    .all()
-                )
-                ranked_users = ScoringService.rank_users(users, lg.floor)
-                rank_map = {u.id: rnk for rnk, u in ranked_users}
-
-                for u in users:
-                    if not DateService.user_joined_before_today(u) and not force:
-                        continue
-
-                    y_log = (
-                        db.query(ActivityLog)
-                        .filter(
-                            ActivityLog.user_id == u.id,
-                            ActivityLog.league_id == lg.id,
-                            (ActivityLog.cycle_id == cyc.id)
-                            | (ActivityLog.cycle_number == lg.cycle_number),
-                            (ActivityLog.log_date == yesterday_str)
-                            | (ActivityLog.league_day == yesterday_day),
-                            ActivityLog.minutes > 0,
+                    rollover_payload = await _complete_and_rollover_cycle(bot, db, lg, cyc)
+                else:
+                    current_day = min(raw_current_day, settings.LEAGUE_DURATION)
+                    if current_day > 1 or force:
+                        outbox = _build_morning_cards(
+                            db,
+                            lg,
+                            cyc,
+                            current_day,
+                            yesterday_str,
+                            force,
+                            admin_ids,
+                            profile_counts,
                         )
-                        .first()
-                    )
-                    late_days = AbsenceService.parse_days_list(u.late_days_list)
-                    if y_log:
-                        if yesterday_day in late_days:
-                            y_status = f"⚠️ ثبت با تاخیر ({y_log.minutes} دقیقه | {y_log.points_earned} امتیاز)"
-                        else:
-                            y_status = f"✅ ثبت موفق ({y_log.minutes} دقیقه | {y_log.points_earned} امتیاز)"
-                        hint_line = "✨ خداقوت! امروز هم مطالعه خود را به موقع ثبت کنید."
-                    else:
-                        y_status = "❌ عدم ثبت (غیبت)"
-                        hint_line = (
-                            "💡 *راهنمایی:* اگر دیروز مطالعه داشته‌اید اما فراموش کردید ثبت کنید، "
-                            "همین امروز می‌توانید از دکمه «⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)» در منوی اصلی استفاده کنید تا غیبت دیروز شما حذف شود."
-                        )
+        except Exception as exc:
+            logger.error(f"خطا در پردازش گزارش صبحگاهی لیگ {league_id}: {exc}", exc_info=True)
+            continue
 
-                    u_rank = rank_map.get(u.id, 1)
-                    report_card = (
-                        f"☀️ *کارنامه صبحگاهی باشگاه کتابخوارشو*\n"
-                        f"🏆 لیگ: *{escape_md(lg.name)}* (چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION})\n"
-                        f"───────────────────\n"
-                        f"👤 نام: *{escape_md(u.name)}*\n"
-                        f"📌 وضعیت دیروز (روز {yesterday_day}): {y_status}\n"
-                        f"🏅 رتبه فعلی شما: *{u_rank}*\n"
-                        f"⭐️ امتیاز کل: *{round(float(u.points or 0.0), 1)}*\n"
-                        f"🔥 زنجیره استمرار: *{u.streak}* روز\n"
-                        f"❌ تعداد غیبت دوره: *{u.no_study_days}* روز\n\n"
-                        f"{hint_line}"
-                    )
-                    report_card = MessageService.apply_terms(db, lg.group_id, report_card)
-                    tg_target = u.telegram_id or u.id
-                    kb = build_user_main_menu(db, tg_target)
-                    await safe_send(bot, tg_target, report_card, reply_markup=kb)
-            except Exception as exc:
-                logger.error(f"خطا در پردازش گزارش صبحگاهی لیگ {lg.id}: {exc}", exc_info=True)
-
-        set_system_state(db, "last_daily_user_report_date", today_str)
+        if rollover_payload:
+            await _dispatch_cycle_rollover(bot, rollover_payload)
+        if outbox:
+            await dispatch_outbox(bot, outbox, throttle)
+        del outbox
 
 
 async def send_study_reminders(bot: Bot, force: bool = False) -> None:
     """
     ۵. جاب ساعت 22:00 شب:
     ارسال پیام یادآوری شبانه به کاربرانی که امروز مطالعه ثبت نکرده‌اند.
-    اگر یک کاربر در چند لیگ عضو است و ثبت نکرده، وضعیت تمام لیگ‌های ثبت‌نشده او
-    در یک پیام واحد تجمیع و ارسال می‌شود.
+    با خواندن دسته‌ای (Chunks) و کش واژه‌نامه‌ها، بدون ایجاد کوئری N+1 و با ارسال پلکانی.
     """
     today_str = DateService.today_str()
+    outbox: List[Tuple[str, str, Any]] = []
+
     with get_db() as db:
         last_run = get_system_state(db, "last_reminder_date")
         if last_run == today_str and not force:
             return
 
-        users = (
-            db.query(User)
-            .filter(
-                User.is_active == True,
-                User.reminder_enabled == True,
-                User.league_id.isnot(None),
-            )
+        # لیگ‌های فعال (تعدادشان محدود است) فقط با ستون‌های موردنیاز
+        league_map: Dict[str, Tuple[str, int, Optional[int]]] = {
+            r[0]: (r[1], r[2], r[3])
+            for r in db.query(League.id, League.name, League.floor, League.group_id)
+            .filter(League.is_deleted == False, League.is_active == True)
             .all()
-        )
+        }
+
+        terms_cache: Dict[Optional[int], Dict[str, str]] = {}
+        base_cache: Dict[Optional[int], str] = {}
+
+        def _terms(gid: Optional[int]) -> Dict[str, str]:
+            if gid not in terms_cache:
+                terms_cache[gid] = MessageService.get_terms(db, gid)
+            return terms_cache[gid]
+
+        def _base(gid: Optional[int]) -> str:
+            if gid not in base_cache:
+                base_cache[gid] = MessageService.get_message(db, gid, "reminder_night")
+            return base_cache[gid]
 
         # گروه‌بندی پروفایل‌های ثبت‌نشده امروز بر اساس telegram_id
-        unlogged_by_tg: Dict[str, List[Tuple[User, League]]] = {}
-        for u in users:
-            if u.last_log_date == today_str and int(u.today_minutes or 0) > 0:
-                continue
-            lg = (
-                db.query(League)
-                .filter(
-                    League.id == u.league_id,
-                    League.is_deleted == False,
-                    League.is_active == True,
+        # هر عضو: (میثاق موثر، نام لیگ، شناسه گروه)
+        unlogged_by_tg: Dict[str, List[Tuple[int, str, Optional[int]]]] = {}
+        chunk_size = max(50, int(settings.DB_CHUNK_SIZE))
+        last_id = ""
+        while True:
+            chunk = (
+                db.query(User)
+                .options(
+                    load_only(
+                        User.id,
+                        User.telegram_id,
+                        User.league_id,
+                        User.user_floor,
+                        User.last_log_date,
+                        User.today_minutes,
+                    )
                 )
-                .first()
+                .filter(
+                    User.is_active == True,
+                    User.reminder_enabled == True,
+                    User.league_id.isnot(None),
+                    User.id > last_id,
+                )
+                .order_by(User.id.asc())
+                .limit(chunk_size)
+                .all()
             )
-            if not lg:
-                continue
-            tg_id = str(u.telegram_id or u.id)
-            unlogged_by_tg.setdefault(tg_id, []).append((u, lg))
+            if not chunk:
+                break
+            last_id = chunk[-1].id
 
-        messages_to_dispatch: List[Tuple[str, str]] = []
+            for u in chunk:
+                if u.last_log_date == today_str and int(u.today_minutes or 0) > 0:
+                    continue
+                lg_info = league_map.get(u.league_id)
+                if not lg_info:
+                    continue
+                lg_name, lg_floor, lg_group = lg_info
+                tg_id = str(u.telegram_id or u.id)
+                unlogged_by_tg.setdefault(tg_id, []).append(
+                    (u.get_effective_floor(lg_floor), lg_name, lg_group)
+                )
+            db.expunge_all()
+
         for tg_id, prof_list in unlogged_by_tg.items():
-            first_user, first_league = prof_list[0]
-            base_reminder = MessageService.get_message(
-                db, first_league.group_id, "reminder_night"
-            )
+            first_floor, first_name, first_group = prof_list[0]
+            base_reminder = _base(first_group)
             if len(prof_list) == 1:
-                eff_fl = first_user.get_effective_floor(first_league.floor)
-                extra = f"\n\n🏆 لیگ: *{escape_md(first_league.name)}* (میثاق: {eff_fl} دقیقه)"
-                extra = MessageService.apply_terms(db, first_league.group_id, extra)
+                extra = f"\n\n🏆 لیگ: *{escape_md(first_name)}* (میثاق: {first_floor} دقیقه)"
+                extra = MessageService.apply_terms(
+                    db, first_group, extra, terms=_terms(first_group)
+                )
                 full_msg = base_reminder + extra
             else:
                 league_lines = ["\n\n📌 *لیگ‌های ثبت‌نشده امروز شما:*"]
-                for u_prof, lg_obj in prof_list:
-                    eff_fl = u_prof.get_effective_floor(lg_obj.floor)
-                    line = f"🔸 لیگ *{escape_md(lg_obj.name)}* (میثاق: {eff_fl} دقیقه)"
+                for eff_fl, lg_name, lg_group in prof_list:
+                    line = f"🔸 لیگ *{escape_md(lg_name)}* (میثاق: {eff_fl} دقیقه)"
                     league_lines.append(
-                        MessageService.apply_terms(db, lg_obj.group_id, line)
+                        MessageService.apply_terms(
+                            db, lg_group, line, terms=_terms(lg_group)
+                        )
                     )
                 full_msg = base_reminder + "\n".join(league_lines)
 
-            messages_to_dispatch.append((tg_id, full_msg))
+            outbox.append((tg_id, full_msg, None))
 
         set_system_state(db, "last_reminder_date", today_str)
 
-    for tg_id, msg_text in messages_to_dispatch:
-        await safe_send(bot, tg_id, msg_text)
+    await dispatch_outbox(bot, outbox, BroadcastThrottle())
 </file>
 
 <file path="keyboards.py">
@@ -6593,16 +7839,24 @@ class MessageService:
         db.commit()
 
     @classmethod
-    def apply_terms(cls, db: Session, group_id: Optional[int], text: str) -> str:
+    def apply_terms(
+        cls,
+        db: Session,
+        group_id: Optional[int],
+        text: str,
+        terms: Optional[Dict[str, str]] = None,
+    ) -> str:
         """
         جایگزینی هوشمند اصطلاحات پیش‌فرض در متن با معادل‌های اختصاصی مجموعه.
         از توکن‌های میانی استفاده می‌شود تا جایگزینی عبارات طولانی‌تر مثل «سهمیه نصف میثاق»
         با کلمه «میثاق» تداخل پیدا نکند.
+        پارامتر terms (اختیاری): واژه‌نامه از پیش‌خوانده‌شده برای جلوگیری از کوئری تکراری در ارسال انبوه.
         """
         if not text or not group_id:
             return text
 
-        terms = cls.get_terms(db, group_id)
+        if terms is None:
+            terms = cls.get_terms(db, group_id)
         if terms == DEFAULT_TERMS:
             return text
 
@@ -6710,6 +7964,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy import (
+    Index,
     Column,
     Integer,
     String,
@@ -6745,6 +8000,9 @@ class GroupAdmin(Base):
     """مدل مدیران اختصاصی هر مجموعه"""
 
     __tablename__ = "group_admins"
+    __table_args__ = (
+        Index("ix_group_admins_group_user", "group_id", "user_id"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     group_id = Column(
@@ -6762,6 +8020,11 @@ class User(Base):
     """
 
     __tablename__ = "users"
+    __table_args__ = (
+        Index("ix_users_league_active", "league_id", "is_active"),
+        Index("ix_users_tg_active", "telegram_id", "is_active"),
+        Index("ix_users_group_active", "group_id", "is_active"),
+    )
 
     id = Column(String(100), primary_key=True, index=True)
     telegram_id = Column(String(100), index=True, nullable=False)
@@ -6821,6 +8084,9 @@ class League(Base):
     """مدل لیگ‌های کتابخوانی هر مجموعه"""
 
     __tablename__ = "leagues"
+    __table_args__ = (
+        Index("ix_leagues_group_flags", "group_id", "is_deleted", "is_active"),
+    )
 
     id = Column(String(50), primary_key=True, default=generate_league_id)
     telegram_id = Column(String(100), nullable=True)
@@ -6844,6 +8110,9 @@ class Cycle(Base):
     """مدل چله‌های ۴۰ روزه هر لیگ"""
 
     __tablename__ = "cycles"
+    __table_args__ = (
+        Index("ix_cycles_league_status", "league_id", "status"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     league_id = Column(
@@ -6862,6 +8131,11 @@ class ActivityLog(Base):
     """مدل لاگ‌های ثبت مطالعه روزانه کاربران"""
 
     __tablename__ = "activity_logs"
+    __table_args__ = (
+        Index("ix_actlog_user_league_date", "user_id", "league_id", "log_date"),
+        Index("ix_actlog_league_cycle_day", "league_id", "cycle_id", "league_day"),
+        Index("ix_actlog_league_date", "league_id", "log_date"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(
@@ -6947,632 +8221,6 @@ class GroupTerm(Base):
     term_key = Column(String(50), nullable=False, index=True)
     custom_term = Column(String(100), nullable=False)
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-</file>
-
-<file path="requirements.txt">
-aiogram==3.31.0
-python-dotenv==1.0.1
-SQLAlchemy==2.0.52
-pandas==3.0.3
-openpyxl==3.1.5
-aiosqlite==0.22.1
-APScheduler==3.10.4
-aiohttp==3.13.2
-</file>
-
-<file path="run_tests.py">
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-اسکریپت تست سرتاسری خودکار (Automated E2E Test Suite) پروژه «کتابخوارشو»
-شامل شبیه‌سازی کامل ۱۰ سناریوی اصلی با دیتابیس موقت SQLite و MockBot
-"""
-
-import os
-import sys
-import tempfile
-import asyncio
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
-
-# تنظیم متغیرهای محیطی پیش از ایمپورت ماژول‌های پروژه
-TEMP_DB_DIR = tempfile.mkdtemp(prefix="ketabkharsho_e2e_")
-TEMP_DB_PATH = os.path.join(TEMP_DB_DIR, "test_ketabkharsho.db")
-
-os.environ["BOT_TOKEN"] = "123456789:AAH_TEST_TOKEN_KETABKHARSHO"
-os.environ["API_URL"] = "https://tapi.bale.ai"
-os.environ["ADMIN_IDS"] = "900001,900002"
-os.environ["DATABASE_URL"] = f"sqlite:///{TEMP_DB_PATH}"
-os.environ["DEFAULT_FLOOR"] = "20"
-os.environ["LEAGUE_DURATION"] = "40"
-os.environ["DEFAULT_HALF_COUPONS"] = "5"
-os.environ["DEFAULT_ONE_MIN_COUPONS"] = "1"
-
-from openpyxl import load_workbook
-from aiogram import Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.base import StorageKey
-
-from config import settings
-from database import (
-    init_db,
-    get_db,
-    get_active_user,
-    get_user_profiles,
-    get_or_create_active_cycle,
-    is_user_admin,
-)
-from models import (
-    Group,
-    GroupAdmin,
-    League,
-    Cycle,
-    User,
-    ActivityLog,
-    CycleResult,
-)
-from services import DateService, ScoringService, ReportService, AbsenceService
-from message_service import MessageService
-from admin_handlers import (
-    admin_router,
-    AdminStates,
-    cmd_create_group,
-    process_cg_name,
-    process_cg_password,
-    cb_select_group_for_password,
-    process_pg_new_password,
-    cb_select_group_for_name,
-    process_ng_new_name,
-    cb_make_user_group_admin,
-    cb_confirm_remove_group_admin,
-    cmd_global_stats,
-    cmd_add_league,
-    cb_select_group_for_new_league,
-    process_al_league_name,
-    process_al_league_floor,
-    cb_league_edit_floor,
-    process_league_new_floor,
-    cb_league_edit_cycle,
-    process_league_new_cycle,
-    cb_league_edit_date,
-    process_league_new_date,
-    cb_em_edit_term,
-    process_em_new_term,
-    cb_em_edit_msg,
-    process_em_new_msg,
-    cb_execute_user_add_second_league,
-)
-from handlers import (
-    user_router,
-    StudyStates,
-    cmd_start,
-    start_registration_or_new_group,
-    process_group_password,
-    process_register_first_name,
-    process_register_last_name,
-    cb_join_league,
-    handle_log_study_today,
-    handle_edit_study_today,
-    handle_append_study_today,
-    handle_log_study_yesterday,
-    process_study_minutes,
-    process_study_pages,
-    handle_league_leaderboard,
-    handle_user_profile,
-    cb_switch_profile,
-    midnight_job,
-    send_daily_admin_reports,
-    send_daily_user_reports,
-    send_study_reminders,
-)
-from weekly_report import send_weekly_reports
-
-
-# ===========================================================================
-# کلاس‌های شبیه‌ساز (MockBot, MockMessage, MockCallbackQuery)
-# ===========================================================================
-class MockUser:
-    def __init__(self, user_id: int | str, first_name: str = "کاربر", last_name: str = "تست"):
-        self.id = int(user_id)
-        self.first_name = first_name
-        self.last_name = last_name
-        self.full_name = f"{first_name} {last_name}".strip()
-
-
-class MockChat:
-    def __init__(self, chat_id: int | str):
-        self.id = int(chat_id)
-
-
-class MockBot:
-    def __init__(self):
-        self.id = 999999
-        self.sent_messages: List[Dict[str, Any]] = []
-        self.sent_documents: List[Dict[str, Any]] = []
-        self.edited_messages: List[Dict[str, Any]] = []
-
-    async def send_message(
-        self,
-        chat_id: int | str,
-        text: str,
-        reply_markup=None,
-        parse_mode: Optional[str] = None,
-        **kwargs,
-    ):
-        entry = {
-            "chat_id": str(chat_id),
-            "text": text,
-            "reply_markup": reply_markup,
-            "parse_mode": parse_mode,
-        }
-        self.sent_messages.append(entry)
-        return MockMessage(self, chat_id, text=text)
-
-    async def send_document(
-        self,
-        chat_id: int | str,
-        document: Any,
-        caption: Optional[str] = None,
-        **kwargs,
-    ):
-        file_path = getattr(document, "path", None)
-        exists = bool(file_path and os.path.exists(file_path))
-        size = os.path.getsize(file_path) if exists else 0
-        entry = {
-            "chat_id": str(chat_id),
-            "file_path": str(file_path),
-            "exists_at_send": exists,
-            "size": size,
-            "caption": caption or "",
-        }
-        self.sent_documents.append(entry)
-        return entry
-
-
-class MockMessage:
-    def __init__(self, bot: MockBot, user_id: int | str, text: str = ""):
-        self.bot = bot
-        self.from_user = MockUser(user_id)
-        self.chat = MockChat(user_id)
-        self.text = text
-
-    async def answer(self, text: str, reply_markup=None, parse_mode: Optional[str] = None, **kwargs):
-        return await self.bot.send_message(
-            chat_id=self.chat.id,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode=parse_mode,
-        )
-
-    async def edit_text(self, text: str, reply_markup=None, parse_mode: Optional[str] = None, **kwargs):
-        entry = {
-            "chat_id": str(self.chat.id),
-            "text": text,
-            "reply_markup": reply_markup,
-            "parse_mode": parse_mode,
-        }
-        self.bot.edited_messages.append(entry)
-        return self
-
-
-class MockCallbackQuery:
-    def __init__(self, bot: MockBot, user_id: int | str, data: str):
-        self.bot = bot
-        self.from_user = MockUser(user_id)
-        self.message = MockMessage(bot, user_id, text="")
-        self.data = data
-        self.answered = False
-
-    async def answer(self, text: Optional[str] = None, show_alert: bool = False, **kwargs):
-        self.answered = True
-
-
-def make_fsm(storage: MemoryStorage, bot_id: int, user_id: int | str) -> FSMContext:
-    key = StorageKey(bot_id=bot_id, chat_id=int(user_id), user_id=int(user_id))
-    return FSMContext(storage=storage, key=key)
-
-
-# ===========================================================================
-# اجرای ۱۰ سناریوی تست سرتاسری (E2E)
-# ===========================================================================
-async def run_all_tests() -> None:
-    bot = MockBot()
-    storage = MemoryStorage()
-
-    SUPER_ADMIN_ID = 900001
-    GROUP_ADMIN_ID = 800001
-    USER_1_ID = 700001
-    EARLY_USER_ID = 700002
-
-    # -----------------------------------------------------------------------
-    # سناریو ۱: راه‌اندازی اولیه (init_db)، ساخت گروه پیش‌فرض ۱ با رمز 1234 و ثبت سوپرادمین‌ها
-    # -----------------------------------------------------------------------
-    init_db()
-    with get_db() as db:
-        g1 = db.query(Group).filter(Group.id == 1).first()
-        assert g1 is not None and g1.password == "1234", "گروه ۱ با رمز 1234 ساخته نشد"
-        sa_rows = db.query(GroupAdmin).filter(GroupAdmin.group_id == 1).all()
-        sa_ids = {r.user_id for r in sa_rows}
-        assert "900001" in sa_ids and "900002" in sa_ids, "سوپرادمین‌ها در گروه ۱ ثبت نشدند"
-    print("✅ [PASS] Scenario 1: init_db, default group 1 (pwd 1234), and superadmins verified.")
-
-    # -----------------------------------------------------------------------
-    # سناریو ۱.۵: تست ارسال خودکار پیام استارتاپ/فعال‌سازی به ادمین‌ها
-    # -----------------------------------------------------------------------
-    from handlers import send_startup_notification
-    before_startup_count = len(bot.sent_messages)
-    sent_count = await send_startup_notification(bot)
-    assert sent_count >= 2, f"پیام فعال‌سازی باید حداقل به ۲ ادمین ارسال شود، ولی برای {sent_count} ارسال شد"
-    startup_msgs = bot.sent_messages[before_startup_count:]
-    startup_recipients = {str(m["chat_id"]) for m in startup_msgs}
-    assert "900001" in startup_recipients and "900002" in startup_recipients
-    sample_notif = startup_msgs[0]["text"]
-    assert "فعال شد" in sample_notif
-    assert DateService.today_shamsi() in sample_notif
-    assert DateService.now_iran_time_str()[:5] in sample_notif
-    print("✅ [PASS] Scenario 1.5: Startup notification to admins with Shamsi date & Iran time verified.")
-
-    # تست دستور /test_startup توسط ادمین
-    from admin_handlers import cmd_test_startup_notification
-    before_test_cmd = len(bot.sent_messages)
-    await cmd_test_startup_notification(MockMessage(bot, SUPER_ADMIN_ID, "/test_startup"))
-    assert len(bot.sent_messages) > before_test_cmd
-    print("✅ [PASS] Scenario 1.6: /test_startup admin command verified.")
-
-    # -----------------------------------------------------------------------
-    # سناریو ۲: تست دستورات سوپرادمین (cg, رد رمز تکراری 1234, رمز 5678, pg, ng, ag, rg, gs)
-    # -----------------------------------------------------------------------
-    sa_fsm = make_fsm(storage, bot.id, SUPER_ADMIN_ID)
-    await cmd_create_group(MockMessage(bot, SUPER_ADMIN_ID, "cg"), sa_fsm)
-    assert await sa_fsm.get_state() == AdminStates.cg_waiting_name
-
-    # تست عدم تداخل حروف دوحرفی ادمین (مثلاً "al") هنگامی که ادمین در استیت وارد کردن نام مجموعه است
-    await process_cg_name(MockMessage(bot, SUPER_ADMIN_ID, "مجموعه فرهیختگان"), sa_fsm)
-    assert await sa_fsm.get_state() == AdminStates.cg_waiting_password
-
-    # تست رد شدن رمز تکراری 1234
-    await process_cg_password(MockMessage(bot, SUPER_ADMIN_ID, "1234"), sa_fsm)
-    assert await sa_fsm.get_state() == AdminStates.cg_waiting_password
-    assert "قبلاً" in bot.sent_messages[-1]["text"] or "از قبل" in bot.sent_messages[-1]["text"]
-
-    # ثبت رمز یکتا 5678
-    await process_cg_password(MockMessage(bot, SUPER_ADMIN_ID, "5678"), sa_fsm)
-    assert await sa_fsm.get_state() is None
-
-    with get_db() as db:
-        g2 = db.query(Group).filter(Group.id == 2).first()
-        assert g2 is not None and g2.password == "5678" and g2.name == "مجموعه فرهیختگان"
-
-    # تغییر رمز با pg به 9876 و برگشت به 5678
-    await cb_select_group_for_password(MockCallbackQuery(bot, SUPER_ADMIN_ID, "adm_pwgrp_2"), sa_fsm)
-    await process_pg_new_password(MockMessage(bot, SUPER_ADMIN_ID, "9876"), sa_fsm)
-    with get_db() as db:
-        assert db.query(Group).filter(Group.id == 2).first().password == "9876"
-    await cb_select_group_for_password(MockCallbackQuery(bot, SUPER_ADMIN_ID, "adm_pwgrp_2"), sa_fsm)
-    await process_pg_new_password(MockMessage(bot, SUPER_ADMIN_ID, "5678"), sa_fsm)
-
-    # تغییر نام با ng
-    await cb_select_group_for_name(MockCallbackQuery(bot, SUPER_ADMIN_ID, "adm_nggrp_2"), sa_fsm)
-    await process_ng_new_name(MockMessage(bot, SUPER_ADMIN_ID, "باشگاه اندیشه"), sa_fsm)
-    with get_db() as db:
-        assert db.query(Group).filter(Group.id == 2).first().name == "باشگاه اندیشه"
-
-    # افزودن ادمین با ag و حذف با rg
-    await cb_make_user_group_admin(MockCallbackQuery(bot, SUPER_ADMIN_ID, f"adm_mkadm_{GROUP_ADMIN_ID}_1"))
-    with get_db() as db:
-        assert is_user_admin(db, GROUP_ADMIN_ID, 1) is True
-    await cb_confirm_remove_group_admin(MockCallbackQuery(bot, SUPER_ADMIN_ID, f"adm_rmad_1_{GROUP_ADMIN_ID}"))
-    with get_db() as db:
-        assert is_user_admin(db, GROUP_ADMIN_ID, 1) is False
-    # ثبت مجدد ادمین مجموعه ۱ برای سناریوی ۳
-    await cb_make_user_group_admin(MockCallbackQuery(bot, SUPER_ADMIN_ID, f"adm_mkadm_{GROUP_ADMIN_ID}_1"))
-
-    # آمار کلان gs
-    await cmd_global_stats(MockMessage(bot, SUPER_ADMIN_ID, "gs"))
-    assert "آمار کلان" in bot.sent_messages[-1]["text"]
-    print("✅ [PASS] Scenario 2: Superadmin commands (cg, unique password, pg, ng, ag, rg, gs) verified.")
-
-    # -----------------------------------------------------------------------
-    # سناریو ۳: دستورات ادمین مجموعه (ساخت ۲ لیگ با al، ویرایش با el، شخصی‌سازی واژه‌نامه و پیام با em)
-    # -----------------------------------------------------------------------
-    ga_fsm = make_fsm(storage, bot.id, GROUP_ADMIN_ID)
-    # ساخت لیگ ۱ در مجموعه ۱
-    await cmd_add_league(MockMessage(bot, GROUP_ADMIN_ID, "al"), ga_fsm)
-    assert await ga_fsm.get_state() == AdminStates.al_waiting_name
-    await process_al_league_name(MockMessage(bot, GROUP_ADMIN_ID, "لیگ ستارگان"), ga_fsm)
-    await process_al_league_floor(MockMessage(bot, GROUP_ADMIN_ID, "20"), ga_fsm)
-
-    # ساخت لیگ ۲ در مجموعه ۱
-    await cmd_add_league(MockMessage(bot, GROUP_ADMIN_ID, "al"), ga_fsm)
-    await process_al_league_name(MockMessage(bot, GROUP_ADMIN_ID, "لیگ نخبگان"), ga_fsm)
-    await process_al_league_floor(MockMessage(bot, GROUP_ADMIN_ID, "30"), ga_fsm)
-
-    with get_db() as db:
-        leagues_g1 = db.query(League).filter(League.group_id == 1).order_by(League.created_at.asc()).all()
-        assert len(leagues_g1) == 2
-        lg1_id, lg2_id = leagues_g1[0].id, leagues_g1[1].id
-
-    # ویرایش کف مطالعه، شماره چله و تاریخ شروع شمسی لیگ ۱ (به ۴ روز قبل تا روز جاری = ۵ شود)
-    await cb_league_edit_floor(MockCallbackQuery(bot, GROUP_ADMIN_ID, f"leagedit_floor_{lg1_id}"), ga_fsm)
-    await process_league_new_floor(MockMessage(bot, GROUP_ADMIN_ID, "20"), ga_fsm)
-
-    await cb_league_edit_cycle(MockCallbackQuery(bot, GROUP_ADMIN_ID, f"leagedit_cycle_{lg1_id}"), ga_fsm)
-    await process_league_new_cycle(MockMessage(bot, GROUP_ADMIN_ID, "2"), ga_fsm)
-
-    four_days_ago_shamsi = DateService.date_to_shamsi(DateService.today_date() - timedelta(days=4))
-    await cb_league_edit_date(MockCallbackQuery(bot, GROUP_ADMIN_ID, f"leagedit_date_{lg1_id}"), ga_fsm)
-    await process_league_new_date(MockMessage(bot, GROUP_ADMIN_ID, four_days_ago_shamsi), ga_fsm)
-
-    with get_db() as db:
-        lg1 = db.query(League).filter(League.id == lg1_id).first()
-        assert lg1.floor == 20 and lg1.cycle_number == 2 and lg1.current_day == 5
-
-    # شخصی‌سازی واژه‌نامه (میثاق -> عهد) و پیام خوش‌آمدگویی با em
-    await cb_em_edit_term(MockCallbackQuery(bot, GROUP_ADMIN_ID, "em_edterm_1_meesaq"), ga_fsm)
-    await process_em_new_term(MockMessage(bot, GROUP_ADMIN_ID, "عهد"), ga_fsm)
-
-    await cb_em_edit_msg(MockCallbackQuery(bot, GROUP_ADMIN_ID, "em_edmsg_1_study_logged"), ga_fsm)
-    await process_em_new_msg(MockMessage(bot, GROUP_ADMIN_ID, "📝 *ثبت مطالعه انجام شد!* (میثاق رعایت شد)"), ga_fsm)
-
-    with get_db() as db:
-        assert MessageService.get_term(db, 1, "meesaq") == "عهد"
-        assert "عهد" in MessageService.get_message(db, 1, "study_logged")
-    print("✅ [PASS] Scenario 3: Group admin commands (al, el floor/cycle/date, em terms & messages) verified.")
-
-    # -----------------------------------------------------------------------
-    # سناریو ۴: ثبت‌نام کاربر در مجموعه ۱، انتخاب لیگ ۱ و دریافت امتیاز هدیه همگام‌سازی (5 - 1) * 10 = 40
-    # -----------------------------------------------------------------------
-    u1_fsm = make_fsm(storage, bot.id, USER_1_ID)
-    await start_registration_or_new_group(MockMessage(bot, USER_1_ID, "🚀 شروع ثبت نام"), u1_fsm)
-    await process_group_password(MockMessage(bot, USER_1_ID, "۱۲۳۴"), u1_fsm)
-    await process_register_first_name(MockMessage(bot, USER_1_ID, "علی"), u1_fsm)
-    await process_register_last_name(MockMessage(bot, USER_1_ID, "محمدی"), u1_fsm)
-
-    await cb_join_league(MockCallbackQuery(bot, USER_1_ID, f"join_{lg1_id}"), u1_fsm)
-    with get_db() as db:
-        u1 = get_active_user(db, USER_1_ID)
-        assert u1 is not None and u1.id == str(USER_1_ID)
-        assert u1.league_id == lg1_id
-        assert u1.points == 40.0, f"امتیاز هدیه نادرست است: {u1.points}"
-    print("✅ [PASS] Scenario 4: User registration, league selection, and sync gift points (40.0) verified.")
-
-    # -----------------------------------------------------------------------
-    # سناریو ۵ و ۶: تست ۴ حالت امتیازدهی، ویرایش مطالعه (edit)، افزودن زمان (append) و خروج با دکمه‌های منو
-    # -----------------------------------------------------------------------
-    # الف) تست خروج از استیت waiting_for_minutes با زدن دکمه «🏆 جدول لیگ» بدون دریافت خطای عدد
-    await handle_log_study_today(MockMessage(bot, USER_1_ID, "📝 ثبت مطالعه امروز"), u1_fsm)
-    assert await u1_fsm.get_state() == StudyStates.waiting_for_minutes
-    await process_study_minutes(MockMessage(bot, USER_1_ID, "🏆 جدول لیگ"), u1_fsm)
-    assert await u1_fsm.get_state() is None
-    assert "جدول آنلاین" in bot.sent_messages[-1]["text"]
-
-    # ب) حالت ۱: رسیدن کامل به میثاق (۲۰ دقیقه -> ۱۰ امتیاز، بدون مصرف سهمیه)
-    await handle_log_study_today(MockMessage(bot, USER_1_ID, "📝 ثبت مطالعه امروز"), u1_fsm)
-    await process_study_minutes(MockMessage(bot, USER_1_ID, "20"), u1_fsm)
-    await process_study_pages(MockMessage(bot, USER_1_ID, "15"), u1_fsm)
-    with get_db() as db:
-        u1 = get_active_user(db, USER_1_ID)
-        assert u1.points == 50.0 and u1.half_coupons == 5 and u1.one_min_coupons == 1
-
-    # ج) حالت ۲ (از طریق ویرایش مطالعه امروز edit): نصف میثاق (۱۰ دقیقه -> ۱۰ امتیاز با مصرف ۱ سهمیه نصف میثاق)
-    await handle_edit_study_today(MockMessage(bot, USER_1_ID, "🔄 ویرایش مطالعه امروز"), u1_fsm)
-    await process_study_minutes(MockMessage(bot, USER_1_ID, "10"), u1_fsm)
-    await process_study_pages(MockMessage(bot, USER_1_ID, "8"), u1_fsm)
-    with get_db() as db:
-        u1 = get_active_user(db, USER_1_ID)
-        assert u1.points == 50.0 and u1.today_minutes == 10 and u1.half_coupons == 4 and u1.one_min_coupons == 1
-
-    # د) تست افزودن زمان به ثبت امروز (append): افزودن ۱۰ دقیقه دیگر (مجموع ۲۰ دقیقه -> بازگشت سهمیه نصف میثاق به ۵!)
-    await handle_append_study_today(MockMessage(bot, USER_1_ID, "➕ افزودن زمان به ثبت امروز"), u1_fsm)
-    await process_study_minutes(MockMessage(bot, USER_1_ID, "10"), u1_fsm)
-    await process_study_pages(MockMessage(bot, USER_1_ID, "7"), u1_fsm)
-    with get_db() as db:
-        u1 = get_active_user(db, USER_1_ID)
-        assert u1.points == 50.0 and u1.today_minutes == 20 and u1.today_pages == 15
-        assert u1.half_coupons == 5 and u1.one_min_coupons == 1
-
-    # هـ) حالت ۳: ۱ دقیقه با مصرف سهمیه طلایی پس از اتمام سهمیه‌های نصف میثاق
-    with get_db() as db:
-        u1 = get_active_user(db, USER_1_ID)
-        u1.half_coupons = 0
-        u1.today_half_used = 0
-        db.commit()
-    await handle_edit_study_today(MockMessage(bot, USER_1_ID, "🔄 ویرایش مطالعه امروز"), u1_fsm)
-    await process_study_minutes(MockMessage(bot, USER_1_ID, "2"), u1_fsm)
-    await process_study_pages(MockMessage(bot, USER_1_ID, "2"), u1_fsm)
-    with get_db() as db:
-        u1 = get_active_user(db, USER_1_ID)
-        assert u1.points == 50.0 and u1.one_min_coupons == 0 and u1.today_one_min_used == 1
-
-    # و) حالت ۴: امتیاز تناسبی پس از اتمام تمام سهمیه‌ها (۵ دقیقه از ۲۰ دقیقه = ۲.۵ امتیاز)
-    with get_db() as db:
-        u1 = get_active_user(db, USER_1_ID)
-        u1.today_one_min_used = 0
-        u1.one_min_coupons = 0
-        u1.half_coupons = 0
-        db.commit()
-    await handle_edit_study_today(MockMessage(bot, USER_1_ID, "🔄 ویرایش مطالعه امروز"), u1_fsm)
-    await process_study_minutes(MockMessage(bot, USER_1_ID, "5"), u1_fsm)
-    await process_study_pages(MockMessage(bot, USER_1_ID, "3"), u1_fsm)
-    with get_db() as db:
-        u1 = get_active_user(db, USER_1_ID)
-        assert u1.points == 42.5 and u1.today_points == 2.5
-    print("✅ [PASS] Scenario 5 & 6: All 4 scoring modes, edit/append coupon refund, and menu interruption verified.")
-
-    # -----------------------------------------------------------------------
-    # سناریو ۷: جاب نیمه‌شب (midnight_job)، ثبت غیبت، ثبت مطالعه دیروز (late)، حذف از absent و بازسازی streak
-    # -----------------------------------------------------------------------
-    with get_db() as db:
-        u1 = get_active_user(db, USER_1_ID)
-        # تنظیم تاریخ عضویت به ۳ روز قبل و حذف لاگ دیروز تا جاب نیمه‌شب برای دیروز (روز ۴ چله) غیبت ثبت کند
-        u1.created_at = datetime.utcnow() - timedelta(days=3)
-        db.commit()
-
-    await midnight_job(bot, force=True)
-    with get_db() as db:
-        u1 = get_active_user(db, USER_1_ID)
-        assert "4" in AbsenceService.parse_days_list(u1.absent_days_list) or 4 in AbsenceService.parse_days_list(u1.absent_days_list)
-        assert u1.no_study_days >= 1
-
-    # ثبت مطالعه دیروز با کسر ۵۰٪ امتیاز (۲۰ دقیقه -> ۱۰ امتیاز / ۲ = ۵ امتیاز)
-    await handle_log_study_yesterday(MockMessage(bot, USER_1_ID, "⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)"), u1_fsm)
-    assert await u1_fsm.get_state() == StudyStates.waiting_for_minutes
-    await process_study_minutes(MockMessage(bot, USER_1_ID, "20"), u1_fsm)
-    await process_study_pages(MockMessage(bot, USER_1_ID, "12"), u1_fsm)
-
-    with get_db() as db:
-        u1 = get_active_user(db, USER_1_ID)
-        assert 4 not in AbsenceService.parse_days_list(u1.absent_days_list), "روز ۴ از لیست غیبت حذف نشد"
-        assert 4 in AbsenceService.parse_days_list(u1.late_days_list), "روز ۴ به لیست تاخیر اضافه نشد"
-        assert u1.streak >= 2, f"زنجیره پس از ثبت دیروز بازسازی نشد: {u1.streak}"
-    print("✅ [PASS] Scenario 7: midnight_job absence recording, late study logging, and streak reconstruction verified.")
-
-    # -----------------------------------------------------------------------
-    # سناریو ۸: چندپروفایلی (عضویت در لیگ دوم، switchprof_، و تجمیع یادآوری شبانه برای هر دو لیگ)
-    # -----------------------------------------------------------------------
-    await cb_execute_user_add_second_league(
-        MockCallbackQuery(bot, GROUP_ADMIN_ID, f"adm_doaddl_{lg2_id}_{USER_1_ID}")
-    )
-    with get_db() as db:
-        profs = get_user_profiles(db, USER_1_ID, only_active=True)
-        assert len(profs) == 2, "پروفایل دوم ساخته نشد"
-        prof2_id = [p.id for p in profs if p.id != str(USER_1_ID)][0]
-
-    # تغییر پروفایل فعال به پروفایل اول
-    await cb_switch_profile(MockCallbackQuery(bot, USER_1_ID, f"switchprof_{USER_1_ID}"), u1_fsm)
-    with get_db() as db:
-        assert get_active_user(db, USER_1_ID).id == str(USER_1_ID)
-
-    # صفر کردن ثبت امروز هر دو پروفایل برای تست تجمیع یادآوری شبانه
-    with get_db() as db:
-        for p in get_user_profiles(db, USER_1_ID, only_active=True):
-            p.last_log_date = None
-            p.today_minutes = 0
-        db.commit()
-
-    before_msg_count = len(bot.sent_messages)
-    await send_study_reminders(bot, force=True)
-    new_msgs = [m for m in bot.sent_messages[before_msg_count:] if m["chat_id"] == str(USER_1_ID)]
-    assert len(new_msgs) == 1, "یادآوری شبانه باید در یک پیام واحد تجمیع شود"
-    assert "لیگ ستارگان" in new_msgs[0]["text"] and "لیگ نخبگان" in new_msgs[0]["text"]
-    print("✅ [PASS] Scenario 8: Multi-profile creation, profile switching, and aggregated night reminders verified.")
-
-    # -----------------------------------------------------------------------
-    # سناریو ۹: تست تولید هر ۳ نوع فایل اکسل و اعتبارسنجی با openpyxl
-    # -----------------------------------------------------------------------
-    with get_db() as db:
-        users_orm = db.query(User).filter(User.league_id == lg1_id).all()
-        p1 = ReportService.generate_excel("لیگ ستارگان", users_orm, cycle_number=2, current_day=5, league_floor=20)
-        p2 = ReportService.generate_excel(
-            "لیگ دیکشنری",
-            [{"name": "کاربر تستی", "points": 85.5, "minutes": 120, "pages": 60, "no_study": 1}],
-            cycle_number=1,
-            current_day=10,
-            league_floor=20,
-        )
-        p3 = ReportService.generate_weekly_excel("لیگ ستارگان", users_orm, cycle_number=2, current_day=5, league_floor=20)
-        p4 = ReportService.generate_cycle_history_excel(db, group_ids=[1])
-
-    for excel_file in (p1, p2, p3, p4):
-        assert os.path.exists(excel_file), f"فایل اکسل تولید نشد: {excel_file}"
-        wb = load_workbook(excel_file)
-        assert len(wb.sheetnames) >= 1
-        ws = wb.active
-        assert ws.sheet_view.rightToLeft is True
-        wb.close()
-        os.remove(excel_file)
-    print("✅ [PASS] Scenario 9: All 3 Excel generators (User ORM, dict, weekly, multi-sheet history) verified.")
-
-    # -----------------------------------------------------------------------
-    # سناریو ۱۰: تست کامل پایان چله ۴۰ روزه در روز ۴۱ام به همراه کاربر سحرخیز قبل از ساعت ۸ صبح
-    # -----------------------------------------------------------------------
-    day_41_start_shamsi = DateService.date_to_shamsi(DateService.today_date() - timedelta(days=40))
-    with get_db() as db:
-        lg1 = db.query(League).filter(League.id == lg1_id).first()
-        cyc1 = get_or_create_active_cycle(db, lg1)
-        lg1.start_shamsi = day_41_start_shamsi
-        cyc1.start_shamsi = day_41_start_shamsi
-        lg1.cycle_number = 2
-        cyc1.cycle_number = 2
-
-        # ایجاد یک کاربر سحرخیز در لیگ ۱ که در چله قدیم ۱۰۰ امتیاز داشته و صبح روز ۴۱ام ۳۰ دقیقه مطالعه ثبت می‌کند
-        early_user = User(
-            id=str(EARLY_USER_ID),
-            telegram_id=str(EARLY_USER_ID),
-            group_id=1,
-            name="سحرخیز کتابخوان",
-            first_name="سحرخیز",
-            last_name="کتابخوان",
-            league_id=lg1_id,
-            points=100.0,
-            total_minutes=400,
-            total_pages=200,
-            streak=5,
-            no_study_days=0,
-            half_coupons=4,
-            one_min_coupons=1,
-            is_active=True,
-        )
-        db.add(early_user)
-
-        # پاکسازی لاگ مطالعه امروز برای u1 تا به عنوان کاربر عادی بدون مطالعه صبحگاهی در سناریو ۱۰ بررسی شود
-        db.query(ActivityLog).filter(
-            ActivityLog.user_id == str(USER_1_ID),
-            ActivityLog.log_date == DateService.today_str(),
-        ).delete()
-        u1_rec = db.query(User).filter(User.id == str(USER_1_ID)).first()
-        u1_rec.today_minutes = 0
-        u1_rec.today_pages = 0
-        u1_rec.today_points = 0.0
-        u1_rec.last_log_date = None
-        db.commit()
-
-    # ثبت مطالعه صبحگاهی توسط کاربر سحرخیز در روز ۴۱ قبل از ساعت ۸ صبح
-    early_fsm = make_fsm(storage, bot.id, EARLY_USER_ID)
-    await handle_log_study_today(MockMessage(bot, EARLY_USER_ID, "📝 ثبت مطالعه امروز"), early_fsm)
-    await process_study_minutes(MockMessage(bot, EARLY_USER_ID, "30"), early_fsm)
-    await process_study_pages(MockMessage(bot, EARLY_USER_ID, "25"), early_fsm)
-
-    # اجرای جاب ساعت ۸ صبح روز ۴۱ام
-    await send_daily_user_reports(bot, force=True)
-
-    with get_db() as db:
-        lg1 = db.query(League).filter(League.id == lg1_id).first()
-        assert lg1.cycle_number == 3 and lg1.current_day == 1, "چله جدید از روز ۱ آغاز نشد"
-
-        # بررسی اینکه فقط یک چله active برای لیگ وجود دارد
-        active_cycles = db.query(Cycle).filter(Cycle.league_id == lg1_id, Cycle.status == "active").all()
-        assert len(active_cycles) == 1 and active_cycles[0].cycle_number == 3, "تعداد چله‌های فعال نادرست است"
-
-        # بررسی کارنامه ذخیره شده چله ۲ برای کاربر سحرخیز (باید بدون ۳۰ دقیقه صبح امروز یعنی ۱۰۰ امتیاز و ۴۰۰ دقیقه باشد)
-        finished_cyc = db.query(Cycle).filter(Cycle.league_id == lg1_id, Cycle.cycle_number == 2).first()
-        assert finished_cyc is not None and finished_cyc.status == "finished"
-        early_res = (
-            db.query(CycleResult)
-            .filter(CycleResult.cycle_id == finished_cyc.id, CycleResult.user_id == str(EARLY_USER_ID))
-            .first()
-        )
-        assert early_res is not None
-        assert early_res.points == 100.0 and early_res.total_minutes == 400, (
-            f"آمار چله قدیم سحرخیز به درستی تفکیک نشد: points={early_res.points}, mins={early_res.total_minutes}"
-        )
-
-        # بررسی انتقال مطالعه صبحگاهی سحرخیز به روز ۱ چله ۳
-        eu_after = db.query(User).filter(User.id == str(EARLY_USER_ID)).first()
-        assert eu_after.points == 10.0 and eu_after.total_minutes == 30 and eu_after.today_minutes == 30
-        assert eu_after.streak == 1
-
-        # بررسی صفر شدن آمار و زنجیره کاربر عادی برای چله ۳
-        u1_after = db.query(User).filter(User.id == str(USER_1_ID)).first()
-        assert u1_after.points == 0.0 and u1_after.total_minutes == 0 and u1_after.streak == 0
-
-    print("✅ [PASS] Scenario 10: 40-day cycle rollover on Day 41 and early-riser log migration verified.")
-
-
-if __name__ == "__main__":
-    asyncio.run(run_all_tests())
 </file>
 
 <file path="scheduler.py">
@@ -7715,7 +8363,6 @@ try:
 except Exception:
     IRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
-import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -8263,13 +8910,14 @@ class ReportService:
                 cell.alignment = cls.CENTER_ALIGN
                 cell.border = cls.THIN_BORDER
 
-        for col in ws.columns:
-            max_len = 0
-            col_letter = get_column_letter(col[0].column)
-            for cell in col:
-                val_str = str(cell.value or "")
-                max_len = max(max_len, len(val_str))
-            ws.column_dimensions[col_letter].width = max(12, min(40, max_len + 5))
+        for c_idx in range(len(headers)):
+            max_len = len(str(headers[c_idx] or ""))
+            for row_vals in rows:
+                if c_idx < len(row_vals):
+                    max_len = max(max_len, len(str(row_vals[c_idx] or "")))
+            ws.column_dimensions[get_column_letter(c_idx + 1)].width = max(
+                12, min(40, max_len + 5)
+            )
 
     @classmethod
     def generate_excel(
@@ -8346,13 +8994,10 @@ class ReportService:
                 ]
             )
 
-        # استفاده از pandas DataFrame برای سازگاری با پردازش‌های تحلیلی و ساخت اکسل
-        df = pd.DataFrame(rows, columns=headers)
-
         wb = Workbook()
         ws = wb.active
         ws.title = f"چله {cycle_number} - روز {current_day}"[:31]
-        cls._style_worksheet(ws, list(df.columns), df.values.tolist(), highlight_top3=True)
+        cls._style_worksheet(ws, headers, rows, highlight_top3=True)
 
         if not output_path:
             reports_dir = Path("./reports")
@@ -8363,6 +9008,7 @@ class ReportService:
             output_path = str(reports_dir / f"league_{safe_name}_c{cycle_number}_d{current_day}_{ts}_{uid_short}.xlsx")
 
         wb.save(output_path)
+        wb.close()
         return output_path
 
     @classmethod
@@ -8560,6 +9206,7 @@ class ReportService:
             output_path = str(reports_dir / f"cycles_history_archive_{ts}_{uid_short}.xlsx")
 
         wb.save(output_path)
+        wb.close()
         return output_path
 
 
@@ -9023,7 +9670,7 @@ class AbsenceService:
 import os
 import asyncio
 import logging
-from typing import List, Set, Dict, Any
+from typing import List, Set, Dict, Any, Optional
 
 from aiogram import Bot
 from aiogram.types import FSInputFile
@@ -9043,7 +9690,7 @@ from services import (
     escape_md,
 )
 from message_service import MessageService
-from handlers import safe_send
+from handlers import safe_send, safe_send_document, BroadcastThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -9052,128 +9699,54 @@ async def send_weekly_reports(bot: Bot, force: bool = False) -> None:
     """
     جاب ساعت 02:00 بامداد روزهای جمعه:
     تولید فایل اکسل هر لیگ فعال و ارسال آن به همراه معرفی ۳ نفر برتر هفته
-    (🏆 ۳ نفر برتر این هفته - لیگ ...) به ادمین‌های مجموعه و سوپرادمین‌ها
-    (با پیشوند 👑 [گزارش مدیر کل] برای سوپرادمین‌ها).
+    به صورت پلکانی و لیگ به لیگ، با حداقل مصرف حافظه RAM.
     """
     today_str = DateService.today_str()
+    super_admin_ids: Set[str] = {
+        str(sa).strip() for sa in settings.ADMIN_IDS if str(sa).strip()
+    }
 
     with get_db() as db:
         last_run = get_system_state(db, "last_weekly_report_date")
         if last_run == today_str and not force:
             return
 
-        active_leagues = (
-            db.query(League)
+        league_ids = [
+            r[0]
+            for r in db.query(League.id)
             .filter(League.is_deleted == False, League.is_active == True)
             .order_by(League.id.asc())
             .all()
-        )
-
-        if not active_leagues:
-            set_system_state(db, "last_weekly_report_date", today_str)
-            return
-
-        weekly_tasks: List[Dict[str, Any]] = []
-        super_admin_ids: Set[str] = {
-            str(sa).strip() for sa in settings.ADMIN_IDS if str(sa).strip()
-        }
-
-        for lg in active_leagues:
-            try:
-                cyc = get_or_create_active_cycle(db, lg)
-                current_day = DateService.calculate_league_day(
-                    cyc.start_shamsi or lg.start_shamsi
-                )
-                grp = db.query(Group).filter(Group.id == lg.group_id).first()
-                group_name = grp.name if grp else "پیش‌فرض"
-
-                users = (
-                    db.query(User)
-                    .filter(User.league_id == lg.id, User.is_active == True)
-                    .all()
-                )
-                ranked_users = ScoringService.rank_users(users, lg.floor)
-
-                top_lines: List[str] = [
-                    f"🏆 *۳ نفر برتر این هفته - لیگ {escape_md(lg.name)}*",
-                    f"🏢 مجموعه: *{escape_md(group_name)}*",
-                    f"🔄 چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION}",
-                    "───────────────────",
-                ]
-
-                if not ranked_users:
-                    top_lines.append("📭 هنوز عضوی در این لیگ فعالیت ثبت نکرده است.")
-                else:
-                    medals = {1: "🥇 نفر اول", 2: "🥈 نفر دوم", 3: "🥉 نفر سوم"}
-                    top_three = [item for item in ranked_users if item[0] <= 3][:3]
-                    if not top_three:
-                        top_three = ranked_users[:3]
-
-                    for idx, (rnk, u) in enumerate(top_three, start=1):
-                        medal_label = medals.get(rnk, medals.get(idx, f"🔹 رتبه {rnk}"))
-                        pts = round(float(u.points or 0.0), 1)
-                        mins = int(u.total_minutes or 0)
-                        pgs = int(u.total_pages or 0)
-                        top_lines.append(
-                            f"{medal_label}: *{escape_md(u.name)}*\n"
-                            f"   ⭐️ امتیاز: *{pts}* | ⏱ زمان: *{mins}* دقیقه | 📄 صفحات: *{pgs}*"
-                        )
-
-                base_report_text = MessageService.apply_terms(
-                    db, lg.group_id, "\n".join(top_lines)
-                )
-                super_admin_text = f"👑 [گزارش مدیر کل]\n{base_report_text}"
-
-                base_caption = MessageService.apply_terms(
-                    db,
-                    lg.group_id,
-                    f"📥 اکسل گزارش هفتگی لیگ «{lg.name}» (چله {cyc.cycle_number} - روز {current_day})",
-                )
-                super_caption = f"👑 [گزارش مدیر کل]\n{base_caption}"
-                archive_caption = MessageService.apply_terms(
-                    db,
-                    lg.group_id,
-                    f"📥 اکسل گزارش هفتگی لیگ «{lg.name}»",
-                )
-
-                group_admin_rows = (
-                    db.query(GroupAdmin)
-                    .filter(GroupAdmin.group_id == lg.group_id)
-                    .all()
-                )
-                group_admin_ids: Set[str] = {
-                    str(r.user_id).strip() for r in group_admin_rows if r.user_id
-                }
-
-                weekly_tasks.append(
-                    {
-                        "league_id": lg.id,
-                        "league_name": lg.name,
-                        "cycle_number": cyc.cycle_number,
-                        "current_day": current_day,
-                        "league_floor": lg.floor,
-                        "archive_enabled": lg.archive_enabled,
-                        "users_data": [
-                            ReportService._extract_row_dict(u, league_floor=lg.floor)
-                            for u in users
-                        ],
-                        "only_group_admins": group_admin_ids - super_admin_ids,
-                        "base_report_text": base_report_text,
-                        "super_admin_text": super_admin_text,
-                        "base_caption": base_caption,
-                        "super_caption": super_caption,
-                        "archive_caption": archive_caption,
-                    }
-                )
-            except Exception as exc:
-                logger.error(f"خطا در آماده‌سازی گزارش هفتگی لیگ {lg.id}: {exc}", exc_info=True)
-
+        ]
         set_system_state(db, "last_weekly_report_date", today_str)
 
-    # تولید اکسل در ترد جداگانه و ارسال شبکه خارج از نشست دیتابیس
-    for task in weekly_tasks:
+    if not league_ids:
+        return
+
+    throttle = BroadcastThrottle()
+
+    async def _deliver(rcpt: str, text: str, caption: str, path: str) -> None:
+        """ارسال متن و اکسل به یک گیرنده؛ خطای یک گیرنده بقیه را متوقف نمی‌کند"""
+        try:
+            await safe_send(bot, rcpt, text)
+            await throttle.tick()
+            ok = await safe_send_document(bot, rcpt, path, caption=caption, throttle=throttle)
+            if not ok:
+                logger.warning(f"ارسال اکسل هفتگی به {rcpt} ناموفق بود.")
+        except Exception as exc:
+            logger.warning(f"خطا در ارسال گزارش هفتگی به {rcpt}: {exc}")
+
+    # هر بار فقط یک لیگ در حافظه است؛ کوئری و تولید اکسل در ترد جداگانه
+    for league_id in league_ids:
+        task: Optional[Dict[str, Any]] = None
         excel_path = ""
         try:
+            task = await asyncio.to_thread(
+                _build_weekly_task_sync, league_id, super_admin_ids
+            )
+            if not task:
+                continue
+
             excel_path = await asyncio.to_thread(
                 ReportService.generate_weekly_excel,
                 league_name=task["league_name"],
@@ -9182,53 +9755,130 @@ async def send_weekly_reports(bot: Bot, force: bool = False) -> None:
                 current_day=task["current_day"],
                 league_floor=task["league_floor"],
             )
+            task["users_data"] = []  # آزادسازی داده‌های حجیم بعد از ساخت اکسل
 
             # ۱. ارسال به ادمین‌های مجموعه
-            for g_adm_id in task["only_group_admins"]:
-                await safe_send(bot, g_adm_id, task["base_report_text"])
-                try:
-                    await bot.send_document(
-                        chat_id=g_adm_id,
-                        document=FSInputFile(excel_path),
-                        caption=task["base_caption"],
-                    )
-                except Exception as exc:
-                    logger.warning(f"خطا در ارسال اکسل هفتگی به ادمین مجموعه {g_adm_id}: {exc}")
+            for g_adm_id in sorted(task["only_group_admins"]):
+                await _deliver(g_adm_id, task["base_report_text"], task["base_caption"], excel_path)
 
             # ۲. ارسال به سوپرادمین‌ها با پیشوند 👑 [گزارش مدیر کل]
-            for s_adm_id in super_admin_ids:
-                await safe_send(bot, s_adm_id, task["super_admin_text"])
-                try:
-                    await bot.send_document(
-                        chat_id=s_adm_id,
-                        document=FSInputFile(excel_path),
-                        caption=task["super_caption"],
-                    )
-                except Exception as exc:
-                    logger.warning(f"خطا در ارسال اکسل هفتگی به سوپرادمین {s_adm_id}: {exc}")
+            for s_adm_id in sorted(super_admin_ids):
+                await _deliver(s_adm_id, task["super_admin_text"], task["super_caption"], excel_path)
 
             # ۳. ارسال به کانال آرشیو در صورت فعال بودن
             if settings.ARCHIVE_CHANNEL and task["archive_enabled"]:
-                await safe_send(bot, settings.ARCHIVE_CHANNEL, task["base_report_text"])
-                try:
-                    await bot.send_document(
-                        chat_id=settings.ARCHIVE_CHANNEL,
-                        document=FSInputFile(excel_path),
-                        caption=task["archive_caption"],
-                    )
-                except Exception as exc:
-                    logger.warning(f"خطا در ارسال اکسل هفتگی به کانال آرشیو: {exc}")
+                await _deliver(
+                    settings.ARCHIVE_CHANNEL,
+                    task["base_report_text"],
+                    task["archive_caption"],
+                    excel_path,
+                )
 
         except Exception as exc:
-            logger.error(f"خطا در ارسال گزارش هفتگی لیگ {task['league_id']}: {exc}", exc_info=True)
+            logger.error(f"خطا در گزارش هفتگی لیگ {league_id}: {exc}", exc_info=True)
         finally:
             if excel_path and os.path.exists(excel_path):
                 try:
                     os.remove(excel_path)
                 except OSError:
                     pass
+            task = None
 
     logger.info(f"گزارش‌های هفتگی جمعه برای تاریخ {today_str} با موفقیت ارسال شد.")
+
+
+def _build_weekly_task_sync(
+    league_id: str, super_admin_ids: Set[str]
+) -> Optional[Dict[str, Any]]:
+    """ساخت تسک گزارش هفتگی یک لیگ با نشست دیتابیس مستقل (اجرا در ترد جداگانه)"""
+    with get_db() as db:
+        lg = db.get(League, league_id)
+        if not lg or lg.is_deleted or not lg.is_active:
+            return None
+
+        cyc = get_or_create_active_cycle(db, lg)
+        current_day = DateService.calculate_league_day(
+            cyc.start_shamsi or lg.start_shamsi
+        )
+        grp = db.query(Group).filter(Group.id == lg.group_id).first()
+        group_name = grp.name if grp else "پیش‌فرض"
+
+        users = (
+            db.query(User)
+            .filter(User.league_id == lg.id, User.is_active == True)
+            .all()
+        )
+        ranked_users = ScoringService.rank_users(users, lg.floor)
+
+        top_lines: List[str] = [
+            f"🏆 *۳ نفر برتر این هفته - لیگ {escape_md(lg.name)}*",
+            f"🏢 مجموعه: *{escape_md(group_name)}*",
+            f"🔄 چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION}",
+            "───────────────────",
+        ]
+
+        if not ranked_users:
+            top_lines.append("📭 هنوز عضوی در این لیگ فعالیت ثبت نکرده است.")
+        else:
+            medals = {1: "🥇 نفر اول", 2: "🥈 نفر دوم", 3: "🥉 نفر سوم"}
+            top_three = [item for item in ranked_users if item[0] <= 3][:3]
+            if not top_three:
+                top_three = ranked_users[:3]
+
+            for idx, (rnk, u) in enumerate(top_three, start=1):
+                medal_label = medals.get(rnk, medals.get(idx, f"🔹 رتبه {rnk}"))
+                pts = round(float(u.points or 0.0), 1)
+                mins = int(u.total_minutes or 0)
+                pgs = int(u.total_pages or 0)
+                top_lines.append(
+                    f"{medal_label}: *{escape_md(u.name)}*\n"
+                    f"   ⭐️ امتیاز: *{pts}* | ⏱ زمان: *{mins}* دقیقه | 📄 صفحات: *{pgs}*"
+                )
+
+        base_report_text = MessageService.apply_terms(
+            db, lg.group_id, "\n".join(top_lines)
+        )
+        super_admin_text = f"👑 [گزارش مدیر کل]\n{base_report_text}"
+
+        base_caption = MessageService.apply_terms(
+            db,
+            lg.group_id,
+            f"📥 اکسل گزارش هفتگی لیگ «{lg.name}» (چله {cyc.cycle_number} - روز {current_day})",
+        )
+        super_caption = f"👑 [گزارش مدیر کل]\n{base_caption}"
+        archive_caption = MessageService.apply_terms(
+            db,
+            lg.group_id,
+            f"📥 اکسل گزارش هفتگی لیگ «{lg.name}»",
+        )
+
+        group_admin_rows = (
+            db.query(GroupAdmin.user_id)
+            .filter(GroupAdmin.group_id == lg.group_id)
+            .all()
+        )
+        group_admin_ids: Set[str] = {
+            str(r[0]).strip() for r in group_admin_rows if r[0]
+        }
+
+        return {
+            "league_id": lg.id,
+            "league_name": lg.name,
+            "cycle_number": cyc.cycle_number,
+            "current_day": current_day,
+            "league_floor": lg.floor,
+            "archive_enabled": lg.archive_enabled,
+            "users_data": [
+                ReportService._extract_row_dict(u, league_floor=lg.floor)
+                for u in users
+            ],
+            "only_group_admins": group_admin_ids - super_admin_ids,
+            "base_report_text": base_report_text,
+            "super_admin_text": super_admin_text,
+            "base_caption": base_caption,
+            "super_caption": super_caption,
+            "archive_caption": archive_caption,
+        }
 </file>
 
 </files>

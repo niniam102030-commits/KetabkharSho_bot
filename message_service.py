@@ -118,16 +118,24 @@ class MessageService:
         db.commit()
 
     @classmethod
-    def apply_terms(cls, db: Session, group_id: Optional[int], text: str) -> str:
+    def apply_terms(
+        cls,
+        db: Session,
+        group_id: Optional[int],
+        text: str,
+        terms: Optional[Dict[str, str]] = None,
+    ) -> str:
         """
         جایگزینی هوشمند اصطلاحات پیش‌فرض در متن با معادل‌های اختصاصی مجموعه.
         از توکن‌های میانی استفاده می‌شود تا جایگزینی عبارات طولانی‌تر مثل «سهمیه نصف میثاق»
         با کلمه «میثاق» تداخل پیدا نکند.
+        پارامتر terms (اختیاری): واژه‌نامه از پیش‌خوانده‌شده برای جلوگیری از کوئری تکراری در ارسال انبوه.
         """
         if not text or not group_id:
             return text
 
-        terms = cls.get_terms(db, group_id)
+        if terms is None:
+            terms = cls.get_terms(db, group_id)
         if terms == DEFAULT_TERMS:
             return text
 

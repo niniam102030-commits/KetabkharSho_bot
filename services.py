@@ -11,7 +11,6 @@ try:
 except Exception:
     IRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
-import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -559,13 +558,14 @@ class ReportService:
                 cell.alignment = cls.CENTER_ALIGN
                 cell.border = cls.THIN_BORDER
 
-        for col in ws.columns:
-            max_len = 0
-            col_letter = get_column_letter(col[0].column)
-            for cell in col:
-                val_str = str(cell.value or "")
-                max_len = max(max_len, len(val_str))
-            ws.column_dimensions[col_letter].width = max(12, min(40, max_len + 5))
+        for c_idx in range(len(headers)):
+            max_len = len(str(headers[c_idx] or ""))
+            for row_vals in rows:
+                if c_idx < len(row_vals):
+                    max_len = max(max_len, len(str(row_vals[c_idx] or "")))
+            ws.column_dimensions[get_column_letter(c_idx + 1)].width = max(
+                12, min(40, max_len + 5)
+            )
 
     @classmethod
     def generate_excel(
@@ -642,13 +642,10 @@ class ReportService:
                 ]
             )
 
-        # استفاده از pandas DataFrame برای سازگاری با پردازش‌های تحلیلی و ساخت اکسل
-        df = pd.DataFrame(rows, columns=headers)
-
         wb = Workbook()
         ws = wb.active
         ws.title = f"چله {cycle_number} - روز {current_day}"[:31]
-        cls._style_worksheet(ws, list(df.columns), df.values.tolist(), highlight_top3=True)
+        cls._style_worksheet(ws, headers, rows, highlight_top3=True)
 
         if not output_path:
             reports_dir = Path("./reports")
@@ -659,6 +656,7 @@ class ReportService:
             output_path = str(reports_dir / f"league_{safe_name}_c{cycle_number}_d{current_day}_{ts}_{uid_short}.xlsx")
 
         wb.save(output_path)
+        wb.close()
         return output_path
 
     @classmethod
@@ -856,6 +854,7 @@ class ReportService:
             output_path = str(reports_dir / f"cycles_history_archive_{ts}_{uid_short}.xlsx")
 
         wb.save(output_path)
+        wb.close()
         return output_path
 
 

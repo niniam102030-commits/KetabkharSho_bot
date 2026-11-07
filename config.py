@@ -21,9 +21,31 @@ class Config:
         ]
 
         self.ARCHIVE_CHANNEL: str = os.getenv("ARCHIVE_CHANNEL", "").strip()
-        self.DATABASE_URL: str = os.getenv(
+        raw_db_url: str = os.getenv(
             "DATABASE_URL", "sqlite:///./data/ketabkharsho.db"
         ).strip()
+        self.DATABASE_URL: str = self._normalize_database_url(raw_db_url)
+
+        # تنظیمات QueuePool مخصوص PostgreSQL
+        self.DB_POOL_SIZE: int = self._get_int("DB_POOL_SIZE", 20)
+        self.DB_MAX_OVERFLOW: int = self._get_int("DB_MAX_OVERFLOW", 30)
+        self.DB_POOL_TIMEOUT: int = self._get_int("DB_POOL_TIMEOUT", 30)
+        self.DB_POOL_RECYCLE: int = self._get_int("DB_POOL_RECYCLE", 1800)
+
+        # پشتیبان‌گیری
+        self.BACKUP_DIR: str = os.getenv("BACKUP_DIR", "./backups").strip() or "./backups"
+        self.PG_DUMP_ENABLED: bool = os.getenv("PG_DUMP_ENABLED", "false").strip().lower() in (
+            "true",
+            "1",
+            "yes",
+            "on",
+        )
+
+        # ارسال پلکانی (Staggered) و خواندن دسته‌ای از دیتابیس
+        self.BROADCAST_BATCH_SIZE: int = max(1, self._get_int("BROADCAST_BATCH_SIZE", 40))
+        self.BROADCAST_MSG_DELAY: float = max(0.0, self._get_float("BROADCAST_MSG_DELAY", 0.05))
+        self.BROADCAST_BATCH_PAUSE: float = max(0.0, self._get_float("BROADCAST_BATCH_PAUSE", 1.0))
+        self.DB_CHUNK_SIZE: int = max(50, self._get_int("DB_CHUNK_SIZE", 500))
 
         self.DEFAULT_FLOOR: int = self._get_int("DEFAULT_FLOOR", 10)
         self.LEAGUE_DURATION: int = self._get_int("LEAGUE_DURATION", 40)
@@ -45,6 +67,30 @@ class Config:
 
         # ساخت پوشه‌های موردنیاز پروژه
         self._ensure_directories()
+
+    @staticmethod
+    def _normalize_database_url(url: str) -> str:
+        """یکسان‌سازی آدرس PostgreSQL با درایور psycopg2 (SQLAlchemy 2.x)"""
+        if url.startswith("postgres://"):
+            return "postgresql+psycopg2://" + url[len("postgres://"):]
+        if url.startswith("postgresql://"):
+            return "postgresql+psycopg2://" + url[len("postgresql://"):]
+        return url
+
+    @property
+    def is_sqlite(self) -> bool:
+        """آیا دیتابیس فعلی SQLite است (حالت توسعه/تست)؟"""
+        return self.DATABASE_URL.startswith("sqlite")
+
+    @staticmethod
+    def _get_float(env_key: str, default: float) -> float:
+        val = os.getenv(env_key)
+        if val is None or not val.strip():
+            return default
+        try:
+            return float(val.strip())
+        except ValueError:
+            return default
 
     @staticmethod
     def _get_int(env_key: str, default: int) -> int:

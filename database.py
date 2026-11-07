@@ -1,13 +1,17 @@
+import os
 import shutil
 import sqlite3
 import logging
+import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from typing import Generator, Optional, List
 
 from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.pool import QueuePool
 
 from config import settings
 from models import (
@@ -23,19 +27,19 @@ from models import (
 logger = logging.getLogger(__name__)
 
 # تنظیم موتور SQLite با پشتیبانی از چندرشته‌ای و WAL Mode
-connect_args = {"check_same_thread": False, "timeout": 30} if "sqlite" in settings.DATABASE_URL else {}
+IS_SQLITE: bool = settings.is_sqlite
 
-engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args=connect_args,
-    pool_pre_ping=True,
-)
+if IS_SQLITE:
+    # حالت توسعه/تست: SQLite با پشتیبانی چندرشته‌ای و WAL Mode
+    engine = create_engine(
+        settings.DATABASE_URL,
+        connect_args={"check_same_thread": False, "timeout": 30},
+        pool_pre_ping=True,
+    )
 
-
-@event.listens_for(engine, "connect")
-def set_sqlite_pragma(dbapi_connection, connection_record) -> None:
-    """فعال‌سازی WAL Mode و کلیدهای خارجی در SQLite برای کارایی و پایداری بالا"""
-    if "sqlite" in settings.DATABASE_URL:
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record) -> None:
+        """فعال‌سازی WAL Mode و کلیدهای خارجی؛ فقط برای SQLite"""
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute("PRAGMA synchronous=NORMAL;")
@@ -43,7 +47,17 @@ def set_sqlite_pragma(dbapi_connection, connection_record) -> None:
         cursor.execute("PRAGMA busy_timeout=30000;")
         cursor.execute("PRAGMA temp_store=MEMORY;")
         cursor.close()
-
+else:
+    # حالت تولید: PostgreSQL با کانکشن پولینگ استاندارد
+    engine = create_engine(
+        settings.DATABASE_URL,
+        poolclass=QueuePool,
+        pool_size=settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_MAX_OVERFLOW,
+        pool_timeout=settings.DB_POOL_TIMEOUT,
+        pool_recycle=settings.DB_POOL_RECYCLE,
+        pool_pre_ping=True,
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
 
@@ -61,11 +75,67 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-def backup_database() -> Optional[str]:
-    """تهیه نسخه پشتیبان خودکار از فایل دیتابیس SQLite در پوشه backups/"""
-    if not settings.DATABASE_URL.startswith("sqlite:///"):
+def _backup_postgres() -> Optional[str]:
+    """
+    پشتیبان‌گیری PostgreSQL با pg_dump (در صورت PG_DUMP_ENABLED=true).
+    در غیر این صورت صرفاً لاگ می‌شود تا بکاپ توسط زیرساخت (cron/managed backup) مدیریت گردد.
+    """
+    if not settings.PG_DUMP_ENABLED:
+        logger.info(
+            "دیتابیس PostgreSQL است؛ بکاپ فایلی انجام نشد (PG_DUMP_ENABLED=false). "
+            "بکاپ را از طریق pg_dump زمان‌بندی‌شده یا سرویس مدیریت‌شده انجام دهید."
+        )
         return None
 
+    pg_dump_bin = shutil.which("pg_dump")
+    if not pg_dump_bin:
+        logger.warning("ابزار pg_dump روی سرور یافت نشد؛ بکاپ PostgreSQL انجام نشد.")
+        return None
+
+    try:
+        url = make_url(settings.DATABASE_URL)
+        backup_dir = Path(settings.BACKUP_DIR)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_file = backup_dir / f"ketabkharsho_pg_backup_{timestamp}.dump"
+
+        cmd = [pg_dump_bin, "--format=custom", "--no-owner", "--file", str(out_file)]
+        if url.host:
+            cmd += ["--host", str(url.host)]
+        if url.port:
+            cmd += ["--port", str(url.port)]
+        if url.username:
+            cmd += ["--username", str(url.username)]
+        cmd += ["--dbname", str(url.database or "")]
+
+        env = dict(os.environ)
+        if url.password:
+            env["PGPASSWORD"] = str(url.password)
+
+        subprocess.run(cmd, env=env, check=True, timeout=600, capture_output=True)
+        logger.info(f"نسخه پشتیبان PostgreSQL ایجاد شد: {out_file}")
+
+        backups = sorted(
+            backup_dir.glob("ketabkharsho_pg_backup_*.dump"), key=lambda p: p.stat().st_mtime
+        )
+        if len(backups) > 30:
+            for old_bkp in backups[:-30]:
+                try:
+                    old_bkp.unlink()
+                except OSError:
+                    pass
+        return str(out_file)
+    except Exception as exc:
+        logger.error(f"خطا در تهیه بکاپ PostgreSQL: {exc}")
+        return None
+
+
+def backup_database() -> Optional[str]:
+    """تهیه نسخه پشتیبان خودکار: فایلی برای SQLite و pg_dump اختیاری برای PostgreSQL"""
+    if not settings.is_sqlite:
+        return _backup_postgres()
+    if not settings.DATABASE_URL.startswith("sqlite:///"):
+        return None
     db_file_str = settings.DATABASE_URL.replace("sqlite:///", "", 1)
     db_path = Path(db_file_str)
     if not db_path.exists() or db_path.stat().st_size == 0:
@@ -102,7 +172,9 @@ def backup_database() -> Optional[str]:
 
 
 def _run_migrations() -> None:
-    """بررسی و افزودن خودکار ستون‌های احتمالی جاافتاده در دیتابیس‌های قدیمی"""
+    """بررسی و افزودن خودکار ستون‌های احتمالی جاافتاده در دیتابیس‌های قدیمی (فقط SQLite)"""
+    if not IS_SQLITE:
+        return
     inspector = inspect(engine)
     existing_tables = inspector.get_table_names()
 
@@ -242,11 +314,65 @@ def get_or_create_active_cycle(db: Session, league: League, default_start_shamsi
     return new_cycle
 
 
+_INDEX_DDL = [
+    ("ix_users_league_active", "users", "league_id, is_active"),
+    ("ix_users_tg_active", "users", "telegram_id, is_active"),
+    ("ix_users_group_active", "users", "group_id, is_active"),
+    ("ix_leagues_group_flags", "leagues", "group_id, is_deleted, is_active"),
+    ("ix_cycles_league_status", "cycles", "league_id, status"),
+    ("ix_group_admins_group_user", "group_admins", "group_id, user_id"),
+    ("ix_actlog_user_league_date", "activity_logs", "user_id, league_id, log_date"),
+    ("ix_actlog_league_cycle_day", "activity_logs", "league_id, cycle_id, league_day"),
+    ("ix_actlog_league_date", "activity_logs", "league_id, log_date"),
+]
+
+
+def _ensure_indexes() -> None:
+    """ساخت ایندکس‌های ترکیبی (idempotent) روی SQLite و PostgreSQL"""
+    for idx_name, table, cols in _INDEX_DDL:
+        try:
+            # هر ایندکس در تراکنش جداگانه تا خطای احتمالی PostgreSQL بقیه را خراب نکند
+            with engine.begin() as conn:
+                conn.execute(text(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} ({cols})"))
+        except Exception as exc:
+            logger.warning(f"عدم امکان ساخت ایندکس {idx_name}: {exc}")
+
+
+def _sync_postgres_sequences(db: Session) -> None:
+    """
+    همگام‌سازی sequence ها در PostgreSQL پس از درج دستی رکورد با id مشخص (مثل گروه ۱)،
+    تا درج بعدی با خطای کلید تکراری مواجه نشود.
+    """
+    if IS_SQLITE:
+        return
+    for table in (
+        "groups",
+        "group_admins",
+        "cycles",
+        "activity_logs",
+        "cycle_results",
+        "group_messages",
+        "group_terms",
+    ):
+        try:
+            db.execute(
+                text(
+                    f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
+                    f"COALESCE((SELECT MAX(id) FROM {table}), 0) + 1, false)"
+                )
+            )
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"عدم امکان همگام‌سازی sequence جدول {table}: {exc}")
+    db.commit()
+
+
 def init_db() -> None:
     """راه‌اندازی اولیه دیتابیس، بکاپ‌گیری، مایگریشن، ساخت گروه ۱ و تضمین چله‌های فعال"""
     backup_database()
     Base.metadata.create_all(bind=engine)
     _run_migrations()
+    _ensure_indexes()
 
     from services import DateService
 
@@ -271,6 +397,15 @@ def init_db() -> None:
             db.commit()
             db.refresh(default_group)
             logger.info("گروه پیش‌فرض شماره ۱ (مدرسه مجازی امام حسین ع) ایجاد شد.")
+
+        for weak_group in db.query(Group).filter(Group.is_deleted == False).all():
+            if len(weak_group.password or "") < 6:
+                logger.warning(
+                    f"رمز مجموعه «{weak_group.name}» (ID={weak_group.id}) کمتر از ۶ رقم است؛ "
+                    "قبل از ثبتنام عمومی آن را با دستور pg تغییر دهید."
+                )
+
+        _sync_postgres_sequences(db)
 
         # ۲. ثبت تمام ADMIN_IDS به عنوان ادمین گروه ۱
         for admin_id in settings.ADMIN_IDS:

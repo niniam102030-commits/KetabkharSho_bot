@@ -260,6 +260,18 @@ def _get_league_edit_keyboard(league_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def _get_user_past_days(db: Session, u: User) -> set[int]:
+    """روزهای گذشتهٔ چلهٔ فعال کاربر (۱ تا دیروز؛ در بامداد روز ۴۱ شامل روز ۴۰ هم میشود)"""
+    if not u.league_id:
+        return set()
+    lg = db.query(League).filter(League.id == u.league_id).first()
+    if not lg:
+        return set()
+    cyc = get_or_create_active_cycle(db, lg)
+    raw_day = DateService.calculate_raw_league_day(cyc.start_shamsi or lg.start_shamsi)
+    return set(range(1, min(settings.LEAGUE_DURATION, raw_day - 1) + 1))
+
+
 def _get_user_manage_keyboard(user_id: str) -> InlineKeyboardMarkup:
     """کیبورد شیشه‌ای ۷ ردیفه مدیریت کاربر (بند ۷.۳ - us و eu)"""
     return InlineKeyboardMarkup(
@@ -591,7 +603,7 @@ async def process_cg_name(message: Message, state: FSMContext) -> None:
     await safe_reply(
         message,
         f"🔑 نام مجموعه: *{escape_md(name)}*\n\n"
-        "حالا *رمز ورود مجموعه* (یک عدد ۴ تا ۸ رقمی یکتا) را وارد کنید:",
+        "حالا *رمز ورود مجموعه* (یک عدد ۶ تا ۸ رقمی یکتا) را وارد کنید:",
         reply_markup=get_inline_cancel_keyboard(show_back=True),
     )
 
@@ -599,10 +611,10 @@ async def process_cg_name(message: Message, state: FSMContext) -> None:
 @admin_router.message(AdminStates.cg_waiting_password)
 async def process_cg_password(message: Message, state: FSMContext) -> None:
     pwd = DateService.normalize_digits(message.text or "")
-    if not (pwd.isdigit() and 4 <= len(pwd) <= 8):
+    if not (pwd.isdigit() and 6 <= len(pwd) <= 8):
         await safe_reply(
             message,
-            "❌ رمز ورود باید فقط شامل اعداد و بین ۴ تا ۸ رقم باشد. لطفاً مجدداً وارد کنید:",
+            "❌ رمز ورود باید فقط شامل اعداد و بین ۶ تا ۸ رقم باشد. لطفاً مجدداً وارد کنید:",
         )
         return
 
@@ -684,7 +696,7 @@ async def cmd_change_group_password(message: Message, state: FSMContext) -> None
             await safe_reply(
                 message,
                 f"🔑 تغییر رمز مجموعه *{escape_md(g.name)}* (رمز فعلی: `{g.password}`)\n\n"
-                "لطفاً رمز جدید (عدد ۴ تا ۸ رقمی) را وارد کنید:",
+                "لطفاً رمز جدید (عدد ۶ تا ۸ رقمی) را وارد کنید:",
                 reply_markup=get_inline_cancel_keyboard(),
             )
             return
@@ -723,7 +735,7 @@ async def cb_select_group_for_password(callback: CallbackQuery, state: FSMContex
         callback.bot,
         callback.message.chat.id,
         f"🔑 تغییر رمز مجموعه *{escape_md(g_name)}* (رمز فعلی: `{g_pwd}`)\n\n"
-        "لطفاً رمز جدید (عدد ۴ تا ۸ رقمی) را وارد کنید:",
+        "لطفاً رمز جدید (عدد ۶ تا ۸ رقمی) را وارد کنید:",
         reply_markup=get_inline_cancel_keyboard(),
     )
     await callback.answer()
@@ -732,10 +744,10 @@ async def cb_select_group_for_password(callback: CallbackQuery, state: FSMContex
 @admin_router.message(AdminStates.pg_waiting_password)
 async def process_pg_new_password(message: Message, state: FSMContext) -> None:
     pwd = DateService.normalize_digits(message.text or "")
-    if not (pwd.isdigit() and 4 <= len(pwd) <= 8):
+    if not (pwd.isdigit() and 6 <= len(pwd) <= 8):
         await safe_reply(
             message,
-            "❌ رمز ورود باید فقط شامل اعداد و بین ۴ تا ۸ رقم باشد. لطفاً مجدداً وارد کنید:",
+            "❌ رمز ورود باید فقط شامل اعداد و بین ۶ تا ۸ رقم باشد. لطفاً مجدداً وارد کنید:",
         )
         return
 
@@ -2015,6 +2027,15 @@ async def cb_execute_user_move_league(callback: CallbackQuery) -> None:
                 u.today_half_used = 0
                 u.today_one_min_used = 0
                 u.created_at = datetime.now(timezone.utc)
+                db.query(ActivityLog).filter(
+                    ActivityLog.user_id == u.id,
+                    ActivityLog.league_id == lg.id,
+                    (ActivityLog.cycle_id == cyc.id)
+                    | (
+                        (ActivityLog.cycle_id == None)
+                        & (ActivityLog.cycle_number == lg.cycle_number)
+                    ),
+                ).delete(synchronize_session=False)
                 db.commit()
 
                 set_system_state(db, f"streak_offset_{u.id}", "0")
@@ -2376,6 +2397,7 @@ async def process_user_new_no_study(message: Message, state: FSMContext) -> None
         return
 
     new_count = int(raw)
+    note = ""
     data = await state.get_data()
     target_uid = data.get("target_user_id")
     with get_db() as db:
@@ -2392,20 +2414,30 @@ async def process_user_new_no_study(message: Message, state: FSMContext) -> None
                 .all()
                 if r.league_day
             }
-            u.no_study_days = new_count
+            past_days = _get_user_past_days(db, u)
+            future_days = set(range(1, settings.LEAGUE_DURATION + 1)) - past_days
+            allowed_days = past_days - logged_days
+            eff_count = min(new_count, len(allowed_days))
+            if eff_count < new_count:
+                note = (
+                    "\n⚠️ عدد واردشده بیشتر از تعداد روزهای گذشتهٔ بدون ثبت در این چله بود؛ "
+                    f"مقدار روی {eff_count} تنظیم شد."
+                )
             u.absent_days_list = AbsenceService.sync_days_list_with_count(
                 u.absent_days_list,
-                new_count,
+                eff_count,
                 max_day=settings.LEAGUE_DURATION,
-                exclude_days=logged_days,
+                exclude_days=logged_days | future_days,
+                preferred_days=sorted(allowed_days),
             )
+            u.no_study_days = len(AbsenceService.parse_days_list(u.absent_days_list))
             db.commit()
             card = _format_user_admin_card(db, u)
         else:
             card = "کاربر یافت نشد."
 
     await state.clear()
-    await safe_reply(message, f"✅ تعداد غیبت و لیست روزهای غیبت همگام‌سازی شد.\n\n{card}", reply_markup=_get_user_manage_keyboard(target_uid))
+    await safe_reply(message, f"✅ تعداد غیبت و لیست روزهای غیبت همگام‌سازی شد.{note}\n\n{card}", reply_markup=_get_user_manage_keyboard(target_uid))
 
 
 @admin_router.callback_query(F.data.startswith("adm_edit_late_"))
@@ -2430,17 +2462,28 @@ async def process_user_new_late(message: Message, state: FSMContext) -> None:
         return
 
     new_count = int(raw)
+    note = ""
     data = await state.get_data()
     target_uid = data.get("target_user_id")
     with get_db() as db:
         u = db.query(User).filter(User.id == target_uid).first()
         if u:
             absent_days = set(AbsenceService.parse_days_list(u.absent_days_list))
+            past_days_l = _get_user_past_days(db, u)
+            future_days_l = set(range(1, settings.LEAGUE_DURATION + 1)) - past_days_l
+            allowed_late = past_days_l - absent_days
+            eff_late = min(new_count, len(allowed_late))
+            if eff_late < new_count:
+                note = (
+                    "\n⚠️ عدد واردشده بیشتر از تعداد روزهای گذشتهٔ قابلثبت در این چله بود؛ "
+                    f"مقدار روی {eff_late} تنظیم شد."
+                )
             u.late_days_list = AbsenceService.sync_days_list_with_count(
                 u.late_days_list,
-                new_count,
+                eff_late,
                 max_day=settings.LEAGUE_DURATION,
-                exclude_days=absent_days,
+                exclude_days=absent_days | future_days_l,
+                preferred_days=sorted(allowed_late),
             )
             db.commit()
             card = _format_user_admin_card(db, u)
@@ -2448,7 +2491,7 @@ async def process_user_new_late(message: Message, state: FSMContext) -> None:
             card = "کاربر یافت نشد."
 
     await state.clear()
-    await safe_reply(message, f"✅ تعداد ثبت‌های با تاخیر همگام‌سازی شد.\n\n{card}", reply_markup=_get_user_manage_keyboard(target_uid))
+    await safe_reply(message, f"✅ تعداد ثبت‌های با تاخیر همگام‌سازی شد.{note}\n\n{card}", reply_markup=_get_user_manage_keyboard(target_uid))
 
 
 @admin_router.callback_query(F.data.startswith("adm_userfloor_"))
@@ -2565,15 +2608,16 @@ async def cb_menu_stats(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-# --- دستور ex و دکمه شیشه‌ای adm_menu_excel (دریافت خروجی اکسل لیگ‌های فعال) ---
-async def _send_active_leagues_excel(bot: Bot, chat_id: int | str, user_id: str) -> None:
-    export_tasks: List[Dict[str, Any]] = []
+# --- توابع کمکی خروجی اکسل و هندلرهای ex / adm_menu_excel ---
+def _collect_admin_league_ids_sync(user_id: str) -> Optional[List[str]]:
+    """شناسه لیگ‌های فعال تحت مدیریت ادمین؛ None یعنی ادمین نیست (اجرا در ترد)"""
     with get_db() as db:
         if not is_user_admin(db, user_id):
-            return
+            return None
         group_ids = get_admin_group_ids(db, user_id)
-        leagues = (
-            db.query(League)
+        return [
+            r[0]
+            for r in db.query(League.id)
             .filter(
                 League.group_id.in_(group_ids),
                 League.is_deleted == False,
@@ -2581,65 +2625,106 @@ async def _send_active_leagues_excel(bot: Bot, chat_id: int | str, user_id: str)
             )
             .order_by(League.id.asc())
             .all()
-        )
-        if not leagues:
-            await safe_send_message(bot, chat_id, "📭 هیچ لیگ فعالی برای تولید اکسل یافت نشد.")
-            return
+        ]
 
-        for lg in leagues:
-            cyc = get_or_create_active_cycle(db, lg)
-            curr_day = DateService.calculate_league_day(cyc.start_shamsi or lg.start_shamsi)
-            users = (
+
+def _collect_league_export_sync(league_id: str) -> Optional[Dict[str, Any]]:
+    """جمع‌آوری داده اکسل یک لیگ با خواندن دسته‌ای کاربران (اجرا در ترد با نشست مستقل)"""
+    with get_db() as db:
+        lg = db.get(League, league_id)
+        if not lg or lg.is_deleted or not lg.is_active:
+            return None
+        cyc = get_or_create_active_cycle(db, lg)
+        curr_day = DateService.calculate_league_day(cyc.start_shamsi or lg.start_shamsi)
+
+        users_data: List[Dict[str, Any]] = []
+        chunk_size = max(50, int(settings.DB_CHUNK_SIZE))
+        last_id = ""
+        while True:
+            chunk = (
                 db.query(User)
-                .filter(User.league_id == lg.id, User.is_active == True)
+                .filter(
+                    User.league_id == lg.id,
+                    User.is_active == True,
+                    User.id > last_id,
+                )
+                .order_by(User.id.asc())
+                .limit(chunk_size)
                 .all()
             )
-            export_tasks.append(
-                {
-                    "id": lg.id,
-                    "name": lg.name,
-                    "cycle_number": lg.cycle_number,
-                    "current_day": curr_day,
-                    "floor": lg.floor,
-                    "users_data": [
-                        ReportService._extract_row_dict(u, league_floor=lg.floor)
-                        for u in users
-                    ],
-                }
+            if not chunk:
+                break
+            last_id = chunk[-1].id
+            users_data.extend(
+                ReportService._extract_row_dict(u, league_floor=lg.floor) for u in chunk
             )
+            db.expunge_all()
 
-    for task in export_tasks:
-        file_path = await asyncio.to_thread(
-            ReportService.generate_excel,
-            league_name=task["name"],
-            users_data=task["users_data"],
-            cycle_number=task["cycle_number"],
-            current_day=task["current_day"],
-            league_floor=task["floor"],
-        )
+        return {
+            "id": lg.id,
+            "name": lg.name,
+            "cycle_number": lg.cycle_number,
+            "current_day": curr_day,
+            "floor": lg.floor,
+            "users_data": users_data,
+        }
+
+
+async def _send_active_leagues_excel(bot: Bot, chat_id: int | str, user_id: str) -> None:
+    from handlers import safe_send_document
+
+    league_ids = await asyncio.to_thread(_collect_admin_league_ids_sync, user_id)
+    if league_ids is None:
+        return
+    if not league_ids:
+        await safe_send_message(bot, chat_id, "📭 هیچ لیگ فعالی برای تولید اکسل یافت نشد.")
+        return
+
+    # هر بار فقط داده یک لیگ در حافظه است و پس از ارسال آزاد می‌شود
+    for league_id in league_ids:
+        task = await asyncio.to_thread(_collect_league_export_sync, league_id)
+        if not task:
+            continue
+
+        file_path = ""
         try:
-            await bot.send_document(
-                chat_id=chat_id,
-                document=FSInputFile(file_path),
-                caption=(
-                    f"📥 گزارش اکسل لیگ «{task['name']}»\n"
-                    f"🏆 چله {task['cycle_number']} | روز {task['current_day']}"
-                ),
+            file_path = await asyncio.to_thread(
+                ReportService.generate_excel,
+                league_name=task["name"],
+                users_data=task["users_data"],
+                cycle_number=task["cycle_number"],
+                current_day=task["current_day"],
+                league_floor=task["floor"],
             )
+            task["users_data"] = []
+            caption = f"📥 گزارش اکسل لیگ «{task['name']}»\n🏆 چله {task['cycle_number']} | روز {task['current_day']}"
+            ok = await safe_send_document(
+                bot,
+                chat_id,
+                file_path,
+                caption=caption,
+            )
+            if not ok:
+                logger.error(f"خطا در ارسال فایل اکسل لیگ {task['id']}")
+                await safe_send_message(
+                    bot,
+                    chat_id,
+                    f"❌ در ارسال فایل اکسل لیگ «{escape_md(task['name'])}» خطایی رخ داد.",
+                )
         except Exception as exc:
-            logger.error(f"خطا در ارسال فایل اکسل لیگ {task['id']}: {exc}")
+            logger.error(f"خطا در تولید/ارسال اکسل لیگ {task['id']}: {exc}")
             await safe_send_message(
                 bot,
                 chat_id,
-                f"❌ در ارسال فایل اکسل لیگ «{escape_md(task['name'])}» خطایی رخ داد: {escape_md(str(exc))}",
+                f"❌ در تولید فایل اکسل لیگ «{escape_md(task['name'])}» خطایی رخ داد: {escape_md(str(exc))}",
             )
         finally:
-            if os.path.exists(file_path):
+            if file_path and os.path.exists(file_path):
                 try:
                     os.remove(file_path)
                 except OSError:
                     pass
-
+            task = None
 
 @admin_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "ex"))
 async def cmd_export_excel(message: Message) -> None:
