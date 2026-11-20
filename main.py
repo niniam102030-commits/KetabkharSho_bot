@@ -178,12 +178,6 @@ async def main() -> None:
     scheduler = setup_scheduler(bot)
     await run_startup_catchups(bot)
 
-    # ارسال پیام اعلان راه‌اندازی (نسخه جدید / استارتاپ) به ادمین‌های اصلی ربات
-    try:
-        await send_startup_notification(bot)
-    except Exception as exc:
-        logger.error(f"خطای مدیریت‌شده در ارسال اعلان استارتاپ ربات: {exc}", exc_info=True)
-
     logger.info(
         f"ربات باشگاه کتابخوانی «کتابخوارشو» متصل به {settings.API_URL} آماده دریافت پیام‌هاست..."
     )

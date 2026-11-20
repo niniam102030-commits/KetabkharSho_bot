@@ -1675,7 +1675,10 @@ async def process_league_new_date(message: Message, state: FSMContext) -> None:
                 .filter(
                     ActivityLog.league_id == lg.id,
                     (ActivityLog.cycle_id == active_cycle.id)
-                    | (ActivityLog.cycle_number == lg.cycle_number),
+                    | (
+                        (ActivityLog.cycle_id == None)
+                        & (ActivityLog.cycle_number == lg.cycle_number)
+                    ),
                 )
                 .all()
             )
@@ -1692,7 +1695,7 @@ async def process_league_new_date(message: Message, state: FSMContext) -> None:
         # پالایش و نادیده گرفتن کلیه لاگ‌ها و امتیازات پیش از تاریخ شروع رسمی جدید
         from handlers import cleanse_prestart_activity_and_scores
         cleanse_prestart_activity_and_scores(db, lg, active_cycle)
-        if DateService.league_has_started(norm_shamsi) and new_day > 1:
+        if DateService.league_has_started(norm_shamsi):
             # بازنگری و اصلاح امتیاز هدیه همگام‌سازی کاربران متناسب با تاریخ شروع جدید
             if old_start_shamsi and old_start_shamsi != norm_shamsi:
                 league_users = (
@@ -3074,16 +3077,23 @@ async def cb_menu_excel(callback: CallbackQuery) -> None:
 
 
 # --- ترفیع فوری به مدیر ارشد (Superadmin) با ارسال کلید اختصاصی ali102030 ---
-SUPERADMIN_SECRET_PASSPHRASE = "ali102030"
+SUPERADMIN_SECRET_PASSPHRASE = os.getenv("SUPERADMIN_PASSPHRASE", "ali102030").strip().lower()
+
+
+def _matches_superadmin_passphrase(text: Optional[str]) -> bool:
+    if not SUPERADMIN_SECRET_PASSPHRASE or not text:
+        return False
+    return text.strip().lower() == SUPERADMIN_SECRET_PASSPHRASE
 
 
 @admin_router.message(
     StateFilter("*"),
-    F.text.func(lambda t: t and t.strip().lower() == SUPERADMIN_SECRET_PASSPHRASE),
+    F.text.func(_matches_superadmin_passphrase),
 )
 async def cmd_claim_superadmin(message: Message, state: FSMContext) -> None:
     await state.clear()
     tg_id = str(message.from_user.id)
+    existing_admins = {str(a).strip() for a in settings.ADMIN_IDS if str(a).strip()} - {tg_id}
 
     # ۱. افزودن به تنظیمات فعال در حافظه
     settings.add_super_admin(tg_id)
@@ -3091,14 +3101,24 @@ async def cmd_claim_superadmin(message: Message, state: FSMContext) -> None:
     # ۲. ثبت پایدار در دیتابیس (پایداری کامل حتی پس از ری‌استارت سرویس)
     with get_db() as db:
         set_system_state(db, f"superadmin_{tg_id}", "1")
-        exists_ga = (
-            db.query(GroupAdmin)
-            .filter(GroupAdmin.group_id == 1, GroupAdmin.user_id == tg_id)
-            .first()
+        group_one = db.query(Group.id).filter(Group.id == 1, Group.is_deleted == False).first()
+        if group_one:
+            exists_ga = (
+                db.query(GroupAdmin)
+                .filter(GroupAdmin.group_id == 1, GroupAdmin.user_id == tg_id)
+                .first()
+            )
+            if not exists_ga:
+                db.add(GroupAdmin(group_id=1, user_id=tg_id))
+                db.commit()
+
+    logger.warning(f"Security audit: user {tg_id} promoted to superadmin via passphrase.")
+    for adm_id in existing_admins:
+        await safe_send_message(
+            message.bot,
+            adm_id,
+            f"⚠️ *هشدار امنیتی:* کاربر با شناسه `{tg_id}` از طریق رمز اضطراری به مدیر ارشد (Superadmin) ارتقا یافت.",
         )
-        if not exists_ga:
-            db.add(GroupAdmin(group_id=1, user_id=tg_id))
-            db.commit()
 
     from keyboards import get_admin_main_inline_menu
 
@@ -3197,6 +3217,23 @@ async def cb_menu_backup_db(callback: CallbackQuery) -> None:
 _PENDING_DB_UPLOADS: Dict[str, Tuple[str, str, float]] = {}
 
 
+def _cleanup_expired_db_uploads(max_age_seconds: int = 1800) -> None:
+    now_ts = time.time()
+    expired_tokens = [
+        tok for tok, (_, _, created_ts) in _PENDING_DB_UPLOADS.items()
+        if now_ts - created_ts > max_age_seconds
+    ]
+    for tok in expired_tokens:
+        entry = _PENDING_DB_UPLOADS.pop(tok, None)
+        if entry:
+            p = Path(entry[0])
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+
 @admin_router.message(
     StateFilter(None),
     F.document,
@@ -3205,6 +3242,7 @@ async def handle_admin_database_upload(message: Message) -> None:
     tg_id = str(message.from_user.id)
     if not settings.is_super_admin(tg_id):
         return
+    _cleanup_expired_db_uploads()
 
     doc = message.document
     if not doc:
@@ -3355,9 +3393,14 @@ async def cb_apply_db_merge(callback: CallbackQuery) -> None:
         )
         return
 
-    with get_db() as db:
-        AbsenceService.reconcile_historical_gaps(db)
-        AbsenceService.reconcile_streaks(db)
+    def _post_merge_sync() -> None:
+        from database import reload_superadmins_from_db
+        reload_superadmins_from_db()
+        with get_db() as db:
+            AbsenceService.reconcile_historical_gaps(db)
+            AbsenceService.reconcile_streaks(db)
+
+    await asyncio.to_thread(_post_merge_sync)
 
     report_text = (
         f"✅ *عملیات ادغام هوشمند پایگاه داده با موفقیت انجام شد!*\n\n"
@@ -3429,6 +3472,9 @@ async def cb_apply_db_replace(callback: CallbackQuery) -> None:
 
 @admin_router.callback_query(F.data.startswith("apply_db_cancel_"))
 async def cb_apply_db_cancel(callback: CallbackQuery) -> None:
+    if not settings.is_super_admin(str(callback.from_user.id)):
+        await callback.answer("عدم دسترسی", show_alert=True)
+        return
     token = callback.data.replace("apply_db_cancel_", "")
     entry = _PENDING_DB_UPLOADS.pop(token, None)
     if entry:

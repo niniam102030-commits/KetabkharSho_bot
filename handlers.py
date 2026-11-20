@@ -4,7 +4,7 @@ import asyncio
 import logging
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
-from typing import Any, List, Optional, Dict, Tuple
+from typing import Any, List, Optional, Dict, Tuple, Set
 
 from aiogram import Router, F, Bot
 from aiogram.exceptions import (
@@ -2106,6 +2106,8 @@ def cleanse_prestart_activity_and_scores(db: Session, league: League, cycle: Opt
 
     start_date_obj = DateService.shamsi_to_date(start_shamsi)
     cleaned_count = 0
+    clean_flag_key = f"start_cleaned_{league.id}_{cycle.id}_{start_shamsi}"
+    already_cleaned_start = get_system_state(db, clean_flag_key) == "1"
 
     for u in users:
         st = pre_stats_by_user.get(str(u.id))
@@ -2117,36 +2119,47 @@ def cleanse_prestart_activity_and_scores(db: Session, league: League, cycle: Opt
             u.one_min_coupons = min(settings.DEFAULT_ONE_MIN_COUPONS, int(u.one_min_coupons or 0) + st["one"])
             cleaned_count += 1
 
-        # اگر کاربر قبل یا همزمان با شروع عضو شده، ولی هیچ لاگ معتبری در دیتابیس ندارد
-        join_d = DateService.get_user_join_date(u)
-        if start_date_obj and join_d <= start_date_obj:
-            has_valid_logs = (
-                db.query(ActivityLog.id)
-                .filter(
-                    ActivityLog.user_id == u.id,
-                    ActivityLog.league_id == league.id,
-                    (ActivityLog.cycle_id == cycle.id)
-                    | (
-                        (ActivityLog.cycle_id == None)
-                        & (ActivityLog.cycle_number == league.cycle_number)
-                    ),
-                    ActivityLog.log_date >= start_greg,
+        if not already_cleaned_start and start_date_obj:
+            join_d = DateService.get_user_join_date(u)
+            if join_d <= start_date_obj:
+                has_valid_logs = (
+                    db.query(ActivityLog.id)
+                    .filter(
+                        ActivityLog.user_id == u.id,
+                        ActivityLog.league_id == league.id,
+                        (ActivityLog.cycle_id == cycle.id)
+                        | (
+                            (ActivityLog.cycle_id == None)
+                            & (ActivityLog.cycle_number == league.cycle_number)
+                        ),
+                        ActivityLog.log_date >= start_greg,
+                    )
+                    .first()
+                    is not None
                 )
-                .first()
-                is not None
-            )
-            if not has_valid_logs:
-                if u.points > 0 or u.total_minutes > 0 or u.total_pages > 0:
-                    u.points = 0.0
-                    u.total_minutes = 0
-                    u.total_pages = 0
-                    u.streak = 0
-                    u.half_coupons = settings.DEFAULT_HALF_COUPONS
-                    u.one_min_coupons = settings.DEFAULT_ONE_MIN_COUPONS
-                    cleaned_count += 1
+                if not has_valid_logs:
+                    if u.points > 0 or u.total_minutes > 0 or u.total_pages > 0 or u.streak > 0:
+                        u.points = 0.0
+                        u.total_minutes = 0
+                        u.total_pages = 0
+                        u.streak = 0
+                        u.today_minutes = 0
+                        u.today_pages = 0
+                        u.today_points = 0.0
+                        u.today_half_used = 0
+                        u.today_one_min_used = 0
+                        u.last_log_date = None
+                        u.half_coupons = settings.DEFAULT_HALF_COUPONS
+                        u.one_min_coupons = settings.DEFAULT_ONE_MIN_COUPONS
+                        set_system_state(db, f"streak_offset_{u.id}", "0", commit=False)
+                        cleaned_count += 1
 
-    if prestart_logs or cleaned_count > 0:
+    if not already_cleaned_start:
+        set_system_state(db, clean_flag_key, "1", commit=False)
+
+    if prestart_logs or cleaned_count > 0 or not already_cleaned_start:
         db.commit()
+    if prestart_logs or cleaned_count > 0:
         AbsenceService.reconcile_historical_gaps(db, league=league)
         AbsenceService.reconcile_streaks(db, league=league)
         if league.fines_enabled:
@@ -2680,6 +2693,8 @@ def _complete_and_rollover_cycle(
         "final_table_text": final_table_text,
         "excel_path": final_excel_path,
         "caption": final_caption,
+        "cycle_number": old_cycle_number,
+        "league_name": league_name_snapshot,
     }
 
 
@@ -2764,7 +2779,11 @@ def _build_morning_cards(
         ActivityLog.user_id, ActivityLog.minutes, ActivityLog.points_earned
     ).filter(
         ActivityLog.league_id == lg.id,
-        (ActivityLog.cycle_id == cyc.id) | (ActivityLog.cycle_number == lg.cycle_number),
+        (ActivityLog.cycle_id == cyc.id)
+        | (
+            (ActivityLog.cycle_id == None)
+            & (ActivityLog.cycle_number == lg.cycle_number)
+        ),
         (ActivityLog.log_date == yesterday_str) | (ActivityLog.league_day == yesterday_day),
         ActivityLog.minutes > 0,
     )

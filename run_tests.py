@@ -1167,6 +1167,10 @@ async def run_all_tests() -> None:
         d_conn.execute("INSERT INTO league_fine_managers VALUES (1, 'donor_league_1', 'fine_mgr_99', CURRENT_TIMESTAMP);")
         d_conn.execute("INSERT INTO users VALUES ('user_donor_99', 'tg_donor_99', 99, 'امیر نخبگانی', 'امیر', 'نخبگانی', 'donor_league_1', 150.0, 300, 120, 5, 0, '', '', 3, 3, 20, '2026-11-20', 40, 20, 15.0, 0, 0, 1, CURRENT_TIMESTAMP);")
         d_conn.execute("INSERT INTO activity_logs VALUES (1, 'user_donor_99', 'donor_league_1', 1, 1, 5, 40, 20, 15.0, 0, 0, '2026-11-20', 14, CURRENT_TIMESTAMP);")
+        d_conn.execute("INSERT INTO fine_payments VALUES (1, 'user_donor_99', 'donor_league_1', 50000, 'rec_photo_99', 'TRK_99', 'approved', 'admin_tester', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);")
+        d_conn.execute("INSERT INTO group_messages VALUES (1, 99, 'welcome', 'خوش آمدید به نخبگان', CURRENT_TIMESTAMP);")
+        d_conn.execute("INSERT INTO group_terms VALUES (1, 99, 'league', 'لیگ حرفه‌ای', CURRENT_TIMESTAMP);")
+        d_conn.execute("INSERT INTO system_states VALUES ('donor_test_key', 'donor_test_value');")
     d_conn.close()
 
     # ۱. تست اعتبارسنجی
@@ -1206,6 +1210,23 @@ async def run_all_tests() -> None:
 
         act_log = db.query(ActivityLog).filter(ActivityLog.user_id == "user_donor_99").first()
         assert act_log is not None, "لاگ مطالعه ادغام نشد"
+
+        from models import FinePayment, GroupMessage, GroupTerm
+        fp_merged = db.query(FinePayment).filter(FinePayment.user_id == "user_donor_99").first()
+        assert fp_merged is not None, "رکورد پرداخت جریمه ادغام نشد"
+        assert fp_merged.amount == 50000, "مبلغ پرداخت جریمه نادرست است"
+        assert fp_merged.recorded_by == "admin_tester", "ثبت‌کننده پرداخت جریمه نادرست است"
+
+        gm_merged = db.query(GroupMessage).filter(GroupMessage.group_id == 99, GroupMessage.msg_key == "welcome").first()
+        assert gm_merged is not None, "پیام سفارشی گروه ادغام نشد"
+        assert gm_merged.custom_text == "خوش آمدید به نخبگان", "متن پیام سفارشی نادرست است"
+
+        gt_merged = db.query(GroupTerm).filter(GroupTerm.group_id == 99, GroupTerm.term_key == "league").first()
+        assert gt_merged is not None, "اصطلاح سفارشی گروه ادغام نشد"
+        assert gt_merged.custom_term == "لیگ حرفه‌ای", "مقدار اصطلاح سفارشی نادرست است"
+
+        from database import get_system_state
+        assert get_system_state(db, "donor_test_key") == "donor_test_value", "وضعیت سیستمی ادغام نشد"
 
         # اطمینان از دست‌نخورده ماندن دیتای قبلی (گروه شماره ۱ و کاربرانش)
         g1 = db.query(Group).filter(Group.id == 1).first()
