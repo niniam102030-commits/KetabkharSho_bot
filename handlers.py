@@ -2020,6 +2020,136 @@ def reset_league_members_for_new_start(db: Session, league: League, cycle: Optio
     return len(users)
 
 
+def cleanse_prestart_activity_and_scores(db: Session, league: League, cycle: Optional[Cycle] = None) -> int:
+    """
+    پالایش و نادیده گرفتن قطعی کلیه امتیازات و لاگ‌های ثبت‌شده قبل از تاریخ شروع رسمی لیگ:
+    این تابع تضمین می‌کند حتی اگر سرور پس از شروع لیگ (مثلاً در روز ۲، ۵ یا هر زمانی) اصلاح و دیپلوی شود:
+    ۱. کلیه لاگ‌های ثبت‌شده در دوره ثبت‌نام با تاریخ قبل از شروع رسمی (log_date < start_greg) شناسایی و حذف شوند.
+    ۲. امتیازات و زمان‌های ثبت‌شده در دوره پیش‌ثبت‌نام، دقیقاً از حساب کاربران کسر و تصحیح شوند،
+       بدون اینکه به مطالعات معتبر ثبت‌شده پس از تاریخ شروع (روز ۱ به بعد) آسیبی برسد.
+    ۳. کاربرانی که قبل از شروع عضو شده و هنوز مطالعه جدیدی ندارند، امتیازشان دقیقاً 0.0 باشد.
+    """
+    if cycle is None:
+        cycle = get_or_create_active_cycle(db, league)
+
+    start_shamsi = cycle.start_shamsi or league.start_shamsi
+    start_greg = DateService.get_date_for_league_day(start_shamsi, 1) if start_shamsi else None
+
+    # اگر لیگ هنوز در آینده است، ریست کامل اعضا انجام شود
+    if not DateService.league_has_started(start_shamsi):
+        return reset_league_members_for_new_start(db, league, cycle)
+
+    if not start_greg:
+        return 0
+
+    # استخراج لاگ‌های نامعتبر پیش از شروع رسمی لیگ
+    prestart_logs = (
+        db.query(ActivityLog)
+        .filter(
+            ActivityLog.league_id == league.id,
+            (ActivityLog.cycle_id == cycle.id)
+            | (
+                (ActivityLog.cycle_id == None)
+                & (ActivityLog.cycle_number == league.cycle_number)
+            ),
+            ActivityLog.log_date < start_greg,
+        )
+        .all()
+    )
+
+    pre_stats_by_user: Dict[str, Dict[str, Any]] = {}
+    for l in prestart_logs:
+        uid = str(l.user_id)
+        if uid not in pre_stats_by_user:
+            pre_stats_by_user[uid] = {
+                "points": 0.0,
+                "minutes": 0,
+                "pages": 0,
+                "half": 0,
+                "one": 0,
+            }
+        st = pre_stats_by_user[uid]
+        st["points"] += float(l.points_earned or 0.0)
+        st["minutes"] += int(l.minutes or 0)
+        st["pages"] += int(l.pages or 0)
+        st["half"] += int(l.half_coupon_used or 0)
+        st["one"] += int(l.one_min_coupon_used or 0)
+
+    if prestart_logs:
+        db.query(ActivityLog).filter(
+            ActivityLog.league_id == league.id,
+            (ActivityLog.cycle_id == cycle.id)
+            | (
+                (ActivityLog.cycle_id == None)
+                & (ActivityLog.cycle_number == league.cycle_number)
+            ),
+            ActivityLog.log_date < start_greg,
+        ).delete(synchronize_session=False)
+
+    from models import FineRecord
+    db.query(FineRecord).filter(
+        FineRecord.league_id == league.id,
+        FineRecord.cycle_id == cycle.id,
+        FineRecord.league_day <= 0,
+    ).delete(synchronize_session=False)
+
+    users = (
+        db.query(User)
+        .filter(User.league_id == league.id, User.is_active == True)
+        .all()
+    )
+
+    start_date_obj = DateService.shamsi_to_date(start_shamsi)
+    cleaned_count = 0
+
+    for u in users:
+        st = pre_stats_by_user.get(str(u.id))
+        if st:
+            u.points = max(0.0, round(float(u.points or 0.0) - st["points"], 1))
+            u.total_minutes = max(0, int(u.total_minutes or 0) - st["minutes"])
+            u.total_pages = max(0, int(u.total_pages or 0) - st["pages"])
+            u.half_coupons = min(settings.DEFAULT_HALF_COUPONS, int(u.half_coupons or 0) + st["half"])
+            u.one_min_coupons = min(settings.DEFAULT_ONE_MIN_COUPONS, int(u.one_min_coupons or 0) + st["one"])
+            cleaned_count += 1
+
+        # اگر کاربر قبل یا همزمان با شروع عضو شده، ولی هیچ لاگ معتبری در دیتابیس ندارد
+        join_d = DateService.get_user_join_date(u)
+        if start_date_obj and join_d <= start_date_obj:
+            has_valid_logs = (
+                db.query(ActivityLog.id)
+                .filter(
+                    ActivityLog.user_id == u.id,
+                    ActivityLog.league_id == league.id,
+                    (ActivityLog.cycle_id == cycle.id)
+                    | (
+                        (ActivityLog.cycle_id == None)
+                        & (ActivityLog.cycle_number == league.cycle_number)
+                    ),
+                    ActivityLog.log_date >= start_greg,
+                )
+                .first()
+                is not None
+            )
+            if not has_valid_logs:
+                if u.points > 0 or u.total_minutes > 0 or u.total_pages > 0:
+                    u.points = 0.0
+                    u.total_minutes = 0
+                    u.total_pages = 0
+                    u.streak = 0
+                    u.half_coupons = settings.DEFAULT_HALF_COUPONS
+                    u.one_min_coupons = settings.DEFAULT_ONE_MIN_COUPONS
+                    cleaned_count += 1
+
+    if prestart_logs or cleaned_count > 0:
+        db.commit()
+        AbsenceService.reconcile_historical_gaps(db, league=league)
+        AbsenceService.reconcile_streaks(db, league=league)
+        if league.fines_enabled:
+            fine_service.sync_league_fines(db, league)
+
+    return cleaned_count
+
+
 def _midnight_job_sync(today_str: str, yesterday_str: str, force: bool) -> bool:
     """اجرای همگام عملیات دیتابیس و پاکسازی فایل‌های موقت در ترد مجزا"""
     ReportService.cleanup_old_reports(max_age_hours=24)
@@ -2057,28 +2187,8 @@ def _midnight_job_sync(today_str: str, yesterday_str: str, force: bool) -> bool:
             lg.current_day = new_day
             cyc.current_day = new_day
 
-            # در لحظه‌ی شروع رسمی چله (امروز == تاریخ شروع یا روز اول)، امتیاز و آمار همه اعضا صفر می‌شود
-            # تا هیچ امتیازی از دوره ثبت‌نام پیش از شروع لیگ منتقل نشود.
-            if DateService.league_has_started(start_shamsi):
-                if new_day == 1:
-                    reset_key = f"league_start_reset:{lg.id}:{cyc.id}"
-                    if get_system_state(db, reset_key) != start_shamsi:
-                        reset_league_members_for_new_start(db, lg, cyc)
-                        set_system_state(db, reset_key, start_shamsi)
-            else:
-                # اگر لیگ هنوز در آینده است، در صورت وجود هرگونه امتیاز یا فعالیت قبلی، صفر شود
-                has_prestart_points = (
-                    db.query(User.id)
-                    .filter(
-                        User.league_id == lg.id,
-                        User.is_active == True,
-                        (User.points > 0) | (User.total_minutes > 0),
-                    )
-                    .first()
-                    is not None
-                )
-                if has_prestart_points:
-                    reset_league_members_for_new_start(db, lg, cyc)
+            # هوشمندی کامل در پالایش کلیه لاگ‌ها و امتیازات مربوط به قبل از تاریخ شروع رسمی
+            cleanse_prestart_activity_and_scores(db, lg, cyc)
 
         set_system_state(db, "last_daily_job_date", today_str)
         db.commit()

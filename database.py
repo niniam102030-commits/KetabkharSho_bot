@@ -485,17 +485,9 @@ def init_db() -> None:
             if not lg.start_shamsi:
                 lg.start_shamsi = today_shamsi
             cyc = get_or_create_active_cycle(db, lg, default_start_shamsi=today_shamsi)
-            start_date_shamsi = cyc.start_shamsi or lg.start_shamsi
-            if not DateService.league_has_started(start_date_shamsi):
-                # اگر لیگ در آینده است و احیاناً کاربری در دوره ثبت‌نام امتیاز یا فعالیتی دارد، فوراً صفر شود
-                from handlers import reset_league_members_for_new_start
-                reset_league_members_for_new_start(db, lg, cyc)
-            elif DateService.calculate_league_day(start_date_shamsi) == 1:
-                reset_key = f"league_start_reset:{lg.id}:{cyc.id}"
-                if get_system_state(db, reset_key) != start_date_shamsi:
-                    from handlers import reset_league_members_for_new_start
-                    reset_league_members_for_new_start(db, lg, cyc)
-                    set_system_state(db, reset_key, start_date_shamsi, commit=False)
+            # پالایش هوشمند کلیه لاگ‌ها و امتیازات مربوط به قبل از تاریخ شروع در هر شرایط زمانی دیپلوی
+            from handlers import cleanse_prestart_activity_and_scores
+            cleanse_prestart_activity_and_scores(db, lg, cyc)
         db.commit()
 
 

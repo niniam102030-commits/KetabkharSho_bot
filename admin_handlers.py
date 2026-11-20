@@ -1686,11 +1686,10 @@ async def process_league_new_date(message: Message, state: FSMContext) -> None:
                     except ValueError:
                         pass
 
-        # اگر تاریخ شروع جدید در آینده باشد یا روز اول چله باشد، امتیاز و آمار کاربران فوراً صفر می‌شود
-        from handlers import reset_league_members_for_new_start
-        if not DateService.league_has_started(norm_shamsi) or new_day <= 1:
-            reset_league_members_for_new_start(db, lg, active_cycle)
-        else:
+        # پالایش و نادیده گرفتن کلیه لاگ‌ها و امتیازات پیش از تاریخ شروع رسمی جدید
+        from handlers import cleanse_prestart_activity_and_scores
+        cleanse_prestart_activity_and_scores(db, lg, active_cycle)
+        if DateService.league_has_started(norm_shamsi) and new_day > 1:
             # بازنگری و اصلاح امتیاز هدیه همگام‌سازی کاربران متناسب با تاریخ شروع جدید
             if old_start_shamsi and old_start_shamsi != norm_shamsi:
                 league_users = (

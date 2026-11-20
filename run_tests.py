@@ -110,6 +110,7 @@ from handlers import (
     midnight_job,
     _midnight_job_sync,
     reset_league_members_for_new_start,
+    cleanse_prestart_activity_and_scores,
     _build_study_reminders_outbox_sync,
     user_can_log_late,
     send_daily_admin_reports,
@@ -950,6 +951,56 @@ async def run_all_tests() -> None:
         rem_outbox_started = _build_study_reminders_outbox_sync(DateService.today_str(), force=True)
         started_rcpts = [item[0] for item in rem_outbox_started]
         assert FUTURE_USER_TG in started_rcpts
+
+        # ۶. شبیه‌سازی دیپلوی سرور پس از شروع لیگ (مثلاً روز ۲ یا دیرتر) در حالتی که کاربر امتیاز قبل از شروع داشته است
+        yesterday_date = DateService.yesterday_date()
+        yesterday_shamsi = DateService.date_to_shamsi(yesterday_date)
+        two_days_ago_str = (yesterday_date - timedelta(days=2)).strftime("%Y-%m-%d")
+        yesterday_str = yesterday_date.strftime("%Y-%m-%d")
+
+        lg_future.start_shamsi = yesterday_shamsi
+        cyc_future.start_shamsi = yesterday_shamsi
+        db.commit()
+
+        # ثبت لاگ قبل از شروع (۲ روز قبل) با ۲۰ امتیاز + ثبت لاگ معتبر در روز ۱ (دیروز) با ۱۰ امتیاز
+        db.add(ActivityLog(
+            user_id=u_fut.id,
+            league_id=lg_future.id,
+            cycle_id=cyc_future.id,
+            minutes=40,
+            points_earned=20.0,
+            log_date=two_days_ago_str,
+        ))
+        db.add(ActivityLog(
+            user_id=u_fut.id,
+            league_id=lg_future.id,
+            cycle_id=cyc_future.id,
+            minutes=20,
+            points_earned=10.0,
+            log_date=yesterday_str,
+        ))
+        u_fut.points = 30.0  # ۲۰ امتیاز قبل شروع + ۱۰ امتیاز دیروز
+        u_fut.total_minutes = 60
+        db.commit()
+
+        # اجرای پالایش هوشمند (همانند اتفاقی که در استارتاپ بات رخ می‌دهد)
+        cleanse_prestart_activity_and_scores(db, lg_future, cyc_future)
+        db.refresh(u_fut)
+
+        # ۲۰ امتیاز قبل از شروع باید کاملاً حذف شده باشد و فقط ۱۰ امتیاز دیروز باقی بماند
+        assert u_fut.points == 10.0, f"امتیاز کاربر تصحیح نشد: {u_fut.points}"
+        assert u_fut.total_minutes == 20
+        # لاگ قبل از شروع باید حذف شده باشد
+        pre_logs_count = db.query(ActivityLog).filter(
+            ActivityLog.league_id == lg_future.id,
+            ActivityLog.log_date == two_days_ago_str,
+        ).count()
+        assert pre_logs_count == 0
+        valid_logs_count = db.query(ActivityLog).filter(
+            ActivityLog.league_id == lg_future.id,
+            ActivityLog.log_date == yesterday_str,
+        ).count()
+        assert valid_logs_count == 1
 
     print("✅ [PASS] Scenario 13: Future start date league (no reminders, blocked study logging, guaranteed score zeroing) verified.")
 
