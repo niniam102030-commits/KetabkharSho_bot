@@ -1,9 +1,12 @@
 import os
 import re
+import time
+import secrets
 import asyncio
 import logging
+from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from aiogram import Router, F, Bot, BaseMiddleware
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
@@ -3147,6 +3150,282 @@ async def cb_menu_backup_db(callback: CallbackQuery) -> None:
             callback.message.chat.id,
             "❌ متأسفانه در تهیه یا ارسال فایل پایگاه داده خطایی رخ داد.",
         )
+
+
+# --- هندلر دریافت، اعتبارسنجی و اعمال فایل دیتابیس ارسالی ادمین ---
+_PENDING_DB_UPLOADS: Dict[str, Tuple[str, str, float]] = {}
+
+
+@admin_router.message(
+    StateFilter(None),
+    F.document,
+)
+async def handle_admin_database_upload(message: Message) -> None:
+    tg_id = str(message.from_user.id)
+    if not settings.is_super_admin(tg_id):
+        return
+
+    doc = message.document
+    if not doc:
+        return
+
+    fname = (doc.file_name or "").lower()
+    is_db_file = (
+        fname.endswith((".db", ".sqlite", ".sqlite3"))
+        or "ketabkharsho" in fname
+        or (doc.mime_type or "") in (
+            "application/x-sqlite3",
+            "application/vnd.sqlite3",
+            "application/octet-stream",
+        )
+    )
+    if not is_db_file:
+        return
+
+    await safe_reply(
+        message,
+        "⏳ در حال دانلود و اعتبارسنجی فایل پایگاه داده ارسالی، لطفاً شکیبا باشید...",
+    )
+
+    temp_token = secrets.token_hex(6)
+    temp_dir = Path(settings.BACKUP_DIR) / "temp_uploads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / f"temp_uploaded_{temp_token}.db"
+
+    try:
+        try:
+            await message.bot.download(doc, destination=temp_path)
+        except Exception:
+            f_info = await message.bot.get_file(doc.file_id)
+            if hasattr(message.bot, "download_file"):
+                await message.bot.download_file(f_info.file_path, destination=temp_path)
+            else:
+                await message.bot.download(f_info, destination=temp_path)
+
+        from database import validate_sqlite_file
+
+        val_ok, val_msg, stats = await asyncio.to_thread(validate_sqlite_file, str(temp_path))
+        if not val_ok:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+            await safe_reply(
+                message,
+                f"❌ فایل ارسالی ساختار معتبر پایگاه داده ربات کتابخوارشو را ندارد:\n_{escape_md(val_msg)}_",
+            )
+            return
+
+        from handlers import _format_file_size
+
+        f_size = os.path.getsize(temp_path)
+        _PENDING_DB_UPLOADS[temp_token] = (str(temp_path), doc.file_name or "database.db", time.time())
+
+        kb_rows = [
+            [
+                InlineKeyboardButton(
+                    text="🔀 ادغام هوشمند (افزودن داده‌های جدید)",
+                    callback_data=f"apply_db_merge_{temp_token}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 جایگزینی کامل (بازیابی قطعی)",
+                    callback_data=f"apply_db_replace_{temp_token}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ انصراف و حذف فایل",
+                    callback_data=f"apply_db_cancel_{temp_token}",
+                )
+            ],
+        ]
+
+        caption = (
+            f"📥 *فایل پایگاه داده با موفقیت دریافت و اعتبارسنجی شد.*\n\n"
+            f"📁 *نام فایل:* `{escape_md(doc.file_name or 'database.db')}`\n"
+            f"📦 *حجم:* *{_format_file_size(f_size)}*\n\n"
+            f"📊 *اطلاعات شناسایی‌شده در فایل:*\n"
+            f"🏢 مجموعه‌ها: *{stats.get('groups_count', 0)}* مجموعه (با رمزها و ادمین‌ها)\n"
+            f"🏆 لیگ‌ها: *{stats.get('leagues_count', 0)}* لیگ\n"
+            f"👥 کاربران: *{stats.get('users_count', 0)}* کاربر و پروفایل\n"
+            f"📝 ثبت‌های مطالعه: *{stats.get('logs_count', 0)}* رکورد\n"
+            f"💰 سوابق جریمه‌ها: *{stats.get('fines_count', 0)}* رکورد\n\n"
+            f"⚠️ *لطفاً نحوه اعمال داده‌ها را انتخاب فرمایید:*\n"
+            f"_(پیش از هر تغییری، یک نسخه پشتیبان خودکار از وضعیت فعلی سرور ذخیره خواهد شد)_"
+        )
+        await safe_reply(
+            message,
+            caption,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
+        )
+    except Exception as exc:
+        logger.error(f"خطا در پردازش فایل دیتابیس ارسالی: {exc}", exc_info=True)
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        await safe_reply(
+            message,
+            f"❌ در دریافت یا ذخیره فایل دیتابیس خطایی رخ داد: {escape_md(str(exc))}",
+        )
+
+
+@admin_router.callback_query(F.data.startswith("apply_db_merge_"))
+async def cb_apply_db_merge(callback: CallbackQuery) -> None:
+    tg_id = str(callback.from_user.id)
+    if not settings.is_super_admin(tg_id):
+        await callback.answer("عدم دسترسی", show_alert=True)
+        return
+
+    token = callback.data.replace("apply_db_merge_", "")
+    entry = _PENDING_DB_UPLOADS.get(token)
+    if not entry:
+        await callback.answer("اعتبار این درخواست منقضی شده است. لطفاً فایل را دوباره ارسال کنید.", show_alert=True)
+        return
+
+    temp_path_str, orig_name, _ = entry
+    await callback.answer("در حال ادغام هوشمند داده‌ها...")
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        "⏳ در حال ادغام داده‌ها (مجموعه‌ها، رمزها، کاربران، مسئولین جریمه و لاگ‌ها)، لطفاً کمی صبر فرمایید...",
+    )
+
+    from database import restore_database_merge
+
+    ok, msg, summary = await asyncio.to_thread(restore_database_merge, temp_path_str)
+    _PENDING_DB_UPLOADS.pop(token, None)
+    temp_p = Path(temp_path_str)
+    if temp_p.exists():
+        try:
+            temp_p.unlink()
+        except OSError:
+            pass
+
+    if not ok:
+        await safe_send_message(
+            callback.bot,
+            callback.message.chat.id,
+            f"❌ متأسفانه در ادغام پایگاه داده خطایی رخ داد:\n{msg}",
+        )
+        return
+
+    with get_db() as db:
+        AbsenceService.reconcile_historical_gaps(db)
+        AbsenceService.reconcile_streaks(db)
+
+    report_text = (
+        f"✅ *عملیات ادغام هوشمند پایگاه داده با موفقیت انجام شد!*\n\n"
+        f"📊 *گزارش تغییرات اعمال‌شده از فایل «{escape_md(orig_name)}»:*\n"
+        f"🏢 مجموعه‌ها: *{summary.get('groups', 0)}* مجموعه جدید اضافه شد\n"
+        f"🏆 لیگ‌ها: *{summary.get('leagues', 0)}* لیگ همگام‌سازی شد\n"
+        f"👥 کاربران: *{summary.get('users', 0)}* کاربر جدید اضافه و کاربران قبلی به‌روز شدند\n"
+        f"📝 لاگ‌های مطالعه: *{summary.get('logs', 0)}* ثبت مطالعه جدید وارد شد\n"
+        f"💰 سوابق جریمه‌ها: *{summary.get('fines', 0)}* جریمه تثبیت شد\n"
+        f"👮 مسئولین جریمه: *{summary.get('fine_managers', 0)}* نفر افزوده شدند\n\n"
+        f"💾 _نسخه پشتیبان ایمن از وضعیت قبل از ادغام در سرور ذخیره شد._\n"
+        f"✨ تمام اطلاعات، رمزها، کاربران و امتیازات اکنون در دسترس هستند."
+    )
+    await safe_send_message(callback.bot, callback.message.chat.id, report_text)
+
+
+@admin_router.callback_query(F.data.startswith("apply_db_replace_"))
+async def cb_apply_db_replace(callback: CallbackQuery) -> None:
+    tg_id = str(callback.from_user.id)
+    if not settings.is_super_admin(tg_id):
+        await callback.answer("عدم دسترسی", show_alert=True)
+        return
+
+    token = callback.data.replace("apply_db_replace_", "")
+    entry = _PENDING_DB_UPLOADS.get(token)
+    if not entry:
+        await callback.answer("اعتبار این درخواست منقضی شده است. لطفاً فایل را دوباره ارسال کنید.", show_alert=True)
+        return
+
+    temp_path_str, orig_name, _ = entry
+    await callback.answer("در حال جایگزینی کامل پایگاه داده...")
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        "⏳ در حال جایگزینی قطعی پایگاه داده با فایل ارسالی، لطفاً چند لحظه شکیبا باشید...",
+    )
+
+    from database import restore_database_replace
+
+    ok, msg, stats = await asyncio.to_thread(restore_database_replace, temp_path_str)
+    _PENDING_DB_UPLOADS.pop(token, None)
+    temp_p = Path(temp_path_str)
+    if temp_p.exists():
+        try:
+            temp_p.unlink()
+        except OSError:
+            pass
+
+    if not ok:
+        await safe_send_message(
+            callback.bot,
+            callback.message.chat.id,
+            f"❌ متأسفانه در جایگزینی پایگاه داده خطایی رخ داد:\n{msg}",
+        )
+        return
+
+    report_text = (
+        f"✅ *پایگاه داده ربات با موفقیت و به طور کامل جایگزین و بازیابی شد!*\n\n"
+        f"📁 *فایل اعمال‌شده:* `{escape_md(orig_name)}`\n"
+        f"🏢 مجموعه‌ها: *{stats.get('groups_count', 0)}*\n"
+        f"🏆 لیگ‌ها: *{stats.get('leagues_count', 0)}*\n"
+        f"👥 کاربران: *{stats.get('users_count', 0)}*\n"
+        f"📝 لاگ‌های مطالعه: *{stats.get('logs_count', 0)}*\n\n"
+        f"💾 _پیش از جایگزینی، یک نسخه پشتیبان امن از وضعیت قبلی در پوشه بکاپ سرور ذخیره شد._\n"
+        f"✨ کلیه بخش‌ها، رمزها و اطلاعات با موفقیت بارگذاری و فعال شدند."
+    )
+    await safe_send_message(callback.bot, callback.message.chat.id, report_text)
+
+
+@admin_router.callback_query(F.data.startswith("apply_db_cancel_"))
+async def cb_apply_db_cancel(callback: CallbackQuery) -> None:
+    token = callback.data.replace("apply_db_cancel_", "")
+    entry = _PENDING_DB_UPLOADS.pop(token, None)
+    if entry:
+        temp_p = Path(entry[0])
+        if temp_p.exists():
+            try:
+                temp_p.unlink()
+            except OSError:
+                pass
+    await callback.answer("عملیات لغو و فایل موقت حذف شد.")
+    try:
+        await callback.message.edit_text("❌ عملیات اعمال پایگاه داده لغو شد و فایل موقت حذف گردید.")
+    except Exception:
+        pass
+
+
+# --- راهنمای بازیابی پایگاه داده ---
+@admin_router.message(
+    StateFilter(None),
+    F.text.func(
+        lambda t: t
+        and t.strip().lower()
+        in {"/restore", "restore", "/import_db", "import_db", "بازیابی", "بازیابی دیتابیس"}
+    ),
+)
+async def cmd_restore_help(message: Message) -> None:
+    tg_id = str(message.from_user.id)
+    if not settings.is_super_admin(tg_id):
+        await safe_reply(message, "⛔ این بخش مخصوص مدیران ارشد ربات است.")
+        return
+
+    text = (
+        "📥 *راهنمای بارگذاری و بازیابی پایگاه داده:*\n\n"
+        "جهت بازیابی یا اضافه کردن اطلاعات:\n"
+        "کافیست فایل دیتابیس با پسوند `.db` (مثلاً فایلی که با دستور `/backup` ذخیره کرده‌اید) را به صورت **فایل (Document)** در همین چت ارسال فرمایید.\n\n"
+        "ربات بلافاصله فایل را اعتبارسنجی کرده و امکان **ادغام هوشمند (Merge)** یا **جایگزینی کامل (Replace)** را با حفظ کامل تمامی مجموعه‌ها، رمزها، کاربران، مسئولین جریمه و امتیازات در اختیارتان می‌گذارد."
+    )
+    await safe_reply(message, text)
 
 
 def _build_cycle_history_excel_sync(group_ids: List[int]) -> str:

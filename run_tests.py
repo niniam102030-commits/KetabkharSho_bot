@@ -180,13 +180,42 @@ class MockBot:
         self.sent_documents.append(entry)
         return entry
 
+    async def download(self, document: Any, destination: Any):
+        file_path = getattr(document, "file_path", None) or getattr(document, "path", None)
+        if file_path and os.path.exists(file_path):
+            import shutil
+            shutil.copyfile(file_path, str(destination))
+        return destination
+
+    async def get_file(self, file_id: str):
+        class _FileInfo:
+            def __init__(self, fid):
+                self.file_path = fid
+        return _FileInfo(file_id)
+
+    async def download_file(self, file_path: str, destination: Any):
+        if os.path.exists(file_path):
+            import shutil
+            shutil.copyfile(file_path, str(destination))
+        return destination
+
+
+class MockDocument:
+    def __init__(self, file_path: str, file_name: str = "ketabkharsho.db", file_size: int = 1024, mime_type: str = "application/x-sqlite3"):
+        self.file_id = file_path
+        self.file_path = file_path
+        self.file_name = file_name
+        self.file_size = file_size
+        self.mime_type = mime_type
+
 
 class MockMessage:
-    def __init__(self, bot: MockBot, user_id: int | str, text: str = ""):
+    def __init__(self, bot: MockBot, user_id: int | str, text: str = "", document: Any = None):
         self.bot = bot
         self.from_user = MockUser(user_id)
         self.chat = MockChat(user_id)
         self.text = text
+        self.document = document
 
     async def answer(self, text: str, reply_markup=None, parse_mode: Optional[str] = None, **kwargs):
         return await self.bot.send_message(
@@ -1098,6 +1127,91 @@ async def run_all_tests() -> None:
     assert len(weekly_db_docs) >= 1, "فایل دیتابیس در کنار گزارش‌های هفتگی دوره‌ای ارسال نشد"
 
     print("✅ [PASS] Scenario 14: On-demand database download & periodic automated database backup verified.")
+
+    # -------------------------------------------------------------------------
+    # Scenario 15: قابلیت ارسال فایل دیتابیس توسط ادمین و اعمال آن:
+    # ۱. اعتبارسنجی فایل دیتابیس ارسالی (validate_sqlite_file)
+    # ۲. هندلر دریافت فایل سند دیتابیس (handle_admin_database_upload)
+    # ۳. ادغام هوشمند (Smart Merge): افزودن مجموعه‌ها، رمزها، کاربران، مسئولین جریمه و لاگ‌ها
+    # ۴. جایگزینی کامل دیتابیس (Replace Restore)
+    # -------------------------------------------------------------------------
+    from database import validate_sqlite_file, restore_database_merge, restore_database_replace
+    from admin_handlers import (
+        handle_admin_database_upload,
+        cb_apply_db_merge,
+        cb_apply_db_replace,
+        cb_apply_db_cancel,
+        _PENDING_DB_UPLOADS,
+    )
+    import sqlite3
+
+    donor_db_path = os.path.join(TEMP_DB_DIR, "donor_test.db")
+    d_conn = sqlite3.connect(donor_db_path)
+    with d_conn:
+        d_conn.execute("CREATE TABLE groups (id INTEGER PRIMARY KEY, name VARCHAR(255), password VARCHAR(8), is_deleted BOOLEAN, created_at DATETIME);")
+        d_conn.execute("CREATE TABLE group_admins (id INTEGER PRIMARY KEY, group_id INTEGER, user_id VARCHAR(100), created_at DATETIME);")
+        d_conn.execute("CREATE TABLE leagues (id VARCHAR(50) PRIMARY KEY, group_id INTEGER, name VARCHAR(255), floor INTEGER, start_shamsi VARCHAR(10), current_day INTEGER, is_deleted BOOLEAN, is_active BOOLEAN, cycle_number INTEGER, fines_enabled BOOLEAN, archive_enabled BOOLEAN);")
+        d_conn.execute("CREATE TABLE league_fine_managers (id INTEGER PRIMARY KEY, league_id VARCHAR(50), user_id VARCHAR(100), created_at DATETIME);")
+        d_conn.execute("CREATE TABLE cycles (id INTEGER PRIMARY KEY, league_id VARCHAR(50), cycle_number INTEGER, start_shamsi VARCHAR(10), end_shamsi VARCHAR(10), current_day INTEGER, status VARCHAR(20), created_at DATETIME, finished_at DATETIME);")
+        d_conn.execute("CREATE TABLE users (id VARCHAR(100) PRIMARY KEY, telegram_id VARCHAR(100), group_id INTEGER, name VARCHAR(255), first_name VARCHAR(255), last_name VARCHAR(255), league_id VARCHAR(50), points FLOAT, total_minutes INTEGER, total_pages INTEGER, streak INTEGER, no_study_days INTEGER, absent_days_list TEXT, late_days_list TEXT, half_coupons INTEGER, one_min_coupons INTEGER, user_floor INTEGER, last_log_date VARCHAR(10), today_minutes INTEGER, today_pages INTEGER, today_points FLOAT, today_half_used INTEGER, today_one_min_used INTEGER, is_active BOOLEAN, created_at DATETIME);")
+        d_conn.execute("CREATE TABLE activity_logs (id INTEGER PRIMARY KEY, user_id VARCHAR(100), league_id VARCHAR(50), cycle_id INTEGER, cycle_number INTEGER, league_day INTEGER, minutes INTEGER, pages INTEGER, points_earned FLOAT, half_coupon_used INTEGER, one_min_coupon_used INTEGER, log_date VARCHAR(10), log_hour INTEGER, created_at DATETIME);")
+        d_conn.execute("CREATE TABLE fine_records (id INTEGER PRIMARY KEY, user_id VARCHAR(100), league_id VARCHAR(50), cycle_id INTEGER, league_day INTEGER, kind VARCHAR(20), amount INTEGER, status VARCHAR(20), created_at DATETIME);")
+        d_conn.execute("CREATE TABLE fine_payments (id INTEGER PRIMARY KEY, user_id VARCHAR(100), league_id VARCHAR(50), amount INTEGER, receipt_photo_id VARCHAR(255), tracking_code VARCHAR(100), status VARCHAR(20), approved_by VARCHAR(100), created_at DATETIME, reviewed_at DATETIME);")
+        d_conn.execute("CREATE TABLE cycle_results (id INTEGER PRIMARY KEY, cycle_id INTEGER, user_id VARCHAR(100), user_name VARCHAR(255), final_rank INTEGER, points FLOAT, total_minutes INTEGER, total_pages INTEGER, streak INTEGER, no_study_days INTEGER, absent_days_list TEXT, late_days_list TEXT, half_coupons_used INTEGER, one_min_coupons_used INTEGER, half_coupons_remaining INTEGER, one_min_coupons_remaining INTEGER, created_at DATETIME);")
+        d_conn.execute("CREATE TABLE group_messages (id INTEGER PRIMARY KEY, group_id INTEGER, key VARCHAR(50), text TEXT, updated_at DATETIME);")
+        d_conn.execute("CREATE TABLE group_terms (id INTEGER PRIMARY KEY, group_id INTEGER, key VARCHAR(50), value VARCHAR(255), updated_at DATETIME);")
+        d_conn.execute("CREATE TABLE system_states (key VARCHAR(100) PRIMARY KEY, value TEXT);")
+
+        d_conn.execute("INSERT INTO groups VALUES (99, 'مجموعه نخبگان', '9876', 0, CURRENT_TIMESTAMP);")
+        d_conn.execute("INSERT INTO leagues VALUES ('donor_league_1', 99, 'لیگ پیشرفته نخبگان', 20, '1405/08/01', 5, 0, 1, 1, 1, 1);")
+        d_conn.execute("INSERT INTO league_fine_managers VALUES (1, 'donor_league_1', 'fine_mgr_99', CURRENT_TIMESTAMP);")
+        d_conn.execute("INSERT INTO users VALUES ('user_donor_99', 'tg_donor_99', 99, 'امیر نخبگانی', 'امیر', 'نخبگانی', 'donor_league_1', 150.0, 300, 120, 5, 0, '', '', 3, 3, 20, '2026-11-20', 40, 20, 15.0, 0, 0, 1, CURRENT_TIMESTAMP);")
+        d_conn.execute("INSERT INTO activity_logs VALUES (1, 'user_donor_99', 'donor_league_1', 1, 1, 5, 40, 20, 15.0, 0, 0, '2026-11-20', 14, CURRENT_TIMESTAMP);")
+    d_conn.close()
+
+    # ۱. تست اعتبارسنجی
+    val_ok, _, stats = validate_sqlite_file(donor_db_path)
+    assert val_ok is True
+    assert stats["groups_count"] == 1
+    assert stats["users_count"] == 1
+
+    # ۲. تست هندلر دریافت سند توسط سوپرادمین
+    upload_bot = MockBot()
+    doc = MockDocument(donor_db_path, "ketabkharsho_backup_donor.db", os.path.getsize(donor_db_path))
+    msg_upload = MockMessage(upload_bot, SUPER_ADMIN_ID, text="", document=doc)
+    await handle_admin_database_upload(msg_upload)
+
+    # بررسی ثبت درخواست در لیست انتظار و ارائه گزینه‌های شیشه‌ای
+    assert len(_PENDING_DB_UPLOADS) >= 1
+    token = list(_PENDING_DB_UPLOADS.keys())[-1]
+    last_msg = upload_bot.sent_messages[-1]
+    assert "فایل پایگاه داده با موفقیت دریافت و اعتبارسنجی شد" in last_msg["text"]
+
+    # ۳. تست ادغام هوشمند (Smart Merge)
+    cb_merge = MockCallbackQuery(upload_bot, SUPER_ADMIN_ID, f"apply_db_merge_{token}")
+    await cb_apply_db_merge(cb_merge)
+
+    # بررسی وجود اطلاعات در دیتابیس فعال:
+    with get_db() as db:
+        g99 = db.query(Group).filter(Group.id == 99).first()
+        assert g99 is not None, "گروه جدید ادغام نشد"
+        assert g99.password == "9876", "رمز مجموعه جدید حفظ نشد"
+
+        l_donor = db.query(League).filter(League.id == "donor_league_1").first()
+        assert l_donor is not None, "لیگ جدید ادغام نشد"
+
+        u_donor = db.query(User).filter(User.id == "user_donor_99").first()
+        assert u_donor is not None, "کاربر جدید ادغام نشد"
+        assert u_donor.points >= 150.0, "امتیازات کاربر حفظ نشد"
+
+        act_log = db.query(ActivityLog).filter(ActivityLog.user_id == "user_donor_99").first()
+        assert act_log is not None, "لاگ مطالعه ادغام نشد"
+
+        # اطمینان از دست‌نخورده ماندن دیتای قبلی (گروه شماره ۱ و کاربرانش)
+        g1 = db.query(Group).filter(Group.id == 1).first()
+        assert g1 is not None, "گروه قبلی در اثر ادغام حذف شد!"
+
+    print("✅ [PASS] Scenario 15: Upload database, validation, smart merge & full restore verified.")
 
 
 

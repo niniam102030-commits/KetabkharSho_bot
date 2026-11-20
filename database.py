@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 from contextlib import contextmanager
-from typing import Generator, Optional, List, Callable, TypeVar, Any
+from typing import Generator, Optional, List, Callable, TypeVar, Any, Dict, Tuple
 
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import make_url
@@ -182,6 +182,540 @@ def backup_database() -> Optional[str]:
     except Exception as exc:
         logger.error(f"خطا در تهیه بکاپ دیتابیس: {exc}")
         return None
+
+
+def get_live_sqlite_path() -> Optional[Path]:
+    """دریافت مسیر واقعی فایل SQLite فعال"""
+    if not settings.is_sqlite or not settings.DATABASE_URL.startswith("sqlite:///"):
+        return None
+    db_file_str = settings.DATABASE_URL.replace("sqlite:///", "", 1)
+    return Path(db_file_str)
+
+
+def validate_sqlite_file(file_path: str) -> Tuple[bool, str, Dict[str, int]]:
+    """
+    اعتبارسنجی فایل دیتابیس SQLite:
+    بررسی امضای فایل، دستور PRAGMA integrity_check و وجود جداول کلیدی ربات.
+    """
+    path = Path(file_path)
+    if not path.exists() or path.stat().st_size < 100:
+        return False, "فایل وجود ندارد یا حجم آن بسیار کم و نامعتبر است.", {}
+
+    stats: Dict[str, int] = {
+        "groups_count": 0,
+        "leagues_count": 0,
+        "users_count": 0,
+        "logs_count": 0,
+        "fines_count": 0,
+    }
+
+    try:
+        conn = sqlite3.connect(str(path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            integrity = conn.execute("PRAGMA integrity_check;").fetchone()
+            if not integrity or str(integrity[0]).lower() != "ok":
+                return False, "فایل دیتابیس آسیب‌دیده است (Integrity check failed).", {}
+
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if not any(k in tables for k in ("users", "leagues", "groups")):
+                return False, "جداول استاندارد ربات کتابخوارشو در فایل یافت نشد.", {}
+
+            if "groups" in tables:
+                stats["groups_count"] = conn.execute("SELECT count(*) FROM groups").fetchone()[0]
+            if "leagues" in tables:
+                stats["leagues_count"] = conn.execute("SELECT count(*) FROM leagues").fetchone()[0]
+            if "users" in tables:
+                stats["users_count"] = conn.execute("SELECT count(*) FROM users").fetchone()[0]
+            if "activity_logs" in tables:
+                stats["logs_count"] = conn.execute("SELECT count(*) FROM activity_logs").fetchone()[0]
+            if "fine_records" in tables:
+                stats["fines_count"] = conn.execute("SELECT count(*) FROM fine_records").fetchone()[0]
+
+            return True, "فایل پایگاه داده معتبر است.", stats
+        finally:
+            conn.close()
+    except Exception as exc:
+        return False, f"خطا در اعتبارسنجی فایل دیتابیس: {exc}", {}
+
+
+def restore_database_replace(uploaded_file_path: str) -> Tuple[bool, str, Dict[str, int]]:
+    """
+    جایگزینی و بازیابی کامل پایگاه داده فعال با فایل آپلودشده.
+    پیش از جایگزینی، یک نسخه پشتیبان امن خودکار از پایگاه داده فعال تهیه می‌شود.
+    """
+    live_path = get_live_sqlite_path()
+    if not live_path:
+        return False, "پایگاه داده فعال SQLite یافت نشد.", {}
+
+    val_ok, val_msg, stats = validate_sqlite_file(uploaded_file_path)
+    if not val_ok:
+        return False, f"فایل نامعتبر است: {val_msg}", {}
+
+    # ۱. تهیه بکاپ امن از وضعیت جاری قبل از جایگزینی
+    backup_database()
+
+    # ۲. بستن کانکشن‌های باز SQLAlchemy
+    engine.dispose()
+
+    try:
+        src_conn = sqlite3.connect(uploaded_file_path)
+        dst_conn = sqlite3.connect(str(live_path), timeout=60)
+        try:
+            with dst_conn:
+                src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+            src_conn.close()
+
+        # چک‌پوینت وال جهت اعمال قطعی روی دیسک
+        chk = sqlite3.connect(str(live_path), timeout=30)
+        chk.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        chk.close()
+
+        logger.info(f"پایگاه داده با موفقیت با فایل {uploaded_file_path} جایگزین شد.")
+        return True, "پایگاه داده با موفقیت جایگزین و بازیابی شد.", stats
+    except Exception as exc:
+        logger.error(f"خطا در جایگزینی کامل دیتابیس: {exc}", exc_info=True)
+        return False, f"خطا در جایگزینی دیتابیس: {exc}", {}
+
+
+def _get_table_columns_info(conn: sqlite3.Connection, table_name: str) -> Dict[str, Dict[str, Any]]:
+    rows = conn.execute(f"PRAGMA table_info({table_name});").fetchall()
+    return {
+        r[1]: {
+            "type": r[2],
+            "notnull": bool(r[3]),
+            "default": r[4],
+            "pk": bool(r[5]),
+        }
+        for r in rows
+    }
+
+
+COMMON_COLUMN_DEFAULTS: Dict[str, Any] = {
+    "is_finished": 0,
+    "is_deleted": 0,
+    "is_active": 1,
+    "archive_enabled": 1,
+    "fines_enabled": 0,
+    "fine_absent_amount": 0,
+    "fine_late_amount": 0,
+    "floor": 10,
+    "current_day": 1,
+    "cycle_number": 1,
+    "password": "1234",
+    "half_coupons": 3,
+    "one_min_coupons": 3,
+    "streak": 0,
+    "no_study_days": 0,
+    "points": 0.0,
+    "total_minutes": 0,
+    "total_pages": 0,
+    "absent_days_list": "",
+    "late_days_list": "",
+    "minutes": 0,
+    "pages": 0,
+    "points_earned": 0.0,
+    "half_coupon_used": 0,
+    "one_min_coupon_used": 0,
+    "amount": 0,
+    "status": "pending",
+}
+
+
+def _prepare_row_for_destination(
+    dst_info: Dict[str, Dict[str, Any]],
+    row_dict: Dict[str, Any],
+    defaults: Dict[str, Any],
+) -> Dict[str, Any]:
+    final_dict: Dict[str, Any] = {}
+    for col, info in dst_info.items():
+        if col in row_dict and row_dict[col] is not None:
+            final_dict[col] = row_dict[col]
+        elif info["notnull"] and info["default"] is None:
+            final_dict[col] = defaults.get(col, 0)
+    return final_dict
+
+
+def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str, int]]:
+    """
+    ادغام هوشمند و افزودن داده‌های جدید از فایل پایگاه داده آپلودشده به پایگاه داده فعال:
+    مجموعه‌ها، رمزها، ادمین‌ها، لیگ‌ها، چله‌ها، کاربران، امتیازات، لاگ‌ها و جریمه‌ها.
+    پیش از اعمال، بکاپ امن خودکار گرفته می‌شود.
+    """
+    live_path = get_live_sqlite_path()
+    if not live_path or not live_path.exists():
+        return False, "پایگاه داده فعال SQLite یافت نشد.", {}
+
+    val_ok, val_msg, _ = validate_sqlite_file(uploaded_file_path)
+    if not val_ok:
+        return False, f"فایل نامعتبر است: {val_msg}", {}
+
+    # ۱. بکاپ ایمن از دیتابیس جاری قبل از هر تغییر
+    backup_database()
+
+    summary: Dict[str, int] = {
+        "groups": 0,
+        "admins": 0,
+        "leagues": 0,
+        "fine_managers": 0,
+        "cycles": 0,
+        "users": 0,
+        "logs": 0,
+        "fines": 0,
+        "payments": 0,
+        "results": 0,
+        "messages": 0,
+        "terms": 0,
+    }
+
+    src_conn = sqlite3.connect(uploaded_file_path)
+    src_conn.row_factory = sqlite3.Row
+    dst_conn = sqlite3.connect(str(live_path), timeout=60)
+    dst_conn.row_factory = sqlite3.Row
+
+    try:
+        src_tables = {
+            r[0]
+            for r in src_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+        with dst_conn:
+            # ۱. ادغام groups (مجموعه‌ها و رمزهای عبور)
+            if "groups" in src_tables:
+                dst_cols = _get_table_columns_info(dst_conn, "groups")
+                for row in src_conn.execute("SELECT * FROM groups").fetchall():
+                    g_dict = dict(row)
+                    exists = dst_conn.execute(
+                        "SELECT id FROM groups WHERE id = ?", (g_dict["id"],)
+                    ).fetchone()
+                    if exists:
+                        dst_conn.execute(
+                            "UPDATE groups SET name = ?, password = ?, is_deleted = ? WHERE id = ?",
+                            (
+                                g_dict["name"],
+                                g_dict.get("password", "1234"),
+                                g_dict.get("is_deleted", 0),
+                                g_dict["id"],
+                            ),
+                        )
+                    else:
+                        final_g = _prepare_row_for_destination(dst_cols, g_dict, COMMON_COLUMN_DEFAULTS)
+                        cols = list(final_g.keys())
+                        placeholders = ", ".join(["?"] * len(cols))
+                        dst_conn.execute(
+                            f"INSERT INTO groups ({', '.join(cols)}) VALUES ({placeholders})",
+                            [final_g[c] for c in cols],
+                        )
+                        summary["groups"] += 1
+
+            # ۲. ادغام group_admins
+            if "group_admins" in src_tables:
+                dst_cols = _get_table_columns_info(dst_conn, "group_admins")
+                for row in src_conn.execute("SELECT * FROM group_admins").fetchall():
+                    ga_dict = dict(row)
+                    exists = dst_conn.execute(
+                        "SELECT id FROM group_admins WHERE group_id = ? AND user_id = ?",
+                        (ga_dict["group_id"], ga_dict["user_id"]),
+                    ).fetchone()
+                    if not exists:
+                        final_ga = _prepare_row_for_destination(dst_cols, ga_dict, COMMON_COLUMN_DEFAULTS)
+                        cols = [k for k in final_ga.keys() if k != "id"]
+                        placeholders = ", ".join(["?"] * len(cols))
+                        dst_conn.execute(
+                            f"INSERT INTO group_admins ({', '.join(cols)}) VALUES ({placeholders})",
+                            [final_ga[c] for c in cols],
+                        )
+                        summary["admins"] += 1
+
+            # ۳. ادغام leagues
+            if "leagues" in src_tables:
+                dst_cols = _get_table_columns_info(dst_conn, "leagues")
+                for row in src_conn.execute("SELECT * FROM leagues").fetchall():
+                    l_dict = dict(row)
+                    exists = dst_conn.execute(
+                        "SELECT id FROM leagues WHERE id = ?", (l_dict["id"],)
+                    ).fetchone()
+                    if exists:
+                        dst_conn.execute(
+                            """
+                            UPDATE leagues SET
+                                name = ?, floor = ?, start_shamsi = ?, current_day = ?,
+                                is_deleted = ?, is_active = ?, cycle_number = ?,
+                                fines_enabled = ?, archive_enabled = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                l_dict["name"],
+                                l_dict.get("floor", 10),
+                                l_dict.get("start_shamsi"),
+                                l_dict.get("current_day", 1),
+                                l_dict.get("is_deleted", 0),
+                                l_dict.get("is_active", 1),
+                                l_dict.get("cycle_number", 1),
+                                l_dict.get("fines_enabled", 0),
+                                l_dict.get("archive_enabled", 1),
+                                l_dict["id"],
+                            ),
+                        )
+                    else:
+                        final_l = _prepare_row_for_destination(dst_cols, l_dict, COMMON_COLUMN_DEFAULTS)
+                        cols = list(final_l.keys())
+                        placeholders = ", ".join(["?"] * len(cols))
+                        dst_conn.execute(
+                            f"INSERT INTO leagues ({', '.join(cols)}) VALUES ({placeholders})",
+                            [final_l[c] for c in cols],
+                        )
+                        summary["leagues"] += 1
+
+            # ۴. ادغام league_fine_managers (مسئولین جریمه)
+            if "league_fine_managers" in src_tables:
+                dst_cols = _get_table_columns_info(dst_conn, "league_fine_managers")
+                for row in src_conn.execute("SELECT * FROM league_fine_managers").fetchall():
+                    fm_dict = dict(row)
+                    tg_val = fm_dict.get("telegram_id") or fm_dict.get("user_id")
+                    if not tg_val:
+                        continue
+                    fm_dict["telegram_id"] = str(tg_val)
+                    exists = dst_conn.execute(
+                        "SELECT id FROM league_fine_managers WHERE league_id = ? AND telegram_id = ?",
+                        (fm_dict["league_id"], fm_dict["telegram_id"]),
+                    ).fetchone()
+                    if not exists:
+                        final_fm = _prepare_row_for_destination(dst_cols, fm_dict, COMMON_COLUMN_DEFAULTS)
+                        cols = [k for k in final_fm.keys() if k != "id"]
+                        placeholders = ", ".join(["?"] * len(cols))
+                        dst_conn.execute(
+                            f"INSERT INTO league_fine_managers ({', '.join(cols)}) VALUES ({placeholders})",
+                            [final_fm[c] for c in cols],
+                        )
+                        summary["fine_managers"] += 1
+
+            # ۵. ادغام cycles
+            if "cycles" in src_tables:
+                dst_cols = _get_table_columns_info(dst_conn, "cycles")
+                for row in src_conn.execute("SELECT * FROM cycles").fetchall():
+                    c_dict = dict(row)
+                    exists = dst_conn.execute(
+                        "SELECT id FROM cycles WHERE id = ?", (c_dict["id"],)
+                    ).fetchone()
+                    if not exists:
+                        final_c = _prepare_row_for_destination(dst_cols, c_dict, COMMON_COLUMN_DEFAULTS)
+                        cols = list(final_c.keys())
+                        placeholders = ", ".join(["?"] * len(cols))
+                        dst_conn.execute(
+                            f"INSERT INTO cycles ({', '.join(cols)}) VALUES ({placeholders})",
+                            [final_c[c] for c in cols],
+                        )
+                        summary["cycles"] += 1
+
+            # ۶. ادغام users (کاربران، امتیازات، کوپن‌ها و زنجیره‌ها)
+            if "users" in src_tables:
+                dst_cols = _get_table_columns_info(dst_conn, "users")
+                for row in src_conn.execute("SELECT * FROM users").fetchall():
+                    u_dict = dict(row)
+                    exists = dst_conn.execute(
+                        "SELECT id FROM users WHERE id = ?",
+                        (u_dict["id"],),
+                    ).fetchone()
+                    if exists:
+                        dst_conn.execute(
+                            """
+                            UPDATE users SET 
+                                name = ?, first_name = ?, last_name = ?, league_id = ?,
+                                points = MAX(points, ?),
+                                total_minutes = MAX(total_minutes, ?),
+                                total_pages = MAX(total_pages, ?),
+                                streak = MAX(streak, ?),
+                                half_coupons = ?, one_min_coupons = ?,
+                                is_active = ?
+                            WHERE id = ?
+                            """,
+                            (
+                                u_dict["name"],
+                                u_dict.get("first_name"),
+                                u_dict.get("last_name"),
+                                u_dict.get("league_id"),
+                                float(u_dict.get("points") or 0.0),
+                                int(u_dict.get("total_minutes") or 0),
+                                int(u_dict.get("total_pages") or 0),
+                                int(u_dict.get("streak") or 0),
+                                int(u_dict.get("half_coupons") or 3),
+                                int(u_dict.get("one_min_coupons") or 3),
+                                int(u_dict.get("is_active") or 1),
+                                u_dict["id"],
+                            ),
+                        )
+                    else:
+                        final_u = _prepare_row_for_destination(dst_cols, u_dict, COMMON_COLUMN_DEFAULTS)
+                        cols = list(final_u.keys())
+                        placeholders = ", ".join(["?"] * len(cols))
+                        dst_conn.execute(
+                            f"INSERT INTO users ({', '.join(cols)}) VALUES ({placeholders})",
+                            [final_u[c] for c in cols],
+                        )
+                        summary["users"] += 1
+
+            # ۷. ادغام activity_logs (لاگ‌های ثبت مطالعه)
+            if "activity_logs" in src_tables:
+                dst_cols = _get_table_columns_info(dst_conn, "activity_logs")
+                for row in src_conn.execute("SELECT * FROM activity_logs").fetchall():
+                    a_dict = dict(row)
+                    exists = dst_conn.execute(
+                        "SELECT id FROM activity_logs WHERE user_id = ? AND league_id = ? AND log_date = ?",
+                        (a_dict["user_id"], a_dict.get("league_id"), a_dict["log_date"]),
+                    ).fetchone()
+                    if not exists:
+                        final_a = _prepare_row_for_destination(dst_cols, a_dict, COMMON_COLUMN_DEFAULTS)
+                        cols = [k for k in final_a.keys() if k != "id"]
+                        placeholders = ", ".join(["?"] * len(cols))
+                        dst_conn.execute(
+                            f"INSERT INTO activity_logs ({', '.join(cols)}) VALUES ({placeholders})",
+                            [final_a[c] for c in cols],
+                        )
+                        summary["logs"] += 1
+
+            # ۸. ادغام fine_records (سوابق جریمه)
+            if "fine_records" in src_tables:
+                dst_cols = _get_table_columns_info(dst_conn, "fine_records")
+                for row in src_conn.execute("SELECT * FROM fine_records").fetchall():
+                    fr_dict = dict(row)
+                    exists = dst_conn.execute(
+                        "SELECT id FROM fine_records WHERE user_id = ? AND league_id = ? AND cycle_id = ? AND league_day = ? AND kind = ?",
+                        (
+                            fr_dict["user_id"],
+                            fr_dict.get("league_id"),
+                            fr_dict.get("cycle_id"),
+                            fr_dict.get("league_day"),
+                            fr_dict["kind"],
+                        ),
+                    ).fetchone()
+                    if not exists:
+                        final_fr = _prepare_row_for_destination(dst_cols, fr_dict, COMMON_COLUMN_DEFAULTS)
+                        cols = [k for k in final_fr.keys() if k != "id"]
+                        placeholders = ", ".join(["?"] * len(cols))
+                        dst_conn.execute(
+                            f"INSERT INTO fine_records ({', '.join(cols)}) VALUES ({placeholders})",
+                            [final_fr[c] for c in cols],
+                        )
+                        summary["fines"] += 1
+
+            # ۹. ادغام fine_payments (پرداخت‌های جریمه)
+            if "fine_payments" in src_tables:
+                dst_cols = _get_table_columns_info(dst_conn, "fine_payments")
+                for row in src_conn.execute("SELECT * FROM fine_payments").fetchall():
+                    fp_dict = dict(row)
+                    exists = dst_conn.execute(
+                        "SELECT id FROM fine_payments WHERE user_id = ? AND league_id = ? AND tracking_code = ?",
+                        (fp_dict["user_id"], fp_dict.get("league_id"), fp_dict.get("tracking_code")),
+                    ).fetchone()
+                    if not exists:
+                        final_fp = _prepare_row_for_destination(dst_cols, fp_dict, COMMON_COLUMN_DEFAULTS)
+                        cols = [k for k in final_fp.keys() if k != "id"]
+                        placeholders = ", ".join(["?"] * len(cols))
+                        dst_conn.execute(
+                            f"INSERT INTO fine_payments ({', '.join(cols)}) VALUES ({placeholders})",
+                            [final_fp[c] for c in cols],
+                        )
+                        summary["payments"] += 1
+
+            # ۱۰. ادغام cycle_results (کارنامه‌های دوره‌ها)
+            if "cycle_results" in src_tables:
+                dst_cols = _get_table_columns_info(dst_conn, "cycle_results")
+                for row in src_conn.execute("SELECT * FROM cycle_results").fetchall():
+                    cr_dict = dict(row)
+                    exists = dst_conn.execute(
+                        "SELECT id FROM cycle_results WHERE cycle_id = ? AND user_id = ?",
+                        (cr_dict.get("cycle_id"), cr_dict["user_id"]),
+                    ).fetchone()
+                    if not exists:
+                        final_cr = _prepare_row_for_destination(dst_cols, cr_dict, COMMON_COLUMN_DEFAULTS)
+                        cols = [k for k in final_cr.keys() if k != "id"]
+                        placeholders = ", ".join(["?"] * len(cols))
+                        dst_conn.execute(
+                            f"INSERT INTO cycle_results ({', '.join(cols)}) VALUES ({placeholders})",
+                            [final_cr[c] for c in cols],
+                        )
+                        summary["results"] += 1
+
+            # ۱۱. ادغام group_messages و group_terms
+            if "group_messages" in src_tables:
+                dst_cols = _get_table_columns_info(dst_conn, "group_messages")
+                for row in src_conn.execute("SELECT * FROM group_messages").fetchall():
+                    gm_dict = dict(row)
+                    exists = dst_conn.execute(
+                        "SELECT id FROM group_messages WHERE group_id = ? AND key = ?",
+                        (gm_dict["group_id"], gm_dict["key"]),
+                    ).fetchone()
+                    if exists:
+                        dst_conn.execute(
+                            "UPDATE group_messages SET text = ? WHERE id = ?",
+                            (gm_dict["text"], exists["id"]),
+                        )
+                    else:
+                        final_gm = _prepare_row_for_destination(dst_cols, gm_dict, COMMON_COLUMN_DEFAULTS)
+                        cols = [k for k in final_gm.keys() if k != "id"]
+                        placeholders = ", ".join(["?"] * len(cols))
+                        dst_conn.execute(
+                            f"INSERT INTO group_messages ({', '.join(cols)}) VALUES ({placeholders})",
+                            [final_gm[c] for c in cols],
+                        )
+                        summary["messages"] += 1
+
+            if "group_terms" in src_tables:
+                dst_cols = _get_table_columns_info(dst_conn, "group_terms")
+                for row in src_conn.execute("SELECT * FROM group_terms").fetchall():
+                    gt_dict = dict(row)
+                    exists = dst_conn.execute(
+                        "SELECT id FROM group_terms WHERE group_id = ? AND key = ?",
+                        (gt_dict["group_id"], gt_dict["key"]),
+                    ).fetchone()
+                    if exists:
+                        dst_conn.execute(
+                            "UPDATE group_terms SET value = ? WHERE id = ?",
+                            (gt_dict["value"], exists["id"]),
+                        )
+                    else:
+                        final_gt = _prepare_row_for_destination(dst_cols, gt_dict, COMMON_COLUMN_DEFAULTS)
+                        cols = [k for k in final_gt.keys() if k != "id"]
+                        placeholders = ", ".join(["?"] * len(cols))
+                        dst_conn.execute(
+                            f"INSERT INTO group_terms ({', '.join(cols)}) VALUES ({placeholders})",
+                            [final_gt[c] for c in cols],
+                        )
+                        summary["terms"] += 1
+
+            # ۱۲. ادغام system_states
+            if "system_states" in src_tables:
+                for row in src_conn.execute("SELECT * FROM system_states").fetchall():
+                    ss_dict = dict(row)
+                    exists = dst_conn.execute(
+                        "SELECT key FROM system_states WHERE key = ?", (ss_dict["key"],)
+                    ).fetchone()
+                    if not exists:
+                        dst_conn.execute(
+                            "INSERT INTO system_states (key, value) VALUES (?, ?)",
+                            (ss_dict["key"], ss_dict["value"]),
+                        )
+
+        # اجرای WAL checkpoint
+        dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        logger.info(f"ادغام هوشمند پایگاه داده با موفقیت انجام شد: {summary}")
+        return True, "عملیات ادغام هوشمند با موفقیت تکمیل شد.", summary
+    except Exception as exc:
+        logger.error(f"خطا در ادغام هوشمند دیتابیس: {exc}", exc_info=True)
+        return False, f"خطا در ادغام دیتابیس: {exc}", summary
+    finally:
+        dst_conn.close()
+        src_conn.close()
 
 
 def _run_migrations() -> None:
