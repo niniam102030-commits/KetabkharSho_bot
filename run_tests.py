@@ -1044,6 +1044,61 @@ async def run_all_tests() -> None:
 
     print("✅ [PASS] Scenario 13: Future start date league (no reminders, blocked study logging, guaranteed score zeroing, past cycles preserved) verified.")
 
+    # -------------------------------------------------------------------------
+    # Scenario 14: قابلیت دریافت و پشتیبان‌گیری فایل خام دیتابیس (.db):
+    # ۱. تابع هسته send_database_backup: ارسال اسنپ‌شات آنلاین به همراه آمار دقیق
+    # ۲. دستور /backup: دسترسی مجاز فقط برای سوپرادمین‌ها و عدم دسترسی کاربر عادی
+    # ۳. دکمه شیشه‌ای adm_menu_backup_db: ارسال فایل به ادمین
+    # ۴. ارسال خودکار فایل دیتابیس به همراه گزارش‌های هفتگی اکسل جمعه‌ها
+    # -------------------------------------------------------------------------
+    from handlers import send_database_backup
+    from admin_handlers import cmd_export_database, cb_menu_backup_db
+
+    # ۱. تست مستقیم تابع هسته send_database_backup
+    db_bot = MockBot()
+    ok_backup = await send_database_backup(db_bot, [SUPER_ADMIN_ID], event_title="تست مستقیم بکاپ دیتابیس")
+    assert ok_backup is True, "تهیه و ارسال اسنپ‌شات دیتابیس با شکست مواجه شد"
+    assert len(db_bot.sent_documents) >= 1
+    doc_entry = db_bot.sent_documents[-1]
+    assert doc_entry["chat_id"] == str(SUPER_ADMIN_ID)
+    assert doc_entry["file_path"].endswith(".db")
+    assert doc_entry["exists_at_send"] is True
+    assert doc_entry["size"] > 0
+    assert "نسخه پشتیبان پایگاه داده" in doc_entry["caption"]
+    assert "تست مستقیم بکاپ دیتابیس" in doc_entry["caption"]
+
+    # ۲. تست دستور متنی /backup
+    # ۲.۱. کاربر غیرسوپرادمین (رد دسترسی)
+    non_sa_bot = MockBot()
+    await cmd_export_database(MockMessage(non_sa_bot, "998877", "/backup"))
+    assert any("دسترسی به دریافت فایل پایگاه داده فقط مخصوص مدیران ارشد" in m["text"] for m in non_sa_bot.sent_messages)
+    assert len(non_sa_bot.sent_documents) == 0
+
+    # ۲.۲. سوپرادمین (تایید و ارسال سند)
+    sa_bot = MockBot()
+    await cmd_export_database(MockMessage(sa_bot, SUPER_ADMIN_ID, "/backup"))
+    assert any("در حال تهیه نسخه پشتیبان" in m["text"] for m in sa_bot.sent_messages)
+    assert len(sa_bot.sent_documents) == 1
+    assert sa_bot.sent_documents[0]["file_path"].endswith(".db")
+
+    # ۳. تست کال‌بک کوئری adm_menu_backup_db
+    cb_bot = MockBot()
+    cb_query_sa = MockCallbackQuery(cb_bot, SUPER_ADMIN_ID, "adm_menu_backup_db")
+    await cb_menu_backup_db(cb_query_sa)
+    assert len(cb_bot.sent_documents) == 1
+    assert cb_bot.sent_documents[0]["file_path"].endswith(".db")
+
+    # ۴. تست ارسال خودکار به همراه گزارش‌های هفتگی جمعه (send_weekly_reports)
+    weekly_bot = MockBot()
+    await send_weekly_reports(weekly_bot, force=True)
+    weekly_db_docs = [
+        d for d in weekly_bot.sent_documents
+        if d["file_path"].endswith(".db") and "گزارش هفتگی" in d["caption"]
+    ]
+    assert len(weekly_db_docs) >= 1, "فایل دیتابیس در کنار گزارش‌های هفتگی دوره‌ای ارسال نشد"
+
+    print("✅ [PASS] Scenario 14: On-demand database download & periodic automated database backup verified.")
+
 
 
 

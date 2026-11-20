@@ -3070,6 +3070,85 @@ async def cb_menu_excel(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+# --- دستور و دکمه دریافت و دانلود فایل دیتابیس (فقط برای سوپرادمین‌ها) ---
+DATABASE_BACKUP_COMMANDS = {
+    "/backup",
+    "backup",
+    "/backup_db",
+    "backup_db",
+    "/getdb",
+    "getdb",
+    "/db",
+    "db",
+    "بکاپ",
+    "پشتیبان",
+    "دانلود دیتابیس",
+    "دریافت دیتابیس",
+}
+
+
+@admin_router.message(
+    StateFilter(None),
+    F.text.func(lambda t: t and t.strip().lower() in DATABASE_BACKUP_COMMANDS),
+)
+async def cmd_export_database(message: Message) -> None:
+    tg_id = str(message.from_user.id)
+    if not settings.is_super_admin(tg_id):
+        await safe_reply(
+            message,
+            "⛔ دسترسی به دریافت فایل پایگاه داده فقط مخصوص مدیران ارشد ربات است.",
+        )
+        return
+
+    await safe_reply(
+        message,
+        "⏳ در حال تهیه نسخه پشتیبان امن (Online Snapshot) از پایگاه داده، لطفاً صبر کنید...",
+    )
+    from handlers import send_database_backup
+
+    ok = await send_database_backup(
+        bot=message.bot,
+        recipients=[tg_id],
+        event_title="درخواست مستقیم ادمین اصلی",
+    )
+    if not ok:
+        await safe_reply(
+            message,
+            "❌ متأسفانه در تهیه یا ارسال فایل پایگاه داده خطایی رخ داد. لطفاً لاگ‌های سیستم را بررسی فرمایید.",
+        )
+
+
+@admin_router.callback_query(F.data == "adm_menu_backup_db")
+async def cb_menu_backup_db(callback: CallbackQuery) -> None:
+    tg_id = str(callback.from_user.id)
+    if not settings.is_super_admin(tg_id):
+        await callback.answer(
+            "⛔ این بخش مخصوص مدیران ارشد ربات است.",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer("در حال آماده‌سازی دیتابیس...")
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        "⏳ در حال تهیه نسخه پشتیبان امن (Online Snapshot) از پایگاه داده، لطفاً چند لحظه صبر کنید...",
+    )
+    from handlers import send_database_backup
+
+    ok = await send_database_backup(
+        bot=callback.bot,
+        recipients=[tg_id],
+        event_title="درخواست از پنل مدیریت",
+    )
+    if not ok:
+        await safe_send_message(
+            callback.bot,
+            callback.message.chat.id,
+            "❌ متأسفانه در تهیه یا ارسال فایل پایگاه داده خطایی رخ داد.",
+        )
+
+
 def _build_cycle_history_excel_sync(group_ids: List[int]) -> str:
     """تولید همگام اکسل آرشیو تاریخچه چله‌ها در ترد جداگانه با نشست دیتابیس مستقل"""
     with get_db() as db:

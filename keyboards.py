@@ -192,6 +192,12 @@ def get_admin_main_inline_menu() -> InlineKeyboardMarkup:
                     callback_data="adm_menu_excel",
                 ),
             ],
+            [
+                InlineKeyboardButton(
+                    text="💾 دریافت فایل دیتابیس (پشتیبان)",
+                    callback_data="adm_menu_backup_db",
+                ),
+            ],
         ]
     )
 

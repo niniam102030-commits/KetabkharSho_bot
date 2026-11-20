@@ -35,6 +35,7 @@ from database import (
     is_user_admin,
     get_system_state,
     set_system_state,
+    backup_database,
 )
 from models import (
     Group,
@@ -2295,6 +2296,96 @@ async def send_startup_notification(bot: Bot, force: bool = False) -> int:
         return 0
 
 
+def _format_file_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} بایت"
+    elif size_bytes < 1024 * 1024:
+        return f"{round(size_bytes / 1024, 1)} کیلوبایت"
+    else:
+        return f"{round(size_bytes / (1024 * 1024), 2)} مگابایت"
+
+
+def _get_database_stats_sync() -> Dict[str, Any]:
+    with get_db() as db:
+        users_count = db.query(User).filter(User.is_active == True).count()
+        groups_count = db.query(Group).filter(Group.is_deleted == False).count()
+        leagues_count = (
+            db.query(League)
+            .filter(League.is_deleted == False, League.is_active == True)
+            .count()
+        )
+        logs_count = db.query(ActivityLog).count()
+    return {
+        "users_count": users_count,
+        "groups_count": groups_count,
+        "leagues_count": leagues_count,
+        "logs_count": logs_count,
+    }
+
+
+async def send_database_backup(
+    bot: Bot,
+    recipients: List[str] | Set[str],
+    event_title: str = "پشتیبان‌گیری دستی",
+    throttle: Optional[BroadcastThrottle] = None,
+) -> bool:
+    """
+    تهیه نسخه پشتیبان امن (Online Snapshot) از دیتابیس و ارسال فایل .db برای گیرندگان مجاز
+    همراه با آمار جامع و تاریخ و ساعت به وقت تهران.
+    """
+    if not recipients:
+        return False
+
+    try:
+        backup_file = await asyncio.to_thread(backup_database)
+        if not backup_file or not os.path.exists(backup_file):
+            logger.error("فایل بکاپ دیتابیس ایجاد نشد یا در دسترس نیست.")
+            return False
+
+        file_size = os.path.getsize(backup_file)
+        file_size_str = _format_file_size(file_size)
+        stats = await asyncio.to_thread(_get_database_stats_sync)
+
+        time_str = DateService.now_iran_time_str()
+        full_date_shamsi = DateService.today_shamsi_full()
+        commit_hash = SystemService.get_version_commit()
+        commit_str = f"`{commit_hash}`" if commit_hash and commit_hash != "ناشناخته" else "ثبت‌نشده"
+
+        caption = (
+            f"💾 *نسخه پشتیبان پایگاه داده ربات کتابخوارشو*\n"
+            f"🏷️ رویداد: *{escape_md(event_title)}*\n"
+            f"📅 زمان: `{full_date_shamsi}` | ساعت `{time_str}` (تهران)\n"
+            f"📦 حجم فایل: *{file_size_str}*\n"
+            f"👥 کاربران فعال: *{stats['users_count']}* نفر | 🏢 مجموعه‌ها: *{stats['groups_count']}*\n"
+            f"🏆 لیگ‌های فعال: *{stats['leagues_count']}* لیگ | 📝 ثبت‌های مطالعه: *{stats['logs_count']}* رکورد\n"
+            f"🔖 نسخه سورس: {commit_str}\n\n"
+            f"⚠️ _این فایل شامل کلیه اطلاعات اعضا، لیگ‌ها، چله‌ها و لاگ‌های مطالعه است. لطفاً آن را در محلی امن نگهداری فرمایید._"
+        )
+
+        sent_count = 0
+        for rcpt in sorted(set(str(r).strip() for r in recipients if str(r).strip())):
+            try:
+                ok = await safe_send_document(
+                    bot,
+                    rcpt,
+                    backup_file,
+                    caption=caption,
+                    throttle=throttle,
+                )
+                if ok:
+                    sent_count += 1
+            except Exception as exc:
+                logger.warning(f"خطا در ارسال فایل دیتابیس به {rcpt}: {exc}")
+
+        logger.info(
+            f"نسخه پشتیبان دیتابیس ({file_size_str}) برای {sent_count} از {len(recipients)} گیرنده با موفقیت ارسال شد."
+        )
+        return sent_count > 0
+    except Exception as exc:
+        logger.error(f"خطای مدیریت‌شده در تهیه و ارسال نسخه پشتیبان دیتابیس: {exc}", exc_info=True)
+        return False
+
+
 def _init_daily_admin_reports_sync(today_str: str, force: bool) -> Optional[List[str]]:
     with get_db() as db:
         last_run = get_system_state(db, "last_daily_admin_report_date")
@@ -2609,6 +2700,18 @@ async def _dispatch_cycle_rollover(bot: Bot, payload: Dict[str, Any]) -> None:
                 )
             except Exception as exc:
                 logger.warning(f"خطا در ارسال کارنامه پایان چله به {rcpt}: {exc}")
+
+        # ارسال خودکار فایل دیتابیس به همراه کارنامه پایان چله به سوپرادمین‌ها
+        try:
+            super_admin_ids = {str(sa).strip() for sa in settings.ADMIN_IDS if str(sa).strip()}
+            await send_database_backup(
+                bot=bot,
+                recipients=super_admin_ids,
+                event_title=f"پایان چله {payload.get('cycle_number', '')} لیگ «{payload.get('league_name', '')}»",
+                throttle=throttle,
+            )
+        except Exception as exc:
+            logger.warning(f"خطا در ارسال نسخه پشتیبان دیتابیس در پایان چله: {exc}")
     finally:
         if os.path.exists(excel_path):
             try:

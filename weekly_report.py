@@ -117,6 +117,25 @@ async def send_weekly_reports(bot: Bot, force: bool = False) -> None:
 
     logger.info(f"گزارش‌های هفتگی جمعه برای تاریخ {today_str} با موفقیت ارسال شد.")
 
+    # ۴. ارسال خودکار فایل دیتابیس به همراه گزارش‌های دوره‌ای برای مدیران اصلی
+    try:
+        from handlers import send_database_backup
+        await send_database_backup(
+            bot=bot,
+            recipients=super_admin_ids,
+            event_title="گزارش هفتگی دوره‌ای جمعه",
+            throttle=throttle,
+        )
+        if settings.ARCHIVE_CHANNEL:
+            await send_database_backup(
+                bot=bot,
+                recipients=[settings.ARCHIVE_CHANNEL],
+                event_title="گزارش هفتگی دوره‌ای جمعه (کانال آرشیو)",
+                throttle=throttle,
+            )
+    except Exception as exc:
+        logger.error(f"خطا در ارسال خودکار نسخه پشتیبان دیتابیس در گزارش هفتگی: {exc}", exc_info=True)
+
 
 def _build_weekly_task_sync(
     league_id: str, super_admin_ids: Set[str]

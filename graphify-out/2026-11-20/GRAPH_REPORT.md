@@ -1,17 +1,17 @@
 # Graph Report - ربات کتابخوارشو  (2026-11-20)
 
 ## Corpus Check
-- 16 files · ~90,465 words
+- 16 files · ~90,609 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 7 file(s) not represented in the graph (top: (none) 5, .example 1, .bat 1)
 
 ## Summary
 - 745 nodes · 3322 edges · 23 communities (16 shown, 7 thin omitted)
-- Extraction: 88% EXTRACTED · 12% INFERRED · 0% AMBIGUOUS · INFERRED: 412 edges (avg confidence: 0.94)
+- Extraction: 88% EXTRACTED · 12% INFERRED · 0% AMBIGUOUS · INFERRED: 411 edges (avg confidence: 0.94)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `b4200fa6`
+- Built from commit: `ccdef1bb`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -150,7 +150,7 @@ _Questions this graph is uniquely positioned to answer:_
   _Cohesion score 0.0706140350877193 - nodes in this community are weakly interconnected._
 - **Why does `League` connect `League` to `fine_handlers.py`, `send_weekly_reports`, `fine_service.py`, `run_all_tests`, `AbsenceService`, `run_tests.py`, `init_db`, `DateService`, `safe_send`, `User`, `ReportService`, `services.py`, `database.py`, `Cycle`, `admin_handlers.py`, `handlers.py`?**
   _High betweenness centrality (0.073) - this node is a cross-community bridge._
-- **Are the 9 inferred relationships involving `run_all_tests()` (e.g. with `AdminStates` and `StudyStates`) actually correct?**
-  _`run_all_tests()` has 9 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 8 inferred relationships involving `run_all_tests()` (e.g. with `AdminStates` and `StudyStates`) actually correct?**
+  _`run_all_tests()` has 8 INFERRED edges - model-reasoned connections that need verification._
 - **Should `send_weekly_reports` be split into smaller, more focused modules?**
   _Cohesion score 0.11083743842364532 - nodes in this community are weakly interconnected._
