@@ -11,6 +11,27 @@ services:
       - PYTHONUNBUFFERED=1
       - BACKUP_DIR=/app/data/backups
       - REPORTS_DIR=/app/data/reports
+      - LOG_FILE=/app/logs/bot.log
+      - BOT_TOKEN=${BOT_TOKEN}
+      - API_URL=${API_URL:-https://tapi.bale.ai}
+      - BALE_API_URL=${BALE_API_URL:-https://tapi.bale.ai}
+      - ADMIN_IDS=${ADMIN_IDS}
+      - SUPER_ADMIN_IDS=${SUPER_ADMIN_IDS:-}
+      - SUPERADMIN_PASSPHRASE=${SUPERADMIN_PASSPHRASE:-ali102030}
+      - ARCHIVE_CHANNEL=${ARCHIVE_CHANNEL:-}
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///./data/ketabkharsho.db}
+      - DEFAULT_FLOOR=${DEFAULT_FLOOR:-10}
+      - DEFAULT_LEAGUE_FLOOR=${DEFAULT_LEAGUE_FLOOR:-10}
+      - LEAGUE_DURATION=${LEAGUE_DURATION:-40}
+      - CYCLE_DAYS=${CYCLE_DAYS:-40}
+      - DEFAULT_HALF_COUPONS=${DEFAULT_HALF_COUPONS:-5}
+      - DEFAULT_ONE_MIN_COUPONS=${DEFAULT_ONE_MIN_COUPONS:-1}
+      - REMINDER_HOUR=${REMINDER_HOUR:-22}
+      - DAILY_REPORT_HOUR=${DAILY_REPORT_HOUR:-8}
+      - ADMIN_REPORT_HOUR=${ADMIN_REPORT_HOUR:-1}
+      - WEEKLY_REPORT_HOUR=${WEEKLY_REPORT_HOUR:-2}
+      - DEBUG=${DEBUG:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       # ذخیره‌سازی پایدار دیتابیس، خروجی‌های اکسل و بکاپ‌ها روی دیسک سرور
       - ./data:/app/data
