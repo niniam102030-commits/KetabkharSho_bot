@@ -1,6 +1,8 @@
+import os
 import re
 import uuid
 import logging
+import subprocess
 from pathlib import Path
 from datetime import datetime, date, timedelta, timezone
 from typing import Tuple, List, Dict, Any, Optional, Iterable, Union
@@ -324,6 +326,53 @@ class DateService:
         if not user.created_at:
             return True
         return cls.get_user_join_date(user) < cls.today_date()
+
+
+# ===========================================================================
+# ۱.۵ سرویس اطلاعات سیستم و نگارش نرم‌افزار (SystemService)
+# ===========================================================================
+class SystemService:
+    """سرویس اطلاعات سیستم، نگارش برنامه و متغیرهای استقرار سرور"""
+
+    @staticmethod
+    def get_version_commit() -> Optional[str]:
+        """
+        دریافت شناسه کوتاه کامیت/نسخه برنامه.
+        ابتدا متغیرهای محیطی استقرار سرور (مانند SOURCE_COMMIT در Coolify یا GIT_COMMIT) بررسی می‌شوند.
+        در صورت عدم وجود، فایل‌های نسخه احتمالی و سپس مخزن محلی Git بررسی می‌شوند.
+        """
+        # ۱. متغیرهای محیطی استقرار سرور (Coolify / Docker / CI)
+        for env_key in ("SOURCE_COMMIT", "GIT_COMMIT", "COMMIT_HASH", "APP_VERSION"):
+            raw_val = os.getenv(env_key, "").strip()
+            if raw_val:
+                return raw_val[:7]
+
+        # ۲. بررسی فایل‌های رایج نسخه در ریشه پروژه
+        for filename in ("version.txt", "commit.txt", ".commit", "VERSION"):
+            vf = Path(filename)
+            if vf.is_file():
+                try:
+                    content = vf.read_text(encoding="utf-8").strip()
+                    if content:
+                        return content[:7]
+                except Exception:
+                    pass
+
+        # ۳. تلاش برای خواندن آخرین کامیت از مخزن محلی گیت در صورت در دسترس بودن
+        try:
+            res = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=2,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()[:7]
+        except Exception:
+            pass
+
+        return None
 
 
 # ===========================================================================

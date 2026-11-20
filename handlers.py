@@ -47,6 +47,7 @@ from models import (
 )
 from services import (
     DateService,
+    SystemService,
     ScoringService,
     ReportService,
     AbsenceService,
@@ -2105,49 +2106,79 @@ async def midnight_job(bot: Bot, force: bool = False) -> None:
         )
 
 
+_startup_notification_sent: bool = False
+
+
+def _get_superadmin_recipients() -> set[str]:
+    """دریافت شناسه‌های عددی ادمین‌های اصلی (سوپرادمین‌ها) از تنظیمات/فایل .env"""
+    return {str(sa).strip() for sa in settings.ADMIN_IDS if str(sa).strip()}
+
+
 def _get_all_admin_recipients_sync() -> set[str]:
-    with get_db() as db:
-        admin_recipients: set[str] = {
-            str(sa).strip() for sa in settings.ADMIN_IDS if str(sa).strip()
-        }
-        group_admins = db.query(GroupAdmin).all()
-        for ga in group_admins:
-            if ga.user_id and str(ga.user_id).strip():
-                admin_recipients.add(str(ga.user_id).strip())
-    return admin_recipients
+    """سازگاری با نسخه‌های قبلی: دریافت ادمین‌های اصلی از تنظیمات"""
+    return _get_superadmin_recipients()
 
 
-async def send_startup_notification(bot: Bot) -> int:
+async def send_startup_notification(bot: Bot, force: bool = False) -> int:
     """
-    ارسال پیام فعال‌شدن ربات به همراه تاریخ شمسی و ساعت دقیق به وقت ایران برای ادمین‌ها.
-    این پیام در زمان اجرای ربات برای تمامی مدیران ارشد (ADMIN_IDS) و مدیران مجموعه‌ها ارسال می‌شود.
-    خروجی: تعداد ادمین‌هایی که پیام با موفقیت به آن‌ها ارسال شده است.
+    ارسال پیام اعلان راه‌اندازی (Startup Notification) به ادمین‌های اصلی ربات (ADMIN_IDS در فایل .env).
+    
+    ویژگی‌ها:
+    - ارسال در چرخه شروع به کار سرویس (تنها یک بار در هر بار اجرای پروسه مگر با force=True)
+    - نمایش زمان دقیق اجرا به وقت تهران (Asia/Tehran)
+    - نمایش شناسه نسخه/کامیت در صورت وجود SOURCE_COMMIT یا GIT_COMMIT یا دسترسی به گیت
+    - مدیریت خطای ایمن (Zero-Crash): مانع شروع به کار ربات نمی‌شود
+    - خروجی: تعداد ادمین‌هایی که پیام با موفقیت به آن‌ها ارسال شد
     """
-    time_str = DateService.now_iran_time_str()
-    full_date_shamsi = DateService.today_shamsi_full()
+    global _startup_notification_sent
+    if _startup_notification_sent and not force:
+        logger.debug("اعلان استارتاپ قبلاً در این دور اجرای ربات ارسال شده است؛ از ارسال تکراری صرف‌نظر شد.")
+        return 0
 
-    startup_text = (
-        "🟢 *ربات «کتابخوارشو» با موفقیت فعال شد!*\n\n"
-        f"📅 *تاریخ فعال‌سازی (شمسی):* `{full_date_shamsi}`\n"
-        f"⏰ *ساعت دقیق (به وقت ایران):* `{time_str}`\n\n"
-        "✨ وضعیت سیستم: آنلاین و آماده دریافت پیام‌ها"
-    )
+    try:
+        time_str = DateService.now_iran_time_str()
+        full_date_shamsi = DateService.today_shamsi_full()
+        commit_hash = SystemService.get_version_commit()
 
-    admin_recipients = await asyncio.to_thread(_get_all_admin_recipients_sync)
+        lines = [
+            "✅ *نسخه جدید ربات با موفقیت روی سرور اجرا و فعال شد!*",
+            "",
+            f"📅 *تاریخ:* `{full_date_shamsi}`",
+            f"⏰ *زمان اجرا (به وقت تهران):* `{time_str}`",
+        ]
+        if commit_hash:
+            lines.append(f"🔖 *شناسه نسخه (کامیت):* `{commit_hash}`")
+        lines.extend([
+            "",
+            "✨ *وضعیت سیستم:* آنلاین و آماده دریافت پیام‌ها",
+        ])
+        startup_text = "\n".join(lines)
 
-    sent_count = 0
-    for admin_id in admin_recipients:
-        try:
-            res = await safe_send(bot, admin_id, startup_text)
-            if res:
-                sent_count += 1
-        except Exception as exc:
-            logger.warning(f"عدم امکان ارسال پیام فعال‌سازی به ادمین {admin_id}: {exc}")
+        admin_recipients = _get_superadmin_recipients()
+        if not admin_recipients:
+            logger.warning("هیچ شناسه ادمین اصلی در ADMIN_IDS یافت نشد؛ اعلان راه‌اندازی ارسال نشد.")
+            _startup_notification_sent = True
+            return 0
 
-    logger.info(
-        f"پیام فعال‌سازی ربات (ساعت {time_str} - تاریخ {full_date_shamsi}) برای {sent_count} نفر از {len(admin_recipients)} ادمین ارسال شد."
-    )
-    return sent_count
+        sent_count = 0
+        for admin_id in admin_recipients:
+            try:
+                res = await safe_send(bot, admin_id, startup_text)
+                if res:
+                    sent_count += 1
+            except Exception as exc:
+                logger.warning(f"عدم امکان ارسال پیام اعلان راه‌اندازی به ادمین اصلی {admin_id}: {exc}")
+
+        _startup_notification_sent = True
+        logger.info(
+            f"اعلان راه‌اندازی ربات (ساعت {time_str} - تاریخ {full_date_shamsi}"
+            + (f" - کامیت {commit_hash}" if commit_hash else "")
+            + f") برای {sent_count} نفر از {len(admin_recipients)} ادمین اصلی ارسال شد."
+        )
+        return sent_count
+    except Exception as top_exc:
+        logger.error(f"خطای مدیریت‌شده در ارسال اعلان راه‌اندازی ربات (استارتاپ): {top_exc}", exc_info=True)
+        return 0
 
 
 def _init_daily_admin_reports_sync(today_str: str, force: bool) -> Optional[List[str]]:

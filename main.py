@@ -166,12 +166,23 @@ async def main() -> None:
     dp.include_router(user_router)
     dp.include_router(fine_router)
 
+    # ثبت هوک استارتاپ چرخه حیات فریمورک aiogram
+    @dp.startup()
+    async def on_startup(bot: Bot) -> None:
+        try:
+            await send_startup_notification(bot)
+        except Exception as exc:
+            logger.error(f"خطای مدیریت‌شده در هوک استارتاپ دیسپچر: {exc}", exc_info=True)
+
     # راه‌اندازی زمان‌بند خودکار و اجرای جبرانی جاب‌های جاافتاده
     scheduler = setup_scheduler(bot)
     await run_startup_catchups(bot)
 
-    # ارسال پیام فعال‌سازی ربات به همراه تاریخ شمسی و ساعت دقیق به وقت ایران به تمامی ادمین‌ها
-    await send_startup_notification(bot)
+    # ارسال پیام اعلان راه‌اندازی (نسخه جدید / استارتاپ) به ادمین‌های اصلی ربات
+    try:
+        await send_startup_notification(bot)
+    except Exception as exc:
+        logger.error(f"خطای مدیریت‌شده در ارسال اعلان استارتاپ ربات: {exc}", exc_info=True)
 
     logger.info(
         f"ربات باشگاه کتابخوانی «کتابخوارشو» متصل به {settings.API_URL} آماده دریافت پیام‌هاست..."

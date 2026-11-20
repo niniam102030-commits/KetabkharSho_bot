@@ -4020,7 +4020,7 @@ async def cmd_test_startup_notification(message: Message) -> None:
     from handlers import send_startup_notification
 
     await safe_reply(message, "⏳ در حال ارسال پیام تست فعال‌سازی (استارتاپ) به ادمین‌ها...")
-    count = await send_startup_notification(message.bot)
+    count = await send_startup_notification(message.bot, force=True)
     await safe_reply(
         message,
         f"✅ پیام فعال‌سازی ربات با تاریخ شمسی و ساعت ایران برای {count} نفر از ادمین‌ها ارسال گردید.",
