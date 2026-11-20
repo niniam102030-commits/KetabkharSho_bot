@@ -1272,6 +1272,62 @@ async def run_all_tests() -> None:
 
     print("✅ [PASS] Scenario 16: Secret superadmin passphrase 'ali102030' (case-insensitive & persistent) verified.")
 
+    # -------------------------------------------------------------------------
+    # Scenario 17: عزل سوپرادمین جدید توسط سوپرادمین‌های قبلی با کلیدهای شیشه‌ای:
+    # ۱. سوپرادمین اصلی لیست سوپرادمین‌ها را باز می‌کند
+    # ۲. سوپرادمین اصلی درخواست عزل TEST_PROMOTEE_ID را ثبت می‌کند
+    # ۳. تایید عزل، سلب دسترسی در حافظه و دیتابیس، و ارسال اعلان به کاربر
+    # ۴. تضمین غیرقابل عزل بودن ادمین‌های ریشه (.env)
+    # -------------------------------------------------------------------------
+    from admin_handlers import (
+        cb_menu_manage_superadmins,
+        cb_revoke_sa_prompt,
+        cb_revoke_sa_confirm,
+    )
+    from database import demote_super_admin
+
+    # ۱. باز کردن منوی شیشه‌ای مدیریت سوپرادمین‌ها
+    manage_bot = MockBot()
+    cb_menu = MockCallbackQuery(manage_bot, SUPER_ADMIN_ID, "adm_menu_manage_superadmins")
+    await cb_menu_manage_superadmins(cb_menu)
+    last_msg = (manage_bot.edited_messages or manage_bot.sent_messages)[-1]
+    assert "مدیریت مدیران ارشد ربات" in last_msg["text"]
+
+    # ۲. مرحله تایید عزل برای TEST_PROMOTEE_ID
+    prompt_bot = MockBot()
+    cb_prompt = MockCallbackQuery(prompt_bot, SUPER_ADMIN_ID, f"revoke_sa_prompt_{TEST_PROMOTEE_ID}")
+    await cb_revoke_sa_prompt(cb_prompt)
+    prompt_msg = (prompt_bot.edited_messages or prompt_bot.sent_messages)[-1]
+    assert "تایید عزل مدیر ارشد" in prompt_msg["text"]
+    assert TEST_PROMOTEE_ID in prompt_msg["text"]
+
+    # ۳. تایید قطعی عزل
+    confirm_bot = MockBot()
+    cb_confirm = MockCallbackQuery(confirm_bot, SUPER_ADMIN_ID, f"revoke_sa_confirm_{TEST_PROMOTEE_ID}")
+    await cb_revoke_sa_confirm(cb_confirm)
+
+    # بررسی سلب دسترسی در حافظه
+    assert not settings.is_super_admin(TEST_PROMOTEE_ID), "سوپرادمین عزل‌شده هنوز در حافظه دسترسی دارد!"
+
+    # بررسی حذف از دیتابیس
+    with get_db() as db:
+        val = get_system_state(db, f"superadmin_{TEST_PROMOTEE_ID}")
+        assert val is None, "کلید سوپرادمین هنوز در system_state باقی مانده است!"
+        ga = db.query(GroupAdmin).filter(GroupAdmin.group_id == 1, GroupAdmin.user_id == TEST_PROMOTEE_ID).first()
+        assert ga is None, "کاربر عزل‌شده هنوز در group_admins گروه ۱ حضور دارد!"
+
+    # بررسی ارسال پیام اعلان عزل به کاربر
+    revoked_user_notif = [m for m in confirm_bot.sent_messages if m.get("chat_id") == TEST_PROMOTEE_ID]
+    assert len(revoked_user_notif) >= 1, "پیام سلب دسترسی به کاربر ارسال نشد!"
+    assert "لغو گردید" in revoked_user_notif[0]["text"]
+
+    # ۴. بررسی عدم امکان عزل ادمین‌های ریشه (.env)
+    demote_root_ok, _ = demote_super_admin(SUPER_ADMIN_ID)
+    assert demote_root_ok is False, "ادمین ریشه نباید قابل عزل باشد!"
+    assert settings.is_super_admin(SUPER_ADMIN_ID), "ادمین ریشه نباید دسترسی‌اش سلب شود!"
+
+    print("✅ [PASS] Scenario 17: Superadmin revocation via inline buttons & root protection verified.")
+
 
 
 

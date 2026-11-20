@@ -158,10 +158,22 @@ class Config:
             if not (0 <= hour_val <= 23):
                 raise ValueError(f"خطا: ساعت {hour_name} باید عددی بین 0 تا 23 باشد.")
 
+    @property
+    def root_admin_ids(self) -> set[str]:
+        """شناسه‌های ادمین ریشه تعریف‌شده در فایل محیطی (غیرقابل عزل)"""
+        if not hasattr(self, "_root_admin_ids"):
+            from_admin = os.getenv("ADMIN_IDS", "")
+            from_super = os.getenv("SUPER_ADMIN_IDS", "")
+            combined = f"{from_admin},{from_super}"
+            self._root_admin_ids = {
+                x.strip() for x in combined.split(",") if x.strip()
+            }
+        return self._root_admin_ids
+
     def is_super_admin(self, user_id: str | int) -> bool:
         """بررسی مدیر ارشد بودن کاربر"""
         uid = str(user_id).strip()
-        if uid in self.ADMIN_IDS:
+        if any(str(a).strip() == uid for a in self.ADMIN_IDS):
             return True
         if hasattr(self, "_extra_superadmins") and uid in self._extra_superadmins:
             return True
@@ -170,11 +182,21 @@ class Config:
     def add_super_admin(self, user_id: str | int) -> None:
         """افزودن شناسه به لیست مدیران ارشد در حافظه"""
         uid = str(user_id).strip()
-        if uid not in self.ADMIN_IDS:
+        if not any(str(a).strip() == uid for a in self.ADMIN_IDS):
             self.ADMIN_IDS.append(uid)
         if not hasattr(self, "_extra_superadmins"):
             self._extra_superadmins = set()
         self._extra_superadmins.add(uid)
+
+    def remove_super_admin(self, user_id: str | int) -> bool:
+        """عزل مدیر ارشد موقت/اضافه‌شده (ادمین‌های ریشه فایل محیطی قابل عزل نیستند)"""
+        uid = str(user_id).strip()
+        if uid in self.root_admin_ids:
+            return False
+        self.ADMIN_IDS = [a for a in self.ADMIN_IDS if str(a).strip() != uid]
+        if hasattr(self, "_extra_superadmins") and uid in self._extra_superadmins:
+            self._extra_superadmins.discard(uid)
+        return True
 
 
 settings = Config()

@@ -194,9 +194,78 @@ def get_admin_main_inline_menu() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="💾 دریافت فایل دیتابیس (پشتیبان)",
+                    text="💾 دانلود دیتابیس",
                     callback_data="adm_menu_backup_db",
                 ),
+                InlineKeyboardButton(
+                    text="👑 مدیریت سوپرادمین‌ها",
+                    callback_data="adm_menu_manage_superadmins",
+                ),
+            ],
+        ]
+    )
+
+
+def get_superadmin_alert_keyboard(target_id: str) -> InlineKeyboardMarkup:
+    """دکمه شیشه‌ای عزل فوری در زیر پیام هشدار ارتقای سوپرادمین جدید"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⛔️ عزل فوری این سوپرادمین",
+                    callback_data=f"revoke_sa_prompt_{target_id}",
+                )
+            ]
+        ]
+    )
+
+
+def get_superadmins_list_keyboard(admins: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+    """کیبورد شیشه‌ای لیست سوپرادمین‌ها همراه با دکمه عزل برای موارد قابل‌عزل"""
+    rows: List[List[InlineKeyboardButton]] = []
+    for adm in admins:
+        uid = adm["uid"]
+        name = adm.get("name") or uid
+        is_root = adm.get("is_root", False)
+        if is_root:
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"🛡️ {name} (ادمین ریشه)",
+                    callback_data=f"sa_info_{uid}",
+                )
+            ])
+        else:
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"❌ عزل دسترسی: {name}",
+                    callback_data=f"revoke_sa_prompt_{uid}",
+                )
+            ])
+
+    rows.append([
+        InlineKeyboardButton(
+            text="🔙 بازگشت به منوی مدیریت",
+            callback_data="adm_main_menu",
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_confirm_revoke_sa_keyboard(target_id: str) -> InlineKeyboardMarkup:
+    """کیبورد شیشه‌ای تایید قطعی عزل سوپرادمین"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⚠️ بله، دسترسی فوراً عزل شود",
+                    callback_data=f"revoke_sa_confirm_{target_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 انصراف و بازگشت",
+                    callback_data="adm_menu_manage_superadmins",
+                )
             ],
         ]
     )

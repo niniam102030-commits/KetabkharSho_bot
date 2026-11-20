@@ -3113,11 +3113,14 @@ async def cmd_claim_superadmin(message: Message, state: FSMContext) -> None:
                 db.commit()
 
     logger.warning(f"Security audit: user {tg_id} promoted to superadmin via passphrase.")
+    from keyboards import get_superadmin_alert_keyboard
+    alert_kb = get_superadmin_alert_keyboard(tg_id)
     for adm_id in existing_admins:
         await safe_send_message(
             message.bot,
             adm_id,
             f"⚠️ *هشدار امنیتی:* کاربر با شناسه `{tg_id}` از طریق رمز اضطراری به مدیر ارشد (Superadmin) ارتقا یافت.",
+            reply_markup=alert_kb,
         )
 
     from keyboards import get_admin_main_inline_menu
@@ -3132,6 +3135,163 @@ async def cmd_claim_superadmin(message: Message, state: FSMContext) -> None:
         "👇 لطفاً یکی از گزینه‌های پنل مدیریت را انتخاب فرمایید:"
     )
     await safe_reply(message, caption, reply_markup=reply_kb)
+
+
+# --- مدیریت و عزل سوپرادمین‌ها (Superadmins Management & Revocation) ---
+
+def _get_superadmins_metadata() -> List[Dict[str, Any]]:
+    """استخراج لیست سوپرادمین‌های فعال به همراه نام و وضعیت ریشه/موقت"""
+    root_set = settings.root_admin_ids
+    all_admin_ids = list(dict.fromkeys([str(a).strip() for a in settings.ADMIN_IDS if str(a).strip()]))
+    with get_db() as db:
+        users = db.query(User).filter(User.id.in_(all_admin_ids)).all()
+        users_map = {
+            u.id: (u.name or f"{u.first_name or ''} {u.last_name or ''}").strip()
+            for u in users
+        }
+    res: List[Dict[str, Any]] = []
+    for uid in all_admin_ids:
+        name = users_map.get(uid) or f"کاربر {uid}"
+        res.append({
+            "uid": uid,
+            "name": name,
+            "is_root": uid in root_set,
+        })
+    return res
+
+
+@admin_router.callback_query(F.data == "adm_menu_manage_superadmins")
+async def cb_menu_manage_superadmins(callback: CallbackQuery) -> None:
+    tg_id = str(callback.from_user.id)
+    if not settings.is_super_admin(tg_id):
+        await callback.answer("این بخش مختص مدیران ارشد است.", show_alert=True)
+        return
+    await callback.answer()
+    admins_meta = _get_superadmins_metadata()
+    from keyboards import get_superadmins_list_keyboard
+    kb = get_superadmins_list_keyboard(admins_meta)
+
+    text = (
+        "👑 *مدیریت مدیران ارشد ربات (Superadmins)*\n\n"
+        "در این بخش لیست مدیران ارشد فعال نمایش داده شده است:\n"
+        "🛡️ *ادمین‌های ریشه:* ادمین‌های اصلی تعریف‌شده در فایل محیطی (.env) با دسترسی دائمی.\n"
+        "⚡️ *سوپرادمین‌های افزوده:* کاربرانی که از طریق رمز اضطراری ارتقا یافته‌اند و می‌توانید در صورت لزوم، دسترسی آن‌ها را با کلیک روی دکمه مربوطه فوراً عزل نمایید:"
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await safe_send_message(callback.bot, callback.message.chat.id, text, reply_markup=kb)
+
+
+@admin_router.message(
+    StateFilter(None),
+    F.text.func(lambda t: bool(t) and t.strip().lower() in {"/superadmins", "superadmins", "/admins", "admins", "مدیریت سوپرادمین", "مدیریت سوپرادمین‌ها", "مدیریت ادمین‌ها"}),
+)
+async def cmd_manage_superadmins_text(message: Message) -> None:
+    tg_id = str(message.from_user.id)
+    if not settings.is_super_admin(tg_id):
+        return
+    admins_meta = _get_superadmins_metadata()
+    from keyboards import get_superadmins_list_keyboard
+    kb = get_superadmins_list_keyboard(admins_meta)
+    text = (
+        "👑 *مدیریت مدیران ارشد ربات (Superadmins)*\n\n"
+        "در این بخش لیست مدیران ارشد فعال نمایش داده شده است:\n"
+        "🛡️ *ادمین‌های ریشه:* ادمین‌های اصلی تعریف‌شده در فایل محیطی (.env) با دسترسی دائمی.\n"
+        "⚡️ *سوپرادمین‌های افزوده:* کاربرانی که از طریق رمز اضطراری ارتقا یافته‌اند و می‌توانید در صورت لزوم، دسترسی آن‌ها را با کلیک روی دکمه مربوطه فوراً عزل نمایید:"
+    )
+    await safe_reply(message, text, reply_markup=kb)
+
+
+@admin_router.callback_query(F.data.startswith("revoke_sa_prompt_"))
+async def cb_revoke_sa_prompt(callback: CallbackQuery) -> None:
+    caller_id = str(callback.from_user.id)
+    if not settings.is_super_admin(caller_id):
+        await callback.answer("عدم دسترسی", show_alert=True)
+        return
+
+    target_id = callback.data.replace("revoke_sa_prompt_", "").strip()
+    if target_id == caller_id:
+        await callback.answer("شما نمی‌توانید دسترسی خودتان را عزل کنید!", show_alert=True)
+        return
+    if target_id in settings.root_admin_ids:
+        await callback.answer("این مدیر ارشد در فایل تنظیمات .env تعریف شده و قابل عزل نیست.", show_alert=True)
+        return
+
+    await callback.answer()
+    with get_db() as db:
+        u = db.query(User).filter(User.id == target_id).first()
+        target_name = (u.name if u and u.name else f"کاربر {target_id}")
+
+    from keyboards import get_confirm_revoke_sa_keyboard
+    kb = get_confirm_revoke_sa_keyboard(target_id)
+
+    text = (
+        "⚠️ *تایید عزل مدیر ارشد*\n\n"
+        f"آیا از لغو فوری دسترسی مدیر ارشد (Superadmin) برای کاربر زیر اطمینان دارید؟\n\n"
+        f"🆔 شناسه بله: `{target_id}`\n"
+        f"👤 نام: *{target_name}*\n\n"
+        "⚡️ _با تایید این عملیات، بلافاصله کلیه اختیارات مدیریتی این کاربر سلب شده و دسترسی وی به پنل و دیتابیس مسدود خواهد شد._"
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await safe_send_message(callback.bot, callback.message.chat.id, text, reply_markup=kb)
+
+
+@admin_router.callback_query(F.data.startswith("revoke_sa_confirm_"))
+async def cb_revoke_sa_confirm(callback: CallbackQuery) -> None:
+    caller_id = str(callback.from_user.id)
+    if not settings.is_super_admin(caller_id):
+        await callback.answer("عدم دسترسی", show_alert=True)
+        return
+
+    target_id = callback.data.replace("revoke_sa_confirm_", "").strip()
+    from database import demote_super_admin
+    ok, msg = demote_super_admin(target_id)
+    if not ok:
+        await callback.answer(msg, show_alert=True)
+        return
+
+    await callback.answer("دسترسی مدیر ارشد با موفقیت عزل گردید.", show_alert=True)
+
+    # اطلاع‌رسانی به خود کاربر عزل‌شده
+    await safe_send_message(
+        callback.bot,
+        target_id,
+        "⚠️ *اطلاعیه:* دسترسی مدیر ارشد (Superadmin) شما توسط ادمین اصلی ربات لغو گردید.",
+    )
+
+    admins_meta = _get_superadmins_metadata()
+    from keyboards import get_superadmins_list_keyboard
+    kb = get_superadmins_list_keyboard(admins_meta)
+
+    text = (
+        f"✅ *دسترسی سوپرادمین کاربر `{target_id}` با موفقیت لغو شد.*\n\n"
+        "📋 لیست به‌روز مدیران ارشد فعال:"
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await safe_send_message(callback.bot, callback.message.chat.id, text, reply_markup=kb)
+
+
+@admin_router.callback_query(F.data.startswith("sa_info_"))
+async def cb_sa_info(callback: CallbackQuery) -> None:
+    await callback.answer("🛡️ این مدیر ارشد در فایل تنظیمات .env تعریف شده و دائمی است.", show_alert=True)
+
+
+@admin_router.callback_query(F.data == "adm_main_menu")
+async def cb_adm_main_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    tg_id = str(callback.from_user.id)
+    text = _build_admin_help_text(settings.is_super_admin(tg_id))
+    from keyboards import get_admin_main_inline_menu
+    try:
+        await callback.message.edit_text(text, reply_markup=get_admin_main_inline_menu())
+    except Exception:
+        await safe_send_message(callback.bot, callback.message.chat.id, text, reply_markup=get_admin_main_inline_menu())
+    await callback.answer()
 
 
 # --- دستور و دکمه دریافت و دانلود فایل دیتابیس (فقط برای سوپرادمین‌ها) ---

@@ -165,6 +165,32 @@ def reload_superadmins_from_db() -> None:
                 settings.add_super_admin(uid)
 
 
+def demote_super_admin(user_id: str | int) -> Tuple[bool, str]:
+    """عزل کامل و پایدار سوپرادمین: حذف از حافظه، پایگاه داده و گروه مدیران"""
+    uid = str(user_id).strip()
+    if uid in settings.root_admin_ids:
+        return False, "این کاربر از ادمین‌های ریشه (تعریف‌شده در .env) است و قابل عزل نیست."
+
+    settings.remove_super_admin(uid)
+
+    with get_db() as db:
+        # حذف کلیدهای مربوط به این سوپرادمین از system_state
+        db.query(SystemState).filter(
+            (SystemState.key == f"superadmin_{uid}") | (SystemState.key == f"superadmin_{uid}_backup")
+        ).delete(synchronize_session=False)
+
+        # حذف از group_admins گروه پیش‌فرض
+        db.query(GroupAdmin).filter(
+            GroupAdmin.group_id == 1,
+            GroupAdmin.user_id == uid,
+        ).delete(synchronize_session=False)
+
+        db.commit()
+
+    logger.warning(f"Superadmin privilege revoked for user {uid}")
+    return True, f"دسترسی سوپرادمین برای کاربر {uid} با موفقیت لغو شد."
+
+
 def backup_database() -> Optional[str]:
     """تهیه نسخه پشتیبان خودکار: فایلی برای SQLite و pg_dump اختیاری برای PostgreSQL"""
     if not settings.is_sqlite:
