@@ -1969,19 +1969,23 @@ def reset_league_members_for_new_start(db: Session, league: League, cycle: Optio
     start_shamsi = cycle.start_shamsi or league.start_shamsi
     start_greg = DateService.get_date_for_league_day(start_shamsi, 1) if start_shamsi else None
 
-    # پاک‌سازی لاگ‌های ثبت‌شده قبل از شروع رسمی لیگ
+    # پاک‌سازی لاگ‌های ثبت‌شده قبل از شروع رسمی لیگ (فقط متعلق به همین چله جاری و همین لیگ)
+    cycle_filter = (
+        (ActivityLog.cycle_id == cycle.id)
+        | (
+            (ActivityLog.cycle_id == None)
+            & (ActivityLog.cycle_number == league.cycle_number)
+        )
+    )
     if not DateService.league_has_started(start_shamsi):
         db.query(ActivityLog).filter(
             ActivityLog.league_id == league.id,
-            (ActivityLog.cycle_id == cycle.id)
-            | (
-                (ActivityLog.cycle_id == None)
-                & (ActivityLog.cycle_number == league.cycle_number)
-            ),
+            cycle_filter,
         ).delete(synchronize_session=False)
     elif start_greg:
         db.query(ActivityLog).filter(
             ActivityLog.league_id == league.id,
+            cycle_filter,
             ActivityLog.log_date < start_greg,
         ).delete(synchronize_session=False)
 

@@ -1002,7 +1002,47 @@ async def run_all_tests() -> None:
         ).count()
         assert valid_logs_count == 1
 
-    print("✅ [PASS] Scenario 13: Future start date league (no reminders, blocked study logging, guaranteed score zeroing) verified.")
+        # ۷. سناریوی چله‌های قبلی و لیگ‌های دیگر:
+        # اطمینان از اینکه لاگ‌های مربوط به چله ۱ و لیگ‌های دیگر در صورت اجرای پالایش چله ۲ هرگز حذف نمی‌شوند
+        past_cycle_log = ActivityLog(
+            user_id=u_fut.id,
+            league_id=lg_future.id,
+            cycle_id=cyc_future.id,
+            cycle_number=1,  # چله قبلی
+            minutes=50,
+            points_earned=25.0,
+            log_date=two_days_ago_str,
+        )
+        db.add(past_cycle_log)
+
+        # ساخت چله ۲
+        cyc_future2 = Cycle(
+            league_id=lg_future.id,
+            cycle_number=2,
+            start_shamsi=yesterday_shamsi,
+            current_day=2,
+            status="active",
+        )
+        lg_future.cycle_number = 2
+        db.add(cyc_future2)
+        db.commit()
+        db.refresh(cyc_future2)
+
+        # اجرای مجدد پالایش برای چله ۲
+        cleanse_prestart_activity_and_scores(db, lg_future, cyc_future2)
+
+        # لاگ چله ۱ نباید حذف شده باشد
+        past_cycle_exists = db.query(ActivityLog).filter(
+            ActivityLog.league_id == lg_future.id,
+            ActivityLog.cycle_number == 1,
+        ).first()
+        assert past_cycle_exists is not None, "لاگ‌های چله قبلی به اشتباه حذف شدند!"
+
+        # همچنین بررسی بازسازی و حفظ زنجیره استمرار کاربر
+        db.refresh(u_fut)
+        assert u_fut.streak >= 1, f"زنجیره استمرار کاربر برای روزهای معتبر حفظ نشد: {u_fut.streak}"
+
+    print("✅ [PASS] Scenario 13: Future start date league (no reminders, blocked study logging, guaranteed score zeroing, past cycles preserved) verified.")
 
 
 
