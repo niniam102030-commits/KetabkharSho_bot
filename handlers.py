@@ -417,9 +417,11 @@ def user_can_log_late(db: Session, user: Optional[User]) -> bool:
         return False
 
     cycle = get_or_create_active_cycle(db, league)
-    raw_current_day = DateService.calculate_raw_league_day(
-        cycle.start_shamsi or league.start_shamsi
-    )
+    eff_start = cycle.start_shamsi or league.start_shamsi
+    if not DateService.league_has_started(eff_start):
+        return False
+
+    raw_current_day = DateService.calculate_raw_league_day(eff_start)
     yesterday_day = raw_current_day - 1
     if yesterday_day < 1 or yesterday_day > settings.LEAGUE_DURATION:
         return False
@@ -478,9 +480,9 @@ def format_league_leaderboard(
     🏆 چله {cycle.cycle_number} | روز {current_day} از 40
     """
     cycle = get_or_create_active_cycle(db, league)
-    current_day = DateService.calculate_league_day(
-        cycle.start_shamsi or league.start_shamsi
-    )
+    eff_start = cycle.start_shamsi or league.start_shamsi
+    is_started = DateService.league_has_started(eff_start)
+    current_day = DateService.calculate_league_day(eff_start)
     users = (
         db.query(User)
         .filter(User.league_id == league.id, User.is_active == True)
@@ -490,9 +492,15 @@ def format_league_leaderboard(
         users = [u for u in users if u.id not in exclude_user_ids]
     ranked = ScoringService.rank_users(users, league.floor)
 
+    if not is_started:
+        days_left = DateService.days_until_league_start(eff_start)
+        cycle_info = f"⏳ شروع از {eff_start} ({days_left} روز مانده)"
+    else:
+        cycle_info = f"روز {current_day} از {settings.LEAGUE_DURATION}"
+
     header = (
         f"👑 *جدول آنلاین لیگ: {escape_md(league.name)}* 🌸\n"
-        f"🏆 چله {cycle.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION}\n\n"
+        f"🏆 چله {cycle.cycle_number} | {cycle_info}\n\n"
         f" رتبه | نام | امتیاز | غیبت | عدم اعلام\n"
         f"-------------------------------------------------------"
     )
@@ -866,10 +874,10 @@ async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> No
 
         # ۲. محاسبه روز جاری چله و امتیاز هدیه همگام‌سازی
         cycle = get_or_create_active_cycle(db, league)
-        current_day = DateService.calculate_league_day(
-            cycle.start_shamsi or league.start_shamsi
-        )
-        gift_points = (current_day - 1) * 10
+        eff_start = cycle.start_shamsi or league.start_shamsi
+        is_started = DateService.league_has_started(eff_start)
+        current_day = DateService.calculate_league_day(eff_start)
+        gift_points = (current_day - 1) * 10 if (is_started and current_day > 1) else 0
 
         active_user = get_active_user(db, tg_id)
         if active_user and not active_user.league_id:
@@ -941,7 +949,10 @@ async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> No
         main_kb = build_user_main_menu(db, tg_id, target_user)
 
         join_text = f"🎉 شما به لیگ «{escape_md(league.name)}» پیوستید."
-        if gift_points > 0:
+        if not is_started:
+            days_left = DateService.days_until_league_start(eff_start)
+            join_text += f"\n\n📅 این لیگ از تاریخ `{eff_start}` ({days_left} روز دیگر) آغاز خواهد شد."
+        elif gift_points > 0:
             join_text += f"\n✨ امتیاز هدیه همگام‌سازی شما با روز {current_day} لیگ: {gift_points} امتیاز!"
 
         welcome_user_text = f"به جمع ما خوش آمدید {escape_md(target_user.name)}! 🌸"
@@ -1050,6 +1061,23 @@ async def handle_log_study_today(message: Message, state: FSMContext) -> None:
             await safe_answer(message, MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست."))
             return
 
+        cycle = get_or_create_active_cycle(db, league)
+        eff_start = cycle.start_shamsi or league.start_shamsi
+        if not DateService.league_has_started(eff_start):
+            days_left = DateService.days_until_league_start(eff_start)
+            await safe_answer(
+                message,
+                MessageService.apply_terms(
+                    db,
+                    user.group_id,
+                    f"⏳ لیگ «{escape_md(league.name)}» هنوز شروع نشده است.\n"
+                    f"📅 تاریخ شروع: `{eff_start}` ({days_left} روز مانده)\n\n"
+                    "از تاریخ شروع به بعد می‌توانید مطالعه ثبت کنید و امتیاز بگیرید.",
+                ),
+                reply_markup=build_user_main_menu(db, tg_id, user),
+            )
+            return
+
         profiles = get_user_profiles(db, tg_id, only_active=True)
         league_text = (
             f" (در لیگ «{escape_md(league.name)}»)" if len(profiles) > 1 else ""
@@ -1107,6 +1135,11 @@ async def handle_edit_study_today(message: Message, state: FSMContext) -> None:
                 MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست."),
             )
             return
+        cycle = get_or_create_active_cycle(db, league)
+        eff_start = cycle.start_shamsi or league.start_shamsi
+        if not DateService.league_has_started(eff_start):
+            await handle_log_study_today(message, state)
+            return
         if user.last_log_date != today_str or int(user.today_minutes or 0) <= 0:
             # اگر کاربر هنوز امروز ثبتی ندارد (مثلاً از منوی شب قبل کلیک کرده)، به ثبت عادی هدایت شود
             await handle_log_study_today(message, state)
@@ -1147,6 +1180,11 @@ async def handle_append_study_today(message: Message, state: FSMContext) -> None
                 message,
                 MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست."),
             )
+            return
+        cycle = get_or_create_active_cycle(db, league)
+        eff_start = cycle.start_shamsi or league.start_shamsi
+        if not DateService.league_has_started(eff_start):
+            await handle_log_study_today(message, state)
             return
         if user.last_log_date != today_str or int(user.today_minutes or 0) <= 0:
             await handle_log_study_today(message, state)
@@ -1375,6 +1413,25 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                 cycle.start_shamsi or league.start_shamsi
             )
             effective_floor = user.get_effective_floor(league.floor)
+
+            if not DateService.league_has_started(
+                cycle.start_shamsi or league.start_shamsi
+            ):
+                await state.clear()
+                eff_start = cycle.start_shamsi or league.start_shamsi
+                days_left = DateService.days_until_league_start(eff_start)
+                await safe_answer(
+                    message,
+                    MessageService.apply_terms(
+                        db,
+                        user.group_id,
+                        f"⏳ لیگ «{escape_md(league.name)}» هنوز شروع نشده است.\n"
+                        f"📅 تاریخ شروع: `{eff_start}` ({days_left} روز مانده)\n\n"
+                        "از تاریخ شروع به بعد می‌توانید مطالعه ثبت کنید و امتیاز بگیرید.",
+                    ),
+                    reply_markup=build_user_main_menu(db, tg_id, user),
+                )
+                return
 
             if mode == "late":
                 # بررسی مجدد مجاز بودن ثبت دیروز جهت جلوگیری از ثبت تکراری یا عبور از نیمه‌شب
@@ -1641,10 +1698,19 @@ def _fetch_user_profile_sync(tg_id: str) -> Tuple[Optional[str], Optional[str], 
             return err, None, None
 
         cycle = get_or_create_active_cycle(db, league)
-        current_day = DateService.calculate_league_day(
-            cycle.start_shamsi or league.start_shamsi
-        )
-        days_left = max(0, settings.LEAGUE_DURATION - current_day)
+        eff_start = cycle.start_shamsi or league.start_shamsi
+        is_started = DateService.league_has_started(eff_start)
+        current_day = DateService.calculate_league_day(eff_start)
+
+        if not is_started:
+            days_left_start = DateService.days_until_league_start(eff_start)
+            cycle_status_header = f"⏳ شروع از {eff_start} ({days_left_start} روز مانده)"
+            days_left_line = f"⏳ *وضعیت چله*: در انتظار شروع رسمی (شروع از `{eff_start}`)"
+        else:
+            cycle_status_header = f"روز {current_day} از {settings.LEAGUE_DURATION}"
+            days_left = max(0, settings.LEAGUE_DURATION - current_day)
+            days_left_line = f"⏳ *روزهای مانده به پایان چله*: {days_left} روز"
+
         effective_floor = user.get_effective_floor(league.floor)
 
         all_users = (
@@ -1659,7 +1725,7 @@ def _fetch_user_profile_sync(tg_id: str) -> Tuple[Optional[str], Optional[str], 
 
         profile_text = (
             f"👤 *شناسنامه مطالعه شما در لیگ {escape_md(league.name)}*:\n"
-            f"🏆 *چله {cycle.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION}*\n\n"
+            f"🏆 *چله {cycle.cycle_number} | {cycle_status_header}*\n\n"
             f"🌸 *نام*: {escape_md(user.name)}\n"
             f"🏆 *رتبه شما*: {my_rank}\n"
             f"⏱ *میثاق روزانه شما*: {effective_floor} دقیقه\n"
@@ -1669,7 +1735,7 @@ def _fetch_user_profile_sync(tg_id: str) -> Tuple[Optional[str], Optional[str], 
             f"🔥 *زنجیره استمرار*: {user.streak} روز\n"
             f"❌ *تعداد غیبت*: {user.no_study_days} روز (روزهای: {absent_days_text})\n"
             f"⚠️ *ثبت‌های دیرهنگام*: روزهای: {late_days_text}\n"
-            f"⏳ *روزهای مانده به پایان چله*: {days_left} روز\n\n"
+            f"{days_left_line}\n\n"
             f"🎫 فرصت‌ها و سهمیه‌های باقیمانده این دوره:\n"
             f"🔹 سهمیه نصف میثاق: {user.half_coupons} از {settings.DEFAULT_HALF_COUPONS} روز\n"
             f"🔸 سهمیه طلایی ۱ دقیقه‌ای: {user.one_min_coupons} از {settings.DEFAULT_ONE_MIN_COUPONS} روز\n\n"
@@ -1890,6 +1956,69 @@ async def cb_confirm_cancel_league(callback: CallbackQuery, state: FSMContext) -
 # ۸. جاب‌های زمان‌بندی‌شده روزانه (00:00, 01:00, 08:00, 22:00)
 # ===========================================================================
 
+def reset_league_members_for_new_start(db: Session, league: League, cycle: Optional[Cycle] = None) -> int:
+    """
+    صفر کردن قطعی امتیاز و آمار همه اعضای فعال یک لیگ قبل از شروع رسمی یا در لحظه‌ی شروع چله،
+    و حذف کلیه لاگ‌های دوره پیش‌ثبت‌نام و جریمه‌های پیش از تاریخ شروع.
+    خروجی: تعداد کاربرانی که آمار آن‌ها صفر شد.
+    """
+    if cycle is None:
+        cycle = get_or_create_active_cycle(db, league)
+
+    start_shamsi = cycle.start_shamsi or league.start_shamsi
+    start_greg = DateService.get_date_for_league_day(start_shamsi, 1) if start_shamsi else None
+
+    # پاک‌سازی لاگ‌های ثبت‌شده قبل از شروع رسمی لیگ
+    if not DateService.league_has_started(start_shamsi):
+        db.query(ActivityLog).filter(
+            ActivityLog.league_id == league.id,
+            (ActivityLog.cycle_id == cycle.id)
+            | (
+                (ActivityLog.cycle_id == None)
+                & (ActivityLog.cycle_number == league.cycle_number)
+            ),
+        ).delete(synchronize_session=False)
+    elif start_greg:
+        db.query(ActivityLog).filter(
+            ActivityLog.league_id == league.id,
+            ActivityLog.log_date < start_greg,
+        ).delete(synchronize_session=False)
+
+    from models import FineRecord
+    db.query(FineRecord).filter(
+        FineRecord.league_id == league.id,
+        FineRecord.cycle_id == cycle.id,
+    ).delete(synchronize_session=False)
+
+    users = (
+        db.query(User)
+        .filter(User.league_id == league.id, User.is_active == True)
+        .all()
+    )
+    for u in users:
+        u.points = 0.0
+        u.total_minutes = 0
+        u.total_pages = 0
+        u.streak = 0
+        u.no_study_days = 0
+        u.absent_days_list = ""
+        u.late_days_list = ""
+        u.half_coupons = settings.DEFAULT_HALF_COUPONS
+        u.one_min_coupons = settings.DEFAULT_ONE_MIN_COUPONS
+        u.last_log_date = None
+        u.today_minutes = 0
+        u.today_pages = 0
+        u.today_points = 0.0
+        u.today_half_used = 0
+        u.today_one_min_used = 0
+
+    for u in users:
+        set_system_state(db, f"streak_offset_{u.id}", "0", commit=False)
+
+    db.commit()
+    return len(users)
+
+
 def _midnight_job_sync(today_str: str, yesterday_str: str, force: bool) -> bool:
     """اجرای همگام عملیات دیتابیس و پاکسازی فایل‌های موقت در ترد مجزا"""
     ReportService.cleanup_old_reports(max_age_hours=24)
@@ -1922,11 +2051,33 @@ def _midnight_job_sync(today_str: str, yesterday_str: str, force: bool) -> bool:
         )
         for lg in active_leagues:
             cyc = get_or_create_active_cycle(db, lg)
-            new_day = DateService.calculate_league_day(
-                cyc.start_shamsi or lg.start_shamsi
-            )
+            start_shamsi = cyc.start_shamsi or lg.start_shamsi
+            new_day = DateService.calculate_league_day(start_shamsi)
             lg.current_day = new_day
             cyc.current_day = new_day
+
+            # در لحظه‌ی شروع رسمی چله (امروز == تاریخ شروع یا روز اول)، امتیاز و آمار همه اعضا صفر می‌شود
+            # تا هیچ امتیازی از دوره ثبت‌نام پیش از شروع لیگ منتقل نشود.
+            if DateService.league_has_started(start_shamsi):
+                if new_day == 1:
+                    reset_key = f"league_start_reset:{lg.id}:{cyc.id}"
+                    if get_system_state(db, reset_key) != start_shamsi:
+                        reset_league_members_for_new_start(db, lg, cyc)
+                        set_system_state(db, reset_key, start_shamsi)
+            else:
+                # اگر لیگ هنوز در آینده است، در صورت وجود هرگونه امتیاز یا فعالیت قبلی، صفر شود
+                has_prestart_points = (
+                    db.query(User.id)
+                    .filter(
+                        User.league_id == lg.id,
+                        User.is_active == True,
+                        (User.points > 0) | (User.total_minutes > 0),
+                    )
+                    .first()
+                    is not None
+                )
+                if has_prestart_points:
+                    reset_league_members_for_new_start(db, lg, cyc)
 
         set_system_state(db, "last_daily_job_date", today_str)
         db.commit()
@@ -2028,9 +2179,10 @@ def _build_single_admin_report_sync(
         if not lg or lg.is_deleted or not lg.is_active or not lg.archive_enabled:
             return None
         cyc = get_or_create_active_cycle(db, lg)
-        curr_day = DateService.calculate_league_day(
-            cyc.start_shamsi or lg.start_shamsi
-        )
+        eff_start = cyc.start_shamsi or lg.start_shamsi
+        if not DateService.league_has_started(eff_start):
+            return None
+        curr_day = DateService.calculate_league_day(eff_start)
         archived_day = max(1, curr_day - 1)
         table_txt = format_league_leaderboard(db, lg)
         report_text = (
@@ -2484,9 +2636,10 @@ def _check_league_morning_mode_sync(league_id: str) -> Tuple[Optional[str], int]
         if not lg or lg.is_deleted or not lg.is_active:
             return "skip", 0
         cyc = get_or_create_active_cycle(db, lg)
-        raw_current_day = DateService.calculate_raw_league_day(
-            cyc.start_shamsi or lg.start_shamsi
-        )
+        eff_start = cyc.start_shamsi or lg.start_shamsi
+        if not DateService.league_has_started(eff_start):
+            return "skip", 0
+        raw_current_day = DateService.calculate_raw_league_day(eff_start)
         if raw_current_day > settings.LEAGUE_DURATION:
             return "rollover", raw_current_day
         return "cards", min(raw_current_day, settings.LEAGUE_DURATION)
@@ -2587,12 +2740,29 @@ def _build_study_reminders_outbox_sync(
         if last_run == today_str and not force:
             return []
 
-        league_map: Dict[str, Tuple[str, int, Optional[int]]] = {
-            r[0]: (r[1], r[2], r[3])
-            for r in db.query(League.id, League.name, League.floor, League.group_id)
+        league_rows = (
+            db.query(
+                League.id, League.name, League.floor, League.group_id, League.start_shamsi
+            )
             .filter(League.is_deleted == False, League.is_active == True)
             .all()
+        )
+        league_map: Dict[str, Tuple[str, int, Optional[int]]] = {
+            r[0]: (r[1], r[2], r[3]) for r in league_rows
         }
+        # یادآوری شبانه فقط برای لیگ‌هایی ارسال می‌شود که شروع رسمی آن‌ها فرا رسیده است.
+        started_league_ids = set()
+        for r in league_rows:
+            lg_id = r[0]
+            lg_start = r[4]
+            cyc = (
+                db.query(Cycle.start_shamsi)
+                .filter(Cycle.league_id == lg_id, Cycle.status == "active")
+                .first()
+            )
+            eff_start = (cyc[0] if cyc and cyc[0] else None) or lg_start
+            if DateService.league_has_started(eff_start):
+                started_league_ids.add(lg_id)
 
         terms_cache: Dict[Optional[int], Dict[str, str]] = {}
         base_cache: Dict[Optional[int], str] = {}
@@ -2639,6 +2809,8 @@ def _build_study_reminders_outbox_sync(
 
             for u in chunk:
                 if u.last_log_date == today_str and int(u.today_minutes or 0) > 0:
+                    continue
+                if u.league_id not in started_league_ids:
                     continue
                 lg_info = league_map.get(u.league_id)
                 if not lg_info:

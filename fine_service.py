@@ -202,8 +202,12 @@ def _sync_league_fines_impl(db: Session, league: League, commit: bool = True) ->
         return 0
 
     from database import get_or_create_active_cycle  # جلوگیری از import حلقوی
+    from services import DateService
 
     cycle = get_or_create_active_cycle(db, league)
+    eff_start = cycle.start_shamsi or league.start_shamsi
+    if not DateService.league_has_started(eff_start):
+        return 0
     amounts = {
         KIND_ABSENT: int(league.fine_absent_amount or 0),
         KIND_LATE: int(league.fine_late_amount or 0),

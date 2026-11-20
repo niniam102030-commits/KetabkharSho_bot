@@ -1464,7 +1464,9 @@ async def _send_leagues_management_list(bot: Bot, chat_id: int | str, user_id: s
 
         for lg in leagues:
             cyc = get_or_create_active_cycle(db, lg)
-            curr_day = DateService.calculate_league_day(cyc.start_shamsi or lg.start_shamsi)
+            eff_start = cyc.start_shamsi or lg.start_shamsi
+            is_started = DateService.league_has_started(eff_start)
+            curr_day = DateService.calculate_league_day(eff_start)
             members_count = (
                 db.query(User)
                 .filter(User.league_id == lg.id, User.is_active == True)
@@ -1473,12 +1475,18 @@ async def _send_leagues_management_list(bot: Bot, chat_id: int | str, user_id: s
             grp = db.query(Group).filter(Group.id == lg.group_id).first()
             grp_name = grp.name if grp else "پیش‌فرض"
 
+            if not is_started:
+                days_left = DateService.days_until_league_start(eff_start)
+                day_info = f"⏳ در انتظار شروع ({days_left} روز مانده)"
+            else:
+                day_info = f"روز *{curr_day}* از {settings.LEAGUE_DURATION}"
+
             text = (
                 f"🏆 *لیگ: {escape_md(lg.name)}* (`{lg.id}`)\n"
                 f"🏢 مجموعه: {escape_md(grp_name)}\n"
                 f"⏱ میثاق روزانه: *{lg.floor}* دقیقه\n"
                 f"🔄 شماره چله فعلی: *{lg.cycle_number}*\n"
-                f"📅 تاریخ شروع چله: `{cyc.start_shamsi or lg.start_shamsi}` (روز *{curr_day}* از {settings.LEAGUE_DURATION})\n"
+                f"📅 تاریخ شروع چله: `{eff_start}` ({day_info})\n"
                 f"👥 تعداد اعضا: *{members_count}* نفر"
             )
             await safe_send_message(
@@ -1678,33 +1686,47 @@ async def process_league_new_date(message: Message, state: FSMContext) -> None:
                     except ValueError:
                         pass
 
-        # بازنگری و اصلاح امتیاز هدیه همگام‌سازی کاربران متناسب با تاریخ شروع جدید
-        if old_start_shamsi and old_start_shamsi != norm_shamsi:
-            league_users = (
-                db.query(User)
-                .filter(User.league_id == lg.id, User.is_active == True)
-                .all()
-            )
-            for u in league_users:
-                join_date = DateService.get_user_join_date(u)
-                old_join_day = DateService.calculate_league_day(old_start_shamsi, target_date=join_date)
-                new_join_day = DateService.calculate_league_day(norm_shamsi, target_date=join_date)
+        # اگر تاریخ شروع جدید در آینده باشد یا روز اول چله باشد، امتیاز و آمار کاربران فوراً صفر می‌شود
+        from handlers import reset_league_members_for_new_start
+        if not DateService.league_has_started(norm_shamsi) or new_day <= 1:
+            reset_league_members_for_new_start(db, lg, active_cycle)
+        else:
+            # بازنگری و اصلاح امتیاز هدیه همگام‌سازی کاربران متناسب با تاریخ شروع جدید
+            if old_start_shamsi and old_start_shamsi != norm_shamsi:
+                league_users = (
+                    db.query(User)
+                    .filter(User.league_id == lg.id, User.is_active == True)
+                    .all()
+                )
+                for u in league_users:
+                    join_date = DateService.get_user_join_date(u)
+                    old_join_day = DateService.calculate_league_day(old_start_shamsi, target_date=join_date)
+                    new_join_day = DateService.calculate_league_day(norm_shamsi, target_date=join_date)
 
-                old_gift = float(max(0, (old_join_day - 1) * 10))
-                new_gift = float(max(0, (new_join_day - 1) * 10))
-                delta = new_gift - old_gift
-                if delta != 0.0:
-                    u.points = max(0.0, round(float(u.points or 0.0) + delta, 1))
+                    old_gift = float(max(0, (old_join_day - 1) * 10)) if old_join_day > 1 else 0.0
+                    new_gift = float(max(0, (new_join_day - 1) * 10)) if new_join_day > 1 else 0.0
+                    delta = new_gift - old_gift
+                    if delta != 0.0:
+                        u.points = max(0.0, round(float(u.points or 0.0) + delta, 1))
 
         db.commit()
         AbsenceService.reconcile_historical_gaps(db, league=lg)
         AbsenceService.reconcile_streaks(db, league=lg)
         l_name = lg.name
+        is_future = not DateService.league_has_started(norm_shamsi)
+        days_left = DateService.days_until_league_start(norm_shamsi) if is_future else 0
 
     await state.clear()
+    if is_future:
+        status_info = f"⏳ در انتظار شروع ({days_left} روز مانده تا شروع)"
+        reset_info = "\n✨ کلیه امتیازات کاربران برای شروع عادلانه چله صفر شد."
+    else:
+        status_info = f"روز جاری: *{new_day}*"
+        reset_info = "\n✨ امتیازات کاربران برای شروع چله جدید صفر شد." if new_day == 1 else ""
+
     await safe_reply(
         message,
-        f"✅ تاریخ شروع لیگ *{escape_md(l_name)}* به `{norm_shamsi}` تغییر یافت (روز جاری: *{new_day}*).",
+        f"✅ تاریخ شروع لیگ *{escape_md(l_name)}* به `{norm_shamsi}` تغییر یافت ({status_info}).{reset_info}",
     )
 
 
@@ -2257,10 +2279,10 @@ async def cb_execute_user_move_league(callback: CallbackQuery) -> None:
                 old_l_name = old_league.name if old_league else "بدون لیگ"
 
                 cyc = get_or_create_active_cycle(db, lg)
-                current_day = DateService.calculate_league_day(
-                    cyc.start_shamsi or lg.start_shamsi
-                )
-                gift_points = float(max(0, (current_day - 1) * 10))
+                eff_start = cyc.start_shamsi or lg.start_shamsi
+                is_started = DateService.league_has_started(eff_start)
+                current_day = DateService.calculate_league_day(eff_start)
+                gift_points = float(max(0, (current_day - 1) * 10)) if (is_started and current_day > 1) else 0.0
 
                 import fine_service as _fine_service
                 _fine_service.freeze_user_fines(db, u.id, commit=False)
@@ -2433,8 +2455,10 @@ async def _execute_user_add_second_league_impl(callback: CallbackQuery) -> None:
             return
 
         cyc = get_or_create_active_cycle(db, lg)
-        current_day = DateService.calculate_league_day(cyc.start_shamsi or lg.start_shamsi)
-        gift_points = float(max(0, (current_day - 1) * 10))
+        eff_start = cyc.start_shamsi or lg.start_shamsi
+        is_started = DateService.league_has_started(eff_start)
+        current_day = DateService.calculate_league_day(eff_start)
+        gift_points = float(max(0, (current_day - 1) * 10)) if (is_started and current_day > 1) else 0.0
         new_prof_id = generate_new_profile_id(db, tg_id, group_id=lg.group_id, league_id=lg.id)
 
         new_profile = User(

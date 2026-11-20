@@ -128,8 +128,11 @@ def _build_weekly_task_sync(
             return None
 
         cyc = get_or_create_active_cycle(db, lg)
+        eff_start = cyc.start_shamsi or lg.start_shamsi
+        if not DateService.league_has_started(eff_start):
+            return None
         current_day = DateService.calculate_league_day(
-            cyc.start_shamsi or lg.start_shamsi
+            eff_start
         )
         grp = db.query(Group).filter(Group.id == lg.group_id).first()
         group_name = grp.name if grp else "پیش‌فرض"

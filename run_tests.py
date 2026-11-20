@@ -10,7 +10,7 @@ import sys
 import tempfile
 import asyncio
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
 # تنظیم متغیرهای محیطی پیش از ایمپورت ماژول‌های پروژه
@@ -108,6 +108,10 @@ from handlers import (
     handle_user_profile,
     cb_switch_profile,
     midnight_job,
+    _midnight_job_sync,
+    reset_league_members_for_new_start,
+    _build_study_reminders_outbox_sync,
+    user_can_log_late,
     send_daily_admin_reports,
     send_daily_user_reports,
     send_study_reminders,
@@ -845,6 +849,110 @@ async def run_all_tests() -> None:
         assert str(GROUP_ADMIN_ID) in all_mgr_ids
 
     print("✅ [PASS] Scenario 12: Admin self-assignment to group fine management & inline league picker verified.")
+
+    # -------------------------------------------------------------------------
+    # Scenario 13: لیگ با تاریخ شروع در آینده (۵ روز بعد):
+    # ۱. ثبت‌نام قبل از شروع لیگ: امتیاز هدیه صفر و امتیاز کاربر صفر.
+    # ۲. مسدود بودن کامل ثبت مطالعه (امروز، ویرایش، افزودن، دیروز).
+    # ۳. عدم ارسال یادآوری شبانه در دوران پیش‌ثبت‌نام.
+    # ۴. صفر بودن قطعی امتیازات قبل از شروع و در لحظه شروع رسمی چله.
+    # -------------------------------------------------------------------------
+    with get_db() as db:
+        future_date = DateService.today_date() + timedelta(days=5)
+        future_shamsi = DateService.date_to_shamsi(future_date)
+
+        # ساخت لیگ ۵ روز در آینده
+        lg_future = League(
+            group_id=1,
+            name="لیگ آینده ۵ روز بعد",
+            floor=15,
+            start_shamsi=future_shamsi,
+            current_day=0,
+            is_active=True,
+            cycle_number=1,
+        )
+        db.add(lg_future)
+        db.commit()
+        db.refresh(lg_future)
+        cyc_future = get_or_create_active_cycle(db, lg_future, default_start_shamsi=future_shamsi)
+
+        # بررسی متدهای سرویس تاریخ
+        assert not DateService.league_has_started(future_shamsi)
+        assert DateService.days_until_league_start(future_shamsi) == 5
+        assert DateService.calculate_league_day(future_shamsi) == 0
+
+        # کاربر جدید در دوره پیش‌ثبت‌نام ثبت‌نام می‌کند
+        FUTURE_USER_TG = "8899001122"
+        u_fut = User(
+            id=FUTURE_USER_TG,
+            telegram_id=FUTURE_USER_TG,
+            group_id=1,
+            name="کاربر پیش ثبت نام",
+            league_id=lg_future.id,
+            points=0.0,
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(u_fut)
+        db.commit()
+
+        # ۱. امتیاز کاربر جدید حتماً باید صفر باشد
+        assert u_fut.points == 0.0
+
+        # ۲. بررسی عدم امکان ثبت مطالعه دیروز
+        assert not user_can_log_late(db, u_fut)
+
+        # ۳. بررسی یادآوری شبانه: کاربر نباید در اوت‌باکس یادآوری شبانه باشد
+        rem_outbox = _build_study_reminders_outbox_sync(DateService.today_str(), force=True)
+        rem_rcpts = [item[0] for item in rem_outbox]
+        assert FUTURE_USER_TG not in rem_rcpts
+
+        # ۴. شبیه‌سازی کاربری که قبل از شروع احیاناً امتیاز یا لاگی دارد
+        u_fut.points = 25.0
+        u_fut.total_minutes = 60
+        u_fut.streak = 2
+        fake_log = ActivityLog(
+            user_id=u_fut.id,
+            league_id=lg_future.id,
+            cycle_id=cyc_future.id,
+            minutes=60,
+            points_earned=25.0,
+            log_date=DateService.today_str(),
+        )
+        db.add(fake_log)
+        db.commit()
+
+        # صفر کردن در دوران پیش‌ثبت‌نام
+        reset_league_members_for_new_start(db, lg_future, cyc_future)
+        db.refresh(u_fut)
+        assert u_fut.points == 0.0
+        assert u_fut.total_minutes == 0
+        assert u_fut.streak == 0
+        remaining_logs = db.query(ActivityLog).filter(ActivityLog.league_id == lg_future.id).count()
+        assert remaining_logs == 0
+
+        # ۵. لحظه‌ی شروع لیگ (تغییر تاریخ به امروز): در جاب نیمه‌شب یا استارتاپ امتیاز همه صفر می‌شود
+        today_shamsi = DateService.today_shamsi()
+        lg_future.start_shamsi = today_shamsi
+        cyc_future.start_shamsi = today_shamsi
+        db.commit()
+
+        # شبیه‌سازی امتیاز قبل از لحظه شروع
+        u_fut.points = 10.0
+        db.commit()
+
+        _midnight_job_sync(DateService.today_str(), DateService.yesterday_str(), force=True)
+        db.refresh(u_fut)
+        assert u_fut.points == 0.0, "در لحظه شروع لیگ امتیاز کاربر صفر نشد"
+        assert DateService.league_has_started(today_shamsi)
+
+        # پس از شروع لیگ، کاربر در یادآوری شبانه قرار می‌گیرد
+        rem_outbox_started = _build_study_reminders_outbox_sync(DateService.today_str(), force=True)
+        started_rcpts = [item[0] for item in rem_outbox_started]
+        assert FUTURE_USER_TG in started_rcpts
+
+    print("✅ [PASS] Scenario 13: Future start date league (no reminders, blocked study logging, guaranteed score zeroing) verified.")
+
 
 
 

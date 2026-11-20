@@ -231,7 +231,7 @@ class DateService:
     ) -> int:
         """
         محاسبه شماره روز واقعی چله بر اساس تاریخ شروع شمسی (بدون سقف ۴۰).
-        برای تشخیص رسیدن به روز ۴۱ در ساعت ۸ صبح کاربرد دارد.
+        اگر تاریخ شروع در آینده باشد، مقدار صفر یا منفی برمی‌گرداند.
         """
         if not start_shamsi:
             return 1
@@ -250,7 +250,7 @@ class DateService:
             curr_d = target_date
 
         diff = (curr_d - start_d).days + 1
-        return max(1, diff)
+        return diff
 
     @classmethod
     def calculate_league_day(
@@ -259,11 +259,45 @@ class DateService:
         target_date: Optional[Union[date, str]] = None,
         clamp_to_duration: bool = True,
     ) -> int:
-        """محاسبه روز جاری چله (محدود شده بین 1 تا LEAGUE_DURATION در حالت پیش‌فرض)"""
+        """محاسبه روز جاری چله (در صورت شروع نشدن 0، در غیر این صورت 1 تا LEAGUE_DURATION)"""
         raw_day = cls.calculate_raw_league_day(start_shamsi, target_date)
+        if raw_day <= 0:
+            return 0
         if clamp_to_duration:
             return min(raw_day, settings.LEAGUE_DURATION)
         return raw_day
+
+    @classmethod
+    def days_until_league_start(
+        cls, start_shamsi: Optional[str], target_date: Optional[Union[date, str]] = None
+    ) -> int:
+        """
+        تعداد روزهای مانده تا شروع رسمی لیگ (نسبت به امروز یا تاریخ هدف).
+        مقدار مثبت یعنی لیگ هنوز شروع نشده (دوره ثبت‌نام)؛ صفر یعنی روز شروع است؛
+        مقدار منفی یعنی لیگ از قبل شروع شده است.
+        """
+        if not start_shamsi:
+            return 0
+        start_d = cls.shamsi_to_date(start_shamsi)
+        if not start_d:
+            return 0
+        if target_date is None:
+            curr_d = cls.today_date()
+        elif isinstance(target_date, str):
+            try:
+                curr_d = datetime.strptime(target_date[:10], "%Y-%m-%d").date()
+            except ValueError:
+                curr_d = cls.today_date()
+        else:
+            curr_d = target_date
+        return (start_d - curr_d).days
+
+    @classmethod
+    def league_has_started(
+        cls, start_shamsi: Optional[str], target_date: Optional[Union[date, str]] = None
+    ) -> bool:
+        """آیا تاریخ شروع لیگ فرا رسیده است (دوره ثبت‌نام تمام و لیگ رسماً شروع شده)؟"""
+        return cls.days_until_league_start(start_shamsi, target_date) <= 0
 
     @classmethod
     def get_date_for_league_day(cls, start_shamsi: Optional[str], day_number: int) -> str:
