@@ -1,8 +1,7 @@
 services:
   ketabkharsho-bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/niniam102030-commits/ketabkharsho_bot:latest
+    pull_policy: always
     container_name: ketabkharsho_bot
     restart: unless-stopped
     env_file:

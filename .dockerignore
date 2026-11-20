@@ -1,9 +1,17 @@
+.git
 .git/
+.github
 .gitignore
+.env
+.env.*
+.venv
 .venv/
+venv
 venv/
 env/
+__pycache__
 __pycache__/
+*.pyc
 *.py[cod]
 *$py.class
 .pytest_cache/
@@ -12,6 +20,7 @@ __pycache__/
 data/
 *.db
 *.sqlite
+*.sqlite3
 logs/
 *.log
 backups/
