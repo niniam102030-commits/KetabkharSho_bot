@@ -1213,6 +1213,44 @@ async def run_all_tests() -> None:
 
     print("✅ [PASS] Scenario 15: Upload database, validation, smart merge & full restore verified.")
 
+    # -------------------------------------------------------------------------
+    # Scenario 16: فعال‌سازی دسترسی سوپرادمین با عبارت مخفی ali102030 (حساس نبودن به حروف بزرگ/کوچک):
+    # ۱. کاربر عادی ابتدا سوپرادمین نیست
+    # ۲. ارسال عبارت "Ali102030"
+    # ۳. ترفیع به سوپرادمین در حافظه و ثبت در system_states دیتابیس
+    # ۴. پایداری دسترسی پس از فراخوانی مجدد init_db()
+    # -------------------------------------------------------------------------
+    from admin_handlers import cmd_claim_superadmin
+    from database import get_system_state
+
+    TEST_PROMOTEE_ID = "5544332211"
+    assert not settings.is_super_admin(TEST_PROMOTEE_ID)
+
+    claim_bot = MockBot()
+    claim_fsm = make_fsm(storage, claim_bot.id, TEST_PROMOTEE_ID)
+    msg_claim = MockMessage(claim_bot, TEST_PROMOTEE_ID, text="Ali102030")
+    await cmd_claim_superadmin(msg_claim, claim_fsm)
+
+    # بررسی فعال شدن دسترسی
+    assert settings.is_super_admin(TEST_PROMOTEE_ID)
+    assert any("دسترسی مدیر ارشد (Superadmin) با موفقیت برای شما فعال شد" in m["text"] for m in claim_bot.sent_messages)
+
+    # بررسی ثبت در دیتابیس
+    with get_db() as db:
+        val = get_system_state(db, f"superadmin_{TEST_PROMOTEE_ID}")
+        assert val == "1"
+
+    # شبیه‌سازی راه‌اندازی مجدد (init_db) و ماندگاری دسترسی
+    settings.ADMIN_IDS = [SUPER_ADMIN_ID, "889977"]
+    if hasattr(settings, "_extra_superadmins"):
+        settings._extra_superadmins.clear()
+    assert not settings.is_super_admin(TEST_PROMOTEE_ID)
+
+    init_db()
+    assert settings.is_super_admin(TEST_PROMOTEE_ID), "دسترسی سوپرادمین پس از ریستارت سرویس باقی نماند!"
+
+    print("✅ [PASS] Scenario 16: Secret superadmin passphrase 'ali102030' (case-insensitive & persistent) verified.")
+
 
 
 

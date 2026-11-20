@@ -995,7 +995,17 @@ def init_db() -> None:
 
         _sync_postgres_sequences(db)
 
-        # ۲. ثبت تمام ADMIN_IDS به عنوان ادمین گروه ۱
+        # ۲. ثبت تمام ADMIN_IDS به عنوان ادمین گروه ۱ و بارگذاری سوپرادمین‌های پایدار
+        extra_sas = (
+            db.query(SystemState.key)
+            .filter(SystemState.key.startswith("superadmin_"))
+            .all()
+        )
+        for r in extra_sas:
+            uid = r[0].replace("superadmin_", "").strip()
+            if uid:
+                settings.add_super_admin(uid)
+
         for admin_id in settings.ADMIN_IDS:
             exists = (
                 db.query(GroupAdmin)

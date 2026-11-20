@@ -160,7 +160,21 @@ class Config:
 
     def is_super_admin(self, user_id: str | int) -> bool:
         """بررسی مدیر ارشد بودن کاربر"""
-        return str(user_id).strip() in self.ADMIN_IDS
+        uid = str(user_id).strip()
+        if uid in self.ADMIN_IDS:
+            return True
+        if hasattr(self, "_extra_superadmins") and uid in self._extra_superadmins:
+            return True
+        return False
+
+    def add_super_admin(self, user_id: str | int) -> None:
+        """افزودن شناسه به لیست مدیران ارشد در حافظه"""
+        uid = str(user_id).strip()
+        if uid not in self.ADMIN_IDS:
+            self.ADMIN_IDS.append(uid)
+        if not hasattr(self, "_extra_superadmins"):
+            self._extra_superadmins = set()
+        self._extra_superadmins.add(uid)
 
 
 settings = Config()
