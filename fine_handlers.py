@@ -704,7 +704,9 @@ def _manager_names(db, lid: str) -> List[Tuple[str, str]]:
     return out
 
 
-def _menu_screen(db, lg: League, is_adm: bool) -> Tuple[str, InlineKeyboardMarkup]:
+def _menu_screen(
+    db, lg: League, is_adm: bool, is_mgr: bool = True
+) -> Tuple[str, InlineKeyboardMarkup]:
     managers = _manager_names(db, lg.id)
     status = "✅ فعال" if lg.fines_enabled else "⛔️ غیرفعال"
     mgr_txt = "، ".join(escape_md(n) for _, n in managers) if managers else "—"
@@ -730,7 +732,10 @@ def _menu_screen(db, lg: League, is_adm: bool) -> Tuple[str, InlineKeyboardMarku
     if is_adm:
         rows.append([_btn("👥 مسئولین جریمه", f"fa:mg:{lg.id}")])
     if lg.fines_enabled:
-        rows.append([_btn("📋 لیست جریمه‌ها", f"fv:{lg.id}"), _btn("💳 پرداخت", f"fp:{lg.id}:0")])
+        action_row = [_btn("📋 لیست جریمه‌ها", f"fv:{lg.id}")]
+        if is_mgr:
+            action_row.append(_btn("💳 پرداخت", f"fp:{lg.id}:0"))
+        rows.append(action_row)
     return text, _nav_kb(rows)
 
 
@@ -757,8 +762,8 @@ async def _show_fine_menu(callback: CallbackQuery, state: FSMContext, lid: str) 
 
     def _work():
         with get_db() as db:
-            lg, is_adm, _ = _auth_menu(db, tg, lid)
-            return _menu_screen(db, lg, is_adm) if lg else None
+            lg, is_adm, is_mgr = _auth_menu(db, tg, lid)
+            return _menu_screen(db, lg, is_adm, is_mgr) if lg else None
 
     res = await asyncio.to_thread(_work)
     if not res:
@@ -833,16 +838,17 @@ async def cb_toggle_fines(callback: CallbackQuery, state: FSMContext) -> None:
             lg, is_adm, _ = _auth_menu(db, tg, lid, need_admin=True)
             if not lg:
                 return None
+            mgrs = fine_service.get_manager_ids(db, lid)
             if lg.fines_enabled:
                 lg.fines_enabled = False
                 db.commit()
-                return ("disabled", lg.name, _menu_screen(db, lg, True))
-            if not fine_service.get_manager_ids(db, lid):
+                return ("disabled", lg.name, _menu_screen(db, lg, True, False), mgrs)
+            if not mgrs:
                 return ("pick", lg.name, _picker_screen(db, lg, 0, "1", admin_tg=tg))
             lg.fines_enabled = True
             db.commit()
             fine_service.sync_league_fines(db, lg)
-            return ("enabled", lg.name, _menu_screen(db, lg, True), fine_service.get_manager_ids(db, lid))
+            return ("enabled", lg.name, _menu_screen(db, lg, True, tg in mgrs), mgrs)
 
     res = await asyncio.to_thread(_work)
     if not res:
@@ -855,6 +861,7 @@ async def cb_toggle_fines(callback: CallbackQuery, state: FSMContext) -> None:
         await _refresh_league_keyboards(
             callback.bot, lid,
             f"ℹ️ سیستم جریمه لیگ «{escape_md(lg_name)}» غیرفعال شد.",
+            extra_tgs=res[3],
         )
     elif kind == "enabled":
         await _refresh_league_keyboards(
@@ -909,7 +916,8 @@ async def cb_select_manager(callback: CallbackQuery) -> None:
                 db.commit()
                 newly_enabled = True
             fine_service.sync_league_fines(db, lg)
-            return added, newly_enabled, lg.name, _menu_screen(db, lg, True), fine_service.get_manager_ids(db, lid)
+            all_mgrs = fine_service.get_manager_ids(db, lid)
+            return added, newly_enabled, lg.name, _menu_screen(db, lg, True, tg in all_mgrs), all_mgrs
 
     res = await asyncio.to_thread(_work)
     if not res:
@@ -943,6 +951,18 @@ async def cb_set_group_manager(callback: CallbackQuery) -> None:
             if not lg:
                 return None
             auto_enable = (enabling == "1")
+            newly_enabled_leagues: List[Tuple[str, str]] = []
+            if auto_enable:
+                newly_enabled_leagues = [
+                    (l.id, l.name)
+                    for l in db.query(League)
+                    .filter(
+                        League.group_id == lg.group_id,
+                        League.is_deleted == False,
+                        League.fines_enabled == False,
+                    )
+                    .all()
+                ]
             count = fine_service.set_group_fine_manager(db, lg.group_id, tg, auto_enable=auto_enable)
             if enabling == "1" and not lg.fines_enabled:
                 lg.fines_enabled = True
@@ -950,18 +970,25 @@ async def cb_set_group_manager(callback: CallbackQuery) -> None:
             fine_service.sync_league_fines(db, lg)
             grp = db.query(Group).filter(Group.id == lg.group_id).first()
             grp_name = grp.name if grp else ""
-            return count, grp_name, _menu_screen(db, lg, True)
+            return count, grp_name, _menu_screen(db, lg, True, True), newly_enabled_leagues
 
     res = await asyncio.to_thread(_work)
     if not res:
         await callback.answer("⛔️ دسترسی ندارید.", show_alert=True)
         return
-    count, grp_name, screen = res
+    count, grp_name, screen, newly_enabled_leagues = res
     await callback.answer(
         f"✅ شما به عنوان مسئول جریمه تمام لیگ‌های مجموعه «{grp_name}» تعیین شدید.",
         show_alert=True,
     )
     await _edit(callback, screen[0], screen[1])
+    for enabled_lid, enabled_name in newly_enabled_leagues:
+        await _refresh_league_keyboards(
+            callback.bot,
+            enabled_lid,
+            f"💰 سیستم جریمه لیگ «{escape_md(enabled_name)}» فعال شد. از دکمه «مشاهده جریمه‌ها» می‌توانید وضعیت را ببینید.",
+            skip_tgs={tg},
+        )
     await _announce_new_manager(callback.bot, lid, grp_name, tg)
 
 
@@ -1086,6 +1113,10 @@ async def process_amount_setting(message: Message, state: FSMContext) -> None:
     tg = str(message.from_user.id)
     data = await state.get_data()
     lid, which = data.get("fine_lid"), data.get("fine_which")
+    if not lid or which not in ("a", "l"):
+        await state.clear()
+        await safe_answer(message, "⚠️ عملیات منقضی شد. دوباره از منوی مدیریت جریمه اقدام کنید.")
+        return
     amount = parse_amount(message.text or "")
     if amount is None:
         await safe_answer(message, "❌ لطفاً فقط یک عدد صحیح (به تومان) وارد کنید:")
@@ -1093,7 +1124,7 @@ async def process_amount_setting(message: Message, state: FSMContext) -> None:
 
     def _work():
         with get_db() as db:
-            lg, is_adm, _ = _auth_menu(db, tg, lid or "")
+            lg, is_adm, is_mgr = _auth_menu(db, tg, lid)
             if not lg:
                 return None
             # ثبت جریمه‌های موجود با مبالغ قدیمی پیش از تغییر مبلغ
@@ -1105,7 +1136,7 @@ async def process_amount_setting(message: Message, state: FSMContext) -> None:
             db.commit()
             # جریمه‌های جدید (روزهای ثبت‌نشده) با مبلغ جدید ساخته می‌شوند
             fine_service.sync_league_fines(db, lg)
-            return _menu_screen(db, lg, is_adm)
+            return _menu_screen(db, lg, is_adm, is_mgr)
 
     res = await asyncio.to_thread(_work)
     await state.clear()

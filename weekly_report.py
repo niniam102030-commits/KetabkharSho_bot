@@ -25,8 +25,16 @@ from handlers import safe_send, safe_send_document, BroadcastThrottle
 
 logger = logging.getLogger(__name__)
 
+_weekly_reports_lock = asyncio.Lock()
+
 
 async def send_weekly_reports(bot: Bot, force: bool = False) -> None:
+    """قفل سراسری برای جلوگیری از اجرای همزمان گزارش هفتگی"""
+    async with _weekly_reports_lock:
+        await _send_weekly_reports_impl(bot, force=force)
+
+
+async def _send_weekly_reports_impl(bot: Bot, force: bool = False) -> None:
     """
     جاب ساعت 02:00 بامداد روزهای جمعه:
     تولید فایل اکسل وضعیت چله هر لیگ فعال و ارسال گزارش هفتگی از وضعیت جدول چله (تا پایان هفته جاری)
@@ -49,7 +57,8 @@ async def send_weekly_reports(bot: Bot, force: bool = False) -> None:
             .order_by(League.id.asc())
             .all()
         ]
-        set_system_state(db, "last_weekly_report_date", today_str)
+        if not force:
+            set_system_state(db, "last_weekly_report_date", today_str)
 
     if not league_ids:
         return

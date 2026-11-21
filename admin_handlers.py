@@ -1,5 +1,6 @@
 import os
 import re
+import math
 import time
 import secrets
 import asyncio
@@ -1970,8 +1971,13 @@ async def _perform_user_search(bot: Bot, chat_id: int | str, admin_id: str, quer
         # اگر یک شخص با چند پروفایل (چند لیگ) یا چندین کاربر مختلف پیدا شدند:
         rows: list[list[InlineKeyboardButton]] = []
         msg_lines = [f"🔍 نتایج جستجو برای «{escape_md(norm_query)}»:"]
+        max_buttons = 40
+        truncated = False
 
         for tg_key, prof_list in by_person.items():
+            if len(rows) >= max_buttons:
+                truncated = True
+                break
             first_u = prof_list[0]
             person_name = escape_md(first_u.name)
 
@@ -1987,6 +1993,9 @@ async def _perform_user_search(bot: Bot, chat_id: int | str, admin_id: str, quer
             else:
                 msg_lines.append(f"👤 *{person_name}*{tg_short} (دارای {len(prof_list)} پروفایل/لیگ فعال):")
                 for u in prof_list:
+                    if len(rows) >= max_buttons:
+                        truncated = True
+                        break
                     lg = db.query(League).filter(League.id == u.league_id).first() if u.league_id else None
                     grp = db.query(Group).filter(Group.id == u.group_id).first() if u.group_id else None
                     lg_name = lg.name if lg else "بدون لیگ"
@@ -1994,6 +2003,8 @@ async def _perform_user_search(bot: Bot, chat_id: int | str, admin_id: str, quer
                     btn_txt = f"🏆 لیگ {lg_name}{grp_txt}"
                     rows.append([InlineKeyboardButton(text=btn_txt, callback_data=f"adm_manage_{u.id}")])
 
+        if truncated:
+            msg_lines.append(f"⚠️ تنها {max_buttons} نتیجه اول نمایش داده شد؛ برای جستجوی دقیق‌تر عبارت کامل‌تری وارد کنید.")
         msg_lines.append("جهت مدیریت، روی پروفایل و لیگ موردنظر کلیک کنید:")
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
         await safe_send_message(bot, chat_id, "\n".join(msg_lines), reply_markup=kb)
@@ -2531,6 +2542,9 @@ async def process_user_new_points(message: Message, state: FSMContext) -> None:
     except ValueError:
         await safe_reply(message, "❌ لطفاً یک عدد معتبر وارد کنید:")
         return
+    if not math.isfinite(val) or val < 0:
+        await safe_reply(message, "❌ لطفاً یک عدد معتبر و غیرمنفی وارد کنید:")
+        return
 
     data = await state.get_data()
     target_uid = data.get("target_user_id")
@@ -2693,20 +2707,34 @@ async def process_user_new_no_study(message: Message, state: FSMContext) -> None
     with get_db() as db:
         u = db.query(User).filter(User.id == target_uid).first()
         if u:
+            lg = (
+                db.query(League).filter(League.id == u.league_id).first()
+                if u.league_id
+                else None
+            )
+            log_query = db.query(ActivityLog).filter(
+                ActivityLog.user_id == u.id,
+                ActivityLog.league_id == u.league_id,
+                ActivityLog.minutes > 0,
+            )
+            if lg:
+                cyc = get_or_create_active_cycle(db, lg)
+                log_query = log_query.filter(
+                    (ActivityLog.cycle_id == cyc.id)
+                    | (
+                        (ActivityLog.cycle_id == None)
+                        & (ActivityLog.cycle_number == lg.cycle_number)
+                    )
+                )
             logged_days = {
                 int(r.league_day)
-                for r in db.query(ActivityLog)
-                .filter(
-                    ActivityLog.user_id == u.id,
-                    ActivityLog.league_id == u.league_id,
-                    ActivityLog.minutes > 0,
-                )
-                .all()
+                for r in log_query.all()
                 if r.league_day
             }
+            late_days = set(AbsenceService.parse_days_list(u.late_days_list))
             past_days = _get_user_past_days(db, u)
             future_days = set(range(1, settings.LEAGUE_DURATION + 1)) - past_days
-            allowed_days = past_days - logged_days
+            allowed_days = past_days - logged_days - late_days
             eff_count = min(new_count, len(allowed_days))
             if eff_count < new_count:
                 note = (
@@ -2717,11 +2745,14 @@ async def process_user_new_no_study(message: Message, state: FSMContext) -> None
                 u.absent_days_list,
                 eff_count,
                 max_day=settings.LEAGUE_DURATION,
-                exclude_days=logged_days | future_days,
+                exclude_days=logged_days | late_days | future_days,
                 preferred_days=sorted(allowed_days),
             )
             u.no_study_days = len(AbsenceService.parse_days_list(u.absent_days_list))
             db.commit()
+            if lg and lg.fines_enabled:
+                import fine_service as _fine_service
+                _fine_service.sync_league_fines(db, lg)
             card = _format_user_admin_card(db, u)
         else:
             card = "کاربر یافت نشد."
@@ -2776,6 +2807,14 @@ async def process_user_new_late(message: Message, state: FSMContext) -> None:
                 preferred_days=sorted(allowed_late),
             )
             db.commit()
+            lg_l = (
+                db.query(League).filter(League.id == u.league_id).first()
+                if u.league_id
+                else None
+            )
+            if lg_l and lg_l.fines_enabled:
+                import fine_service as _fine_service
+                _fine_service.sync_league_fines(db, lg_l)
             card = _format_user_admin_card(db, u)
         else:
             card = "کاربر یافت نشد."
@@ -3144,11 +3183,16 @@ def _get_superadmins_metadata() -> List[Dict[str, Any]]:
     root_set = settings.root_admin_ids
     all_admin_ids = list(dict.fromkeys([str(a).strip() for a in settings.ADMIN_IDS if str(a).strip()]))
     with get_db() as db:
-        users = db.query(User).filter(User.id.in_(all_admin_ids)).all()
-        users_map = {
-            u.id: (u.name or f"{u.first_name or ''} {u.last_name or ''}").strip()
-            for u in users
-        }
+        users = (
+            db.query(User)
+            .filter(User.telegram_id.in_(all_admin_ids))
+            .all()
+        )
+        users_map: Dict[str, str] = {}
+        for u in users:
+            key = str(u.telegram_id or u.id)
+            if key not in users_map:
+                users_map[key] = (u.name or f"{u.first_name or ''} {u.last_name or ''}").strip()
     res: List[Dict[str, Any]] = []
     for uid in all_admin_ids:
         name = users_map.get(uid) or f"کاربر {uid}"
@@ -3178,7 +3222,7 @@ async def cb_menu_manage_superadmins(callback: CallbackQuery) -> None:
         "⚡️ *سوپرادمین‌های افزوده:* کاربرانی که از طریق رمز اضطراری ارتقا یافته‌اند و می‌توانید در صورت لزوم، دسترسی آن‌ها را با کلیک روی دکمه مربوطه فوراً عزل نمایید:"
     )
     try:
-        await callback.message.edit_text(text, reply_markup=kb)
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     except Exception:
         await safe_send_message(callback.bot, callback.message.chat.id, text, reply_markup=kb)
 
@@ -3220,7 +3264,7 @@ async def cb_revoke_sa_prompt(callback: CallbackQuery) -> None:
 
     await callback.answer()
     with get_db() as db:
-        u = db.query(User).filter(User.id == target_id).first()
+        u = db.query(User).filter(User.telegram_id == target_id).first()
         target_name = (u.name if u and u.name else f"کاربر {target_id}")
 
     from keyboards import get_confirm_revoke_sa_keyboard
@@ -3230,11 +3274,11 @@ async def cb_revoke_sa_prompt(callback: CallbackQuery) -> None:
         "⚠️ *تایید عزل مدیر ارشد*\n\n"
         f"آیا از لغو فوری دسترسی مدیر ارشد (Superadmin) برای کاربر زیر اطمینان دارید؟\n\n"
         f"🆔 شناسه بله: `{target_id}`\n"
-        f"👤 نام: *{target_name}*\n\n"
+        f"👤 نام: *{escape_md(target_name)}*\n\n"
         "⚡️ _با تایید این عملیات، بلافاصله کلیه اختیارات مدیریتی این کاربر سلب شده و دسترسی وی به پنل و دیتابیس مسدود خواهد شد._"
     )
     try:
-        await callback.message.edit_text(text, reply_markup=kb)
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     except Exception:
         await safe_send_message(callback.bot, callback.message.chat.id, text, reply_markup=kb)
 
@@ -3247,6 +3291,9 @@ async def cb_revoke_sa_confirm(callback: CallbackQuery) -> None:
         return
 
     target_id = callback.data.replace("revoke_sa_confirm_", "").strip()
+    if target_id == caller_id:
+        await callback.answer("شما نمیتوانید دسترسی خودتان را عزل کنید!", show_alert=True)
+        return
     from database import demote_super_admin
     ok, msg = demote_super_admin(target_id)
     if not ok:
@@ -3271,7 +3318,7 @@ async def cb_revoke_sa_confirm(callback: CallbackQuery) -> None:
         "📋 لیست به‌روز مدیران ارشد فعال:"
     )
     try:
-        await callback.message.edit_text(text, reply_markup=kb)
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     except Exception:
         await safe_send_message(callback.bot, callback.message.chat.id, text, reply_markup=kb)
 
@@ -3285,10 +3332,16 @@ async def cb_sa_info(callback: CallbackQuery) -> None:
 async def cb_adm_main_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     tg_id = str(callback.from_user.id)
+    with get_db() as db:
+        if not is_user_admin(db, tg_id):
+            await callback.answer("⛔️ شما دسترسی به پنل مدیریت ندارید.", show_alert=True)
+            return
     text = _build_admin_help_text(settings.is_super_admin(tg_id))
     from keyboards import get_admin_main_inline_menu
     try:
-        await callback.message.edit_text(text, reply_markup=get_admin_main_inline_menu())
+        await callback.message.edit_text(
+            text, reply_markup=get_admin_main_inline_menu(), parse_mode="Markdown"
+        )
     except Exception:
         await safe_send_message(callback.bot, callback.message.chat.id, text, reply_markup=get_admin_main_inline_menu())
     await callback.answer()
@@ -3521,9 +3574,9 @@ async def cb_apply_db_merge(callback: CallbackQuery) -> None:
         return
 
     token = callback.data.replace("apply_db_merge_", "")
-    entry = _PENDING_DB_UPLOADS.get(token)
+    entry = _PENDING_DB_UPLOADS.pop(token, None)
     if not entry:
-        await callback.answer("اعتبار این درخواست منقضی شده است. لطفاً فایل را دوباره ارسال کنید.", show_alert=True)
+        await callback.answer("اعتبار این درخواست منقضی شده یا در حال اجرا است. لطفاً فایل را دوباره ارسال کنید.", show_alert=True)
         return
 
     temp_path_str, orig_name, _ = entry
@@ -3537,7 +3590,6 @@ async def cb_apply_db_merge(callback: CallbackQuery) -> None:
     from database import restore_database_merge
 
     ok, msg, summary = await asyncio.to_thread(restore_database_merge, temp_path_str)
-    _PENDING_DB_UPLOADS.pop(token, None)
     temp_p = Path(temp_path_str)
     if temp_p.exists():
         try:
@@ -3585,9 +3637,9 @@ async def cb_apply_db_replace(callback: CallbackQuery) -> None:
         return
 
     token = callback.data.replace("apply_db_replace_", "")
-    entry = _PENDING_DB_UPLOADS.get(token)
+    entry = _PENDING_DB_UPLOADS.pop(token, None)
     if not entry:
-        await callback.answer("اعتبار این درخواست منقضی شده است. لطفاً فایل را دوباره ارسال کنید.", show_alert=True)
+        await callback.answer("اعتبار این درخواست منقضی شده یا در حال اجرا است. لطفاً فایل را دوباره ارسال کنید.", show_alert=True)
         return
 
     temp_path_str, orig_name, _ = entry
@@ -3601,7 +3653,6 @@ async def cb_apply_db_replace(callback: CallbackQuery) -> None:
     from database import restore_database_replace
 
     ok, msg, stats = await asyncio.to_thread(restore_database_replace, temp_path_str)
-    _PENDING_DB_UPLOADS.pop(token, None)
     temp_p = Path(temp_path_str)
     if temp_p.exists():
         try:
@@ -4388,8 +4439,14 @@ async def cb_broadcast_confirm_send(callback: CallbackQuery, state: FSMContext) 
     admin_id = str(callback.from_user.id)
 
     if not msg_text:
-        await callback.answer("متن پیام یافت نشد.", show_alert=True)
+        await callback.answer("متن پیام یافت نشد یا قبلاً ارسال شده است.", show_alert=True)
         return
+
+    await state.clear()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
     with get_db() as db:
         is_super = settings.is_super_admin(admin_id)
@@ -4519,9 +4576,9 @@ async def cmd_test_status(message: Message) -> None:
 @admin_router.message(Command("test_reminder"))
 async def cmd_test_reminder(message: Message) -> None:
     user_id = str(message.from_user.id)
-    with get_db() as db:
-        if not is_user_admin(db, user_id):
-            return
+    if not settings.is_super_admin(user_id):
+        await safe_reply(message, "⛔️ این دستور سراسری فقط مخصوص مدیر ارشد است.")
+        return
     from handlers import send_study_reminders
 
     await safe_reply(message, "⏳ در حال اجرای دستی یادآوری شبانه...")
@@ -4556,9 +4613,9 @@ async def cmd_test_leaderboard(message: Message) -> None:
 @admin_router.message(Command("test_archive"))
 async def cmd_test_archive(message: Message) -> None:
     user_id = str(message.from_user.id)
-    with get_db() as db:
-        if not is_user_admin(db, user_id):
-            return
+    if not settings.is_super_admin(user_id):
+        await safe_reply(message, "⛔️ این دستور سراسری فقط مخصوص مدیر ارشد است.")
+        return
     from handlers import send_daily_admin_reports
 
     await safe_reply(message, "⏳ در حال ارسال گزارش آرشیو روزانه ادمین‌ها...")
@@ -4569,9 +4626,9 @@ async def cmd_test_archive(message: Message) -> None:
 @admin_router.message(Command("test_report"))
 async def cmd_test_weekly_report(message: Message) -> None:
     user_id = str(message.from_user.id)
-    with get_db() as db:
-        if not is_user_admin(db, user_id):
-            return
+    if not settings.is_super_admin(user_id):
+        await safe_reply(message, "⛔️ این دستور سراسری فقط مخصوص مدیر ارشد است.")
+        return
     from weekly_report import send_weekly_reports
 
     await safe_reply(message, "⏳ در حال تولید و ارسال گزارش هفتگی و اکسل...")
@@ -4582,9 +4639,9 @@ async def cmd_test_weekly_report(message: Message) -> None:
 @admin_router.message(Command("test_daily"))
 async def cmd_test_daily_user_report(message: Message) -> None:
     user_id = str(message.from_user.id)
-    with get_db() as db:
-        if not is_user_admin(db, user_id):
-            return
+    if not settings.is_super_admin(user_id):
+        await safe_reply(message, "⛔️ این دستور سراسری فقط مخصوص مدیر ارشد است.")
+        return
     from handlers import send_daily_user_reports
 
     await safe_reply(message, "⏳ در حال ارسال کارنامه صبحگاهی به کاربران...")
@@ -4595,9 +4652,9 @@ async def cmd_test_daily_user_report(message: Message) -> None:
 @admin_router.message(Command("test_all"))
 async def cmd_test_all_jobs(message: Message) -> None:
     user_id = str(message.from_user.id)
-    with get_db() as db:
-        if not is_user_admin(db, user_id):
-            return
+    if not settings.is_super_admin(user_id):
+        await safe_reply(message, "⛔️ این دستور سراسری فقط مخصوص مدیر ارشد است.")
+        return
     from handlers import (
         midnight_job,
         send_daily_admin_reports,
@@ -4618,9 +4675,9 @@ async def cmd_test_all_jobs(message: Message) -> None:
 @admin_router.message(Command("test_startup"))
 async def cmd_test_startup_notification(message: Message) -> None:
     user_id = str(message.from_user.id)
-    with get_db() as db:
-        if not is_user_admin(db, user_id):
-            return
+    if not settings.is_super_admin(user_id):
+        await safe_reply(message, "⛔️ این دستور سراسری فقط مخصوص مدیر ارشد است.")
+        return
     from handlers import send_startup_notification
 
     await safe_reply(message, "⏳ در حال ارسال پیام تست فعال‌سازی (استارتاپ) به ادمین‌ها...")

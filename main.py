@@ -63,7 +63,7 @@ class BaleAiohttpSession(AiohttpSession):
             form.add_field(
                 key,
                 file_payload,
-                filename=value.filename or (os.path.basename(value.path) if hasattr(value, "path") else key),
+                filename=value.filename or (os.path.basename(str(value.path)) if getattr(value, "path", None) else key),
             )
         return form
 
@@ -174,9 +174,9 @@ async def main() -> None:
         except Exception as exc:
             logger.error(f"خطای مدیریت‌شده در هوک استارتاپ دیسپچر: {exc}", exc_info=True)
 
-    # راه‌اندازی زمان‌بند خودکار و اجرای جبرانی جاب‌های جاافتاده
-    scheduler = setup_scheduler(bot)
+    # اجرای جبرانی جاب‌های جاافتاده و سپس راه‌اندازی زمان‌بند خودکار
     await run_startup_catchups(bot)
+    scheduler = setup_scheduler(bot)
 
     logger.info(
         f"ربات باشگاه کتابخوانی «کتابخوارشو» متصل به {settings.API_URL} آماده دریافت پیام‌هاست..."

@@ -19,9 +19,13 @@ class Config:
         self.BALE_API_URL: str = self.API_URL
 
         raw_admin_ids: str = os.getenv("ADMIN_IDS", "").strip()
-        self.ADMIN_IDS: List[str] = [
-            adm.strip() for adm in raw_admin_ids.split(",") if adm.strip()
-        ]
+        raw_super_ids: str = os.getenv("SUPER_ADMIN_IDS", "").strip()
+        combined_admins: str = f"{raw_admin_ids},{raw_super_ids}"
+        self.ADMIN_IDS: List[str] = list(
+            dict.fromkeys(
+                adm.strip() for adm in combined_admins.split(",") if adm.strip()
+            )
+        )
 
         self.ARCHIVE_CHANNEL: str = os.getenv("ARCHIVE_CHANNEL", "").strip()
         raw_db_url: str = os.getenv(

@@ -150,6 +150,9 @@ _BACKUP_LOCK = threading.RLock()
 
 def reload_superadmins_from_db() -> None:
     """بارگذاری مجدد سوپرادمین‌های پایدار از جدول system_state به حافظه"""
+    settings.ADMIN_IDS = sorted(settings.root_admin_ids)
+    if hasattr(settings, "_extra_superadmins"):
+        settings._extra_superadmins.clear()
     with get_db() as db:
         extra_sas = (
             db.query(SystemState.key)
@@ -680,7 +683,7 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                         if a_dict.get("cycle_id") is not None:
                             a_dict["cycle_id"] = cycle_id_map.get(int(a_dict["cycle_id"]), a_dict["cycle_id"])
                         exists = dst_conn.execute(
-                            "SELECT id FROM activity_logs WHERE user_id = ? AND league_id = ? AND log_date = ?",
+                            "SELECT id FROM activity_logs WHERE user_id = ? AND COALESCE(league_id, '') = COALESCE(?, '') AND log_date = ?",
                             (a_dict["user_id"], a_dict.get("league_id"), a_dict["log_date"]),
                         ).fetchone()
                         if not exists:

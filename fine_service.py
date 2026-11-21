@@ -367,6 +367,9 @@ def total_owed(debtors: List[Dict[str, Any]]) -> int:
     return sum(int(d["owed"]) for d in debtors)
 
 
+_PAYMENT_LOCK = threading.RLock()
+
+
 def record_payment(
     db: Session,
     league_id: str,
@@ -380,20 +383,21 @@ def record_payment(
     """
     if amount <= 0:
         return 0
-    bal = get_user_balance(db, league_id, user_id)
-    applied = min(int(amount), bal["owed"])
-    if applied <= 0:
-        return 0
-    db.add(
-        FinePayment(
-            league_id=league_id,
-            user_id=user_id,
-            amount=applied,
-            recorded_by=str(recorded_by),
+    with _PAYMENT_LOCK:
+        bal = get_user_balance(db, league_id, user_id)
+        applied = min(int(amount), bal["owed"])
+        if applied <= 0:
+            return 0
+        db.add(
+            FinePayment(
+                league_id=league_id,
+                user_id=user_id,
+                amount=applied,
+                recorded_by=str(recorded_by),
+            )
         )
-    )
-    db.commit()
-    return applied
+        db.commit()
+        return applied
 
 
 def get_user_fine_records(db: Session, league_id: str, user_id: str) -> List[FineRecord]:

@@ -214,7 +214,10 @@ class DateService:
             if jm > 6 and jd == 31:
                 return None
             gy, gm, gd = cls.jalali_to_gregorian(jy, jm, jd)
-            return date(gy, gm, gd)
+            converted = date(gy, gm, gd)
+            if cls.gregorian_to_jalali(converted.year, converted.month, converted.day) != (jy, jm, jd):
+                return None
+            return converted
         except ValueError:
             return None
 
@@ -814,9 +817,10 @@ class ReportService:
                 grp_prefix = f"G{lg.group_id}_" if multi_group else ""
                 for cyc in cycles:
                     sheet_title = f"{grp_prefix}{lg.name[:12]}_چله{cyc.cycle_number}_{'فعال' if cyc.status == 'active' else 'پایان'}"
-                    sheet_title = re.sub(r'[\/*?:\[\]]', "_", sheet_title)[:31]
+                    sheet_title = re.sub(r'[\\/*?:\[\]]', "_", sheet_title)[:31]
                     if sheet_title in wb.sheetnames:
-                        sheet_title = f"{sheet_title[:27]}_{cyc.id}"[:31]
+                        suffix = f"_{cyc.id}"
+                        sheet_title = f"{sheet_title[: max(0, 31 - len(suffix))]}{suffix}"
 
                     ws = wb.create_sheet(title=sheet_title)
                     sheets_added += 1

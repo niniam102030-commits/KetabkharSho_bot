@@ -461,7 +461,7 @@ def build_user_main_menu(db: Session, telegram_id: str | int, active_user: Optio
     is_adm = is_user_admin(db, tg_id)
     can_late = user_can_log_late(db, active_user) if active_user else False
     has_fines = False
-    if active_user and active_user.league_id:
+    if active_user and active_user.is_active and active_user.league_id:
         has_fines = fine_service.league_has_fines(db, active_user.league_id)
     is_fmgr = bool(fine_service.get_managed_leagues(db, tg_id))
     return get_main_menu(
@@ -914,6 +914,7 @@ async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> No
                     & (ActivityLog.cycle_number == league.cycle_number)
                 ),
             ).delete(synchronize_session=False)
+            set_system_state(db, f"streak_offset_{target_user.id}", "0", commit=False)
             db.commit()
         else:
             # ساخت پروفایل جدید برای عضویت در لیگ جدید
@@ -2178,6 +2179,8 @@ def _midnight_job_sync(today_str: str, yesterday_str: str, force: bool) -> bool:
             return False
 
         missing_dates = AbsenceService.get_missing_dates(last_run, yesterday_str)
+        if force and not missing_dates:
+            missing_dates = [yesterday_str]
         AbsenceService.process_absences_for_dates(db, missing_dates)
         AbsenceService.reconcile_historical_gaps(db)
         AbsenceService.reconcile_streaks(db)
@@ -2208,12 +2211,16 @@ def _midnight_job_sync(today_str: str, yesterday_str: str, force: bool) -> bool:
             # هوشمندی کامل در پالایش کلیه لاگ‌ها و امتیازات مربوط به قبل از تاریخ شروع رسمی
             cleanse_prestart_activity_and_scores(db, lg, cyc)
 
-        set_system_state(db, "last_daily_job_date", today_str)
+        if not force:
+            set_system_state(db, "last_daily_job_date", today_str)
         db.commit()
 
         # هم‌گام‌سازی دفتر جریمه با غیبت‌های ثبت‌شده امشب
         fine_service.sync_all_enabled_leagues(db)
     return True
+
+
+_midnight_job_lock = asyncio.Lock()
 
 
 async def midnight_job(bot: Bot, force: bool = False) -> None:
@@ -2223,15 +2230,16 @@ async def midnight_job(bot: Bot, force: bool = False) -> None:
     - پاکسازی خودکار فایل‌های اکسل موقت قدیمی‌تر از ۲۴ ساعت در پوشه reports/.
     - ثبت غیبت روز قبل و روزهای جاافتاده احتمالی در ترد جداگانه بدون بلاک کردن Event Loop.
     """
-    today_str = DateService.today_str()
-    yesterday_str = DateService.yesterday_str()
-    executed = await asyncio.to_thread(
-        _midnight_job_sync, today_str, yesterday_str, force
-    )
-    if executed:
-        logger.info(
-            f"جاب نیمه‌شب (midnight_job) برای تاریخ {today_str} با موفقیت اجرا شد."
+    async with _midnight_job_lock:
+        today_str = DateService.today_str()
+        yesterday_str = DateService.yesterday_str()
+        executed = await asyncio.to_thread(
+            _midnight_job_sync, today_str, yesterday_str, force
         )
+        if executed:
+            logger.info(
+                f"جاب نیمه‌شب (midnight_job) برای تاریخ {today_str} با موفقیت اجرا شد."
+            )
 
 
 _startup_notification_sent: bool = False
@@ -2416,7 +2424,8 @@ def _init_daily_admin_reports_sync(today_str: str, force: bool) -> Optional[List
             .order_by(League.id.asc())
             .all()
         ]
-        set_system_state(db, "last_daily_admin_report_date", today_str)
+        if not force:
+            set_system_state(db, "last_daily_admin_report_date", today_str)
         return league_ids
 
 
@@ -2431,8 +2440,8 @@ def _build_single_admin_report_sync(
         eff_start = cyc.start_shamsi or lg.start_shamsi
         if not DateService.league_has_started(eff_start):
             return None
-        curr_day = DateService.calculate_league_day(eff_start)
-        archived_day = max(1, curr_day - 1)
+        raw_day = DateService.calculate_raw_league_day(eff_start)
+        archived_day = max(1, min(settings.LEAGUE_DURATION, raw_day - 1))
         table_txt = format_league_leaderboard(db, lg)
         report_text = (
             f"📊 *آرشیو چله {cyc.cycle_number} روز {archived_day} لیگ: {escape_md(lg.name)}*\n\n"
@@ -2453,35 +2462,39 @@ def _build_single_admin_report_sync(
         return report_text, sorted(rcpt_set)
 
 
+_daily_admin_reports_lock = asyncio.Lock()
+
+
 async def send_daily_admin_reports(bot: Bot, force: bool = False) -> None:
     """
     ۲. جاب ساعت 01:00 بامداد:
     ارسال گزارش متنی رتبه‌بندی روز گذشته به صورت پلکانی و لیگ به لیگ،
     با اجرای کوئری‌ها در ترد جداگانه و کنترل نرخ ارسال.
     """
-    today_str = DateService.today_str()
-    league_ids = await asyncio.to_thread(
-        _init_daily_admin_reports_sync, today_str, force
-    )
-    if not league_ids:
-        return
+    async with _daily_admin_reports_lock:
+        today_str = DateService.today_str()
+        league_ids = await asyncio.to_thread(
+            _init_daily_admin_reports_sync, today_str, force
+        )
+        if not league_ids:
+            return
 
-    throttle = BroadcastThrottle()
-    for league_id in league_ids:
-        try:
-            built = await asyncio.to_thread(_build_single_admin_report_sync, league_id)
-            if not built:
-                continue
-            report_text, recipients = built
-        except Exception as exc:
-            logger.error(f"خطا در ساخت گزارش آرشیو لیگ {league_id}: {exc}", exc_info=True)
-            continue
-
-        for rcpt in recipients:
+        throttle = BroadcastThrottle()
+        for league_id in league_ids:
             try:
-                await send_text_chunks(bot, rcpt, report_text, throttle=throttle)
+                built = await asyncio.to_thread(_build_single_admin_report_sync, league_id)
+                if not built:
+                    continue
+                report_text, recipients = built
             except Exception as exc:
-                logger.warning(f"خطا در ارسال گزارش آرشیو به {rcpt}: {exc}")
+                logger.error(f"خطا در ساخت گزارش آرشیو لیگ {league_id}: {exc}", exc_info=True)
+                continue
+
+            for rcpt in recipients:
+                try:
+                    await send_text_chunks(bot, rcpt, report_text, throttle=throttle)
+                except Exception as exc:
+                    logger.warning(f"خطا در ارسال گزارش آرشیو به {rcpt}: {exc}")
 
 
 def _complete_and_rollover_cycle(
@@ -2892,7 +2905,8 @@ def _init_morning_reports_sync(
             .group_by(User.telegram_id)
             .all()
         }
-        set_system_state(db, "last_daily_user_report_date", today_str)
+        if not force:
+            set_system_state(db, "last_daily_user_report_date", today_str)
         return league_ids, admin_ids, profile_counts
 
 
@@ -3111,9 +3125,13 @@ def _build_study_reminders_outbox_sync(
 
             outbox.append((tg_id, full_msg, None))
 
-        set_system_state(db, "last_reminder_date", today_str)
+        if not force:
+            set_system_state(db, "last_reminder_date", today_str)
 
     return outbox
+
+
+_study_reminders_lock = asyncio.Lock()
 
 
 async def send_study_reminders(bot: Bot, force: bool = False) -> None:
@@ -3122,9 +3140,10 @@ async def send_study_reminders(bot: Bot, force: bool = False) -> None:
     آماده‌سازی لیست یادآوری در ترد پس‌زمینه (asyncio.to_thread) و ارسال پلکانی
     جهت جلوگیری از مسدود شدن Event Loop و Time-out پیام‌رسان بله.
     """
-    today_str = DateService.today_str()
-    outbox = await asyncio.to_thread(
-        _build_study_reminders_outbox_sync, today_str, force
-    )
-    if outbox:
-        await dispatch_outbox(bot, outbox, BroadcastThrottle())
+    async with _study_reminders_lock:
+        today_str = DateService.today_str()
+        outbox = await asyncio.to_thread(
+            _build_study_reminders_outbox_sync, today_str, force
+        )
+        if outbox:
+            await dispatch_outbox(bot, outbox, BroadcastThrottle())
