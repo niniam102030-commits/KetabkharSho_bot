@@ -1,6 +1,7 @@
 import os
 import uuid
 import shutil
+import secrets
 import sqlite3
 import asyncio
 import logging
@@ -431,12 +432,21 @@ def _prepare_row_for_destination(
     return final_dict
 
 
-def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str, int]]:
+def restore_database_merge(
+    uploaded_file_path: str,
+    conflict_strategy: str = "live_priority",
+) -> Tuple[bool, str, Dict[str, int]]:
     """
-    ادغام هوشمند و افزودن داده‌های جدید از فایل پایگاه داده آپلودشده به پایگاه داده فعال:
-    مجموعه‌ها، رمزها، ادمین‌ها، لیگ‌ها، چله‌ها، کاربران، امتیازات، لاگ‌ها و جریمه‌ها.
-    پیش از اعمال، بکاپ امن خودکار گرفته می‌شود.
+    ادغام هوشمند پایگاه داده آپلودشده به پایگاه داده فعال:
+    - حالت "live_priority" (پیش‌فرض): اولویت با دیتابیس زنده است؛ رکوردهای تکراری تغییر نمی‌کنند و فقط رکوردهای جدید ثبت می‌شوند.
+    - حالت "uploaded_overwrite": رکوردهای تکراری با اطلاعات فایل ارسالی جایگزین می‌شوند و رکوردهای جدید نیز افزوده می‌شوند.
+    پیش از اعمال، بکاپ امن خودکار گرفته می‌شود و از تکراری شدن رمز مجموعه‌های فعال جلوگیری می‌گردد.
     """
+    if conflict_strategy not in {"live_priority", "uploaded_overwrite"}:
+        return False, f"روش ادغام نامعتبر است: {conflict_strategy}", {}
+
+    overwrite_existing = conflict_strategy == "uploaded_overwrite"
+
     live_path = get_live_sqlite_path()
     if not live_path or not live_path.exists():
         return False, "پایگاه داده فعال SQLite یافت نشد.", {}
@@ -465,6 +475,17 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
             "results": 0,
             "messages": 0,
             "terms": 0,
+            "updated_groups": 0,
+            "updated_leagues": 0,
+            "updated_cycles": 0,
+            "updated_users": 0,
+            "updated_logs": 0,
+            "updated_fines": 0,
+            "updated_results": 0,
+            "updated_messages": 0,
+            "updated_terms": 0,
+            "skipped_existing": 0,
+            "password_conflicts": 0,
         }
 
         src_conn = sqlite3.connect(uploaded_file_path, timeout=30)
@@ -472,6 +493,47 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
         dst_conn = sqlite3.connect(str(live_path), timeout=60)
         dst_conn.row_factory = sqlite3.Row
         merge_ok = False
+
+        def _has_active_pwd_conflict(pwd: str, exclude_group_id: int) -> bool:
+            return (
+                dst_conn.execute(
+                    "SELECT id FROM groups WHERE password = ? AND is_deleted = 0 AND id != ? LIMIT 1",
+                    (pwd, exclude_group_id),
+                ).fetchone()
+                is not None
+            )
+
+        def _next_unique_group_password() -> str:
+            for _ in range(200):
+                cand = f"{secrets.randbelow(900000) + 100000}"
+                if not dst_conn.execute(
+                    "SELECT 1 FROM groups WHERE password = ? AND is_deleted = 0 LIMIT 1",
+                    (cand,),
+                ).fetchone():
+                    return cand
+            return secrets.token_hex(4)
+
+        def _build_safe_update(
+            dst_cols: Dict[str, Dict[str, Any]],
+            src_dict: Dict[str, Any],
+            exists_row: sqlite3.Row,
+            candidate_cols: List[str],
+        ) -> Tuple[List[str], List[Any]]:
+            set_clauses: List[str] = []
+            values: List[Any] = []
+            exists_keys = set(exists_row.keys())
+            for col in candidate_cols:
+                if col not in dst_cols or col not in src_dict:
+                    continue
+                val = src_dict[col]
+                if val is None and dst_cols[col]["notnull"]:
+                    if col in exists_keys and exists_row[col] is not None:
+                        val = exists_row[col]
+                    else:
+                        val = COMMON_COLUMN_DEFAULTS.get(col, 0)
+                set_clauses.append(f"{col} = ?")
+                values.append(val)
+            return set_clauses, values
 
         try:
             src_tables = {
@@ -487,20 +549,51 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                     dst_cols = _get_table_columns_info(dst_conn, "groups")
                     for row in src_conn.execute("SELECT * FROM groups").fetchall():
                         g_dict = dict(row)
+                        gid = int(g_dict["id"])
                         exists = dst_conn.execute(
-                            "SELECT id FROM groups WHERE id = ?", (g_dict["id"],)
+                            "SELECT id, name, password, is_deleted FROM groups WHERE id = ?",
+                            (gid,),
                         ).fetchone()
                         if exists:
-                            dst_conn.execute(
-                                "UPDATE groups SET name = ?, password = ?, is_deleted = ? WHERE id = ?",
-                                (
-                                    g_dict["name"],
-                                    g_dict["password"] if g_dict.get("password") is not None else "1234",
-                                    g_dict["is_deleted"] if g_dict.get("is_deleted") is not None else 0,
-                                    g_dict["id"],
-                                ),
-                            )
+                            if overwrite_existing:
+                                cand_name = str(g_dict.get("name") or exists["name"] or f"مجموعه {gid}")
+                                cand_pwd = (
+                                    str(g_dict["password"])
+                                    if g_dict.get("password") is not None
+                                    else str(exists["password"] or "1234")
+                                )
+                                cand_del = (
+                                    int(g_dict["is_deleted"])
+                                    if g_dict.get("is_deleted") is not None
+                                    else int(exists["is_deleted"] or 0)
+                                )
+                                if cand_del == 0 and _has_active_pwd_conflict(cand_pwd, gid):
+                                    live_pwd = str(exists["password"] or "")
+                                    if live_pwd and not _has_active_pwd_conflict(live_pwd, gid):
+                                        cand_pwd = live_pwd
+                                    else:
+                                        cand_pwd = _next_unique_group_password()
+                                    summary["password_conflicts"] += 1
+                                    logger.warning(
+                                        f"تعارض رمز در ادغام مجموعه {gid} برطرف شد؛ رمز یکتا تنظیم گردید: {cand_pwd}"
+                                    )
+                                dst_conn.execute(
+                                    "UPDATE groups SET name = ?, password = ?, is_deleted = ? WHERE id = ?",
+                                    (cand_name, cand_pwd, cand_del, gid),
+                                )
+                                summary["updated_groups"] += 1
+                            else:
+                                summary["skipped_existing"] += 1
                         else:
+                            cand_del = int(g_dict["is_deleted"]) if g_dict.get("is_deleted") is not None else 0
+                            cand_pwd = str(g_dict["password"]) if g_dict.get("password") is not None else "1234"
+                            if cand_del == 0 and _has_active_pwd_conflict(cand_pwd, gid):
+                                new_pwd = _next_unique_group_password()
+                                g_dict["password"] = new_pwd
+                                summary["password_conflicts"] += 1
+                                logger.warning(
+                                    f"تعارض رمز در افزودن مجموعه {gid} برطرف شد؛ رمز جدید: {new_pwd}"
+                                )
                             final_g = _prepare_row_for_destination(dst_cols, g_dict, COMMON_COLUMN_DEFAULTS)
                             cols = list(final_g.keys())
                             placeholders = ", ".join(["?"] * len(cols))
@@ -518,7 +611,9 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                             "SELECT id FROM group_admins WHERE group_id = ? AND user_id = ?",
                             (ga_dict["group_id"], ga_dict["user_id"]),
                         ).fetchone()
-                        if not exists:
+                        if exists:
+                            summary["skipped_existing"] += 1
+                        else:
                             final_ga = _prepare_row_for_destination(dst_cols, ga_dict, COMMON_COLUMN_DEFAULTS)
                             cols = [k for k in final_ga.keys() if k != "id"]
                             placeholders = ", ".join(["?"] * len(cols))
@@ -533,34 +628,39 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                     for row in src_conn.execute("SELECT * FROM leagues").fetchall():
                         l_dict = dict(row)
                         exists = dst_conn.execute(
-                            "SELECT id, fine_absent_amount, fine_late_amount FROM leagues WHERE id = ?",
+                            "SELECT * FROM leagues WHERE id = ?",
                             (l_dict["id"],),
                         ).fetchone()
                         if exists:
-                            dst_conn.execute(
-                                """
-                                UPDATE leagues SET
-                                    name = ?, floor = ?, start_shamsi = ?, current_day = ?,
-                                    is_deleted = ?, is_active = ?, cycle_number = ?,
-                                    fines_enabled = ?, fine_absent_amount = ?, fine_late_amount = ?,
-                                    archive_enabled = ?
-                                WHERE id = ?
-                                """,
-                                (
-                                    l_dict["name"],
-                                    l_dict["floor"] if l_dict.get("floor") is not None else 10,
-                                    l_dict.get("start_shamsi"),
-                                    l_dict["current_day"] if l_dict.get("current_day") is not None else 1,
-                                    l_dict["is_deleted"] if l_dict.get("is_deleted") is not None else 0,
-                                    l_dict["is_active"] if l_dict.get("is_active") is not None else 1,
-                                    l_dict["cycle_number"] if l_dict.get("cycle_number") is not None else 1,
-                                    l_dict["fines_enabled"] if l_dict.get("fines_enabled") is not None else 0,
-                                    l_dict["fine_absent_amount"] if l_dict.get("fine_absent_amount") is not None else exists["fine_absent_amount"],
-                                    l_dict["fine_late_amount"] if l_dict.get("fine_late_amount") is not None else exists["fine_late_amount"],
-                                    l_dict["archive_enabled"] if l_dict.get("archive_enabled") is not None else 1,
-                                    l_dict["id"],
-                                ),
-                            )
+                            if overwrite_existing:
+                                clauses, vals = _build_safe_update(
+                                    dst_cols,
+                                    l_dict,
+                                    exists,
+                                    [
+                                        "name",
+                                        "floor",
+                                        "start_shamsi",
+                                        "current_day",
+                                        "is_deleted",
+                                        "is_active",
+                                        "is_finished",
+                                        "cycle_number",
+                                        "fines_enabled",
+                                        "fine_absent_amount",
+                                        "fine_late_amount",
+                                        "archive_enabled",
+                                    ],
+                                )
+                                if clauses:
+                                    vals.append(l_dict["id"])
+                                    dst_conn.execute(
+                                        f"UPDATE leagues SET {', '.join(clauses)} WHERE id = ?",
+                                        vals,
+                                    )
+                                summary["updated_leagues"] += 1
+                            else:
+                                summary["skipped_existing"] += 1
                         else:
                             final_l = _prepare_row_for_destination(dst_cols, l_dict, COMMON_COLUMN_DEFAULTS)
                             cols = list(final_l.keys())
@@ -583,7 +683,9 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                             "SELECT id FROM league_fine_managers WHERE league_id = ? AND telegram_id = ?",
                             (fm_dict["league_id"], fm_dict["telegram_id"]),
                         ).fetchone()
-                        if not exists:
+                        if exists:
+                            summary["skipped_existing"] += 1
+                        else:
                             final_fm = _prepare_row_for_destination(dst_cols, fm_dict, COMMON_COLUMN_DEFAULTS)
                             cols = [k for k in final_fm.keys() if k != "id"]
                             placeholders = ", ".join(["?"] * len(cols))
@@ -599,12 +701,28 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                         c_dict = dict(row)
                         src_cid = c_dict.get("id")
                         exists = dst_conn.execute(
-                            "SELECT id FROM cycles WHERE league_id = ? AND cycle_number = ?",
+                            "SELECT * FROM cycles WHERE league_id = ? AND cycle_number = ?",
                             (c_dict["league_id"], c_dict.get("cycle_number", 1)),
                         ).fetchone()
                         if exists:
                             if src_cid is not None:
                                 cycle_id_map[int(src_cid)] = int(exists["id"])
+                            if overwrite_existing:
+                                clauses, vals = _build_safe_update(
+                                    dst_cols,
+                                    c_dict,
+                                    exists,
+                                    ["start_shamsi", "end_shamsi", "current_day", "status", "finished_at"],
+                                )
+                                if clauses:
+                                    vals.append(exists["id"])
+                                    dst_conn.execute(
+                                        f"UPDATE cycles SET {', '.join(clauses)} WHERE id = ?",
+                                        vals,
+                                    )
+                                summary["updated_cycles"] += 1
+                            else:
+                                summary["skipped_existing"] += 1
                         else:
                             final_c = _prepare_row_for_destination(dst_cols, c_dict, COMMON_COLUMN_DEFAULTS)
                             cols = [k for k in final_c.keys() if k != "id"]
@@ -622,52 +740,50 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                     for row in src_conn.execute("SELECT * FROM users").fetchall():
                         u_dict = dict(row)
                         exists = dst_conn.execute(
-                            "SELECT id, half_coupons, one_min_coupons, is_active FROM users WHERE id = ?",
+                            "SELECT * FROM users WHERE id = ?",
                             (u_dict["id"],),
                         ).fetchone()
                         if exists:
-                            half_val = (
-                                int(u_dict["half_coupons"])
-                                if u_dict.get("half_coupons") is not None
-                                else int(exists["half_coupons"])
-                            )
-                            one_val = (
-                                int(u_dict["one_min_coupons"])
-                                if u_dict.get("one_min_coupons") is not None
-                                else int(exists["one_min_coupons"])
-                            )
-                            active_val = (
-                                int(u_dict["is_active"])
-                                if u_dict.get("is_active") is not None
-                                else int(exists["is_active"])
-                            )
-                            dst_conn.execute(
-                                """
-                                UPDATE users SET
-                                    name = ?, first_name = ?, last_name = ?, league_id = ?,
-                                    points = MAX(points, ?),
-                                    total_minutes = MAX(total_minutes, ?),
-                                    total_pages = MAX(total_pages, ?),
-                                    streak = MAX(streak, ?),
-                                    half_coupons = ?, one_min_coupons = ?,
-                                    is_active = ?
-                                WHERE id = ?
-                                """,
-                                (
-                                    u_dict["name"],
-                                    u_dict.get("first_name"),
-                                    u_dict.get("last_name"),
-                                    u_dict.get("league_id"),
-                                    float(u_dict["points"] if u_dict.get("points") is not None else 0.0),
-                                    int(u_dict["total_minutes"] if u_dict.get("total_minutes") is not None else 0),
-                                    int(u_dict["total_pages"] if u_dict.get("total_pages") is not None else 0),
-                                    int(u_dict["streak"] if u_dict.get("streak") is not None else 0),
-                                    half_val,
-                                    one_val,
-                                    active_val,
-                                    u_dict["id"],
-                                ),
-                            )
+                            if overwrite_existing:
+                                clauses, vals = _build_safe_update(
+                                    dst_cols,
+                                    u_dict,
+                                    exists,
+                                    [
+                                        "name",
+                                        "first_name",
+                                        "last_name",
+                                        "group_id",
+                                        "league_id",
+                                        "points",
+                                        "total_minutes",
+                                        "total_pages",
+                                        "streak",
+                                        "no_study_days",
+                                        "absent_days_list",
+                                        "late_days_list",
+                                        "half_coupons",
+                                        "one_min_coupons",
+                                        "user_floor",
+                                        "last_log_date",
+                                        "today_minutes",
+                                        "today_pages",
+                                        "today_points",
+                                        "today_half_used",
+                                        "today_one_min_used",
+                                        "is_active",
+                                        "reminder_enabled",
+                                    ],
+                                )
+                                if clauses:
+                                    vals.append(u_dict["id"])
+                                    dst_conn.execute(
+                                        f"UPDATE users SET {', '.join(clauses)} WHERE id = ?",
+                                        vals,
+                                    )
+                                summary["updated_users"] += 1
+                            else:
+                                summary["skipped_existing"] += 1
                         else:
                             final_u = _prepare_row_for_destination(dst_cols, u_dict, COMMON_COLUMN_DEFAULTS)
                             cols = list(final_u.keys())
@@ -685,10 +801,37 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                         if a_dict.get("cycle_id") is not None:
                             a_dict["cycle_id"] = cycle_id_map.get(int(a_dict["cycle_id"]))
                         exists = dst_conn.execute(
-                            "SELECT id FROM activity_logs WHERE user_id = ? AND COALESCE(league_id, '') = COALESCE(?, '') AND log_date = ?",
+                            "SELECT * FROM activity_logs WHERE user_id = ? AND COALESCE(league_id, '') = COALESCE(?, '') AND log_date = ?",
                             (a_dict["user_id"], a_dict.get("league_id"), a_dict["log_date"]),
                         ).fetchone()
-                        if not exists:
+                        if exists:
+                            if overwrite_existing:
+                                clauses, vals = _build_safe_update(
+                                    dst_cols,
+                                    a_dict,
+                                    exists,
+                                    [
+                                        "cycle_id",
+                                        "cycle_number",
+                                        "league_day",
+                                        "minutes",
+                                        "pages",
+                                        "points_earned",
+                                        "half_coupon_used",
+                                        "one_min_coupon_used",
+                                        "log_hour",
+                                    ],
+                                )
+                                if clauses:
+                                    vals.append(exists["id"])
+                                    dst_conn.execute(
+                                        f"UPDATE activity_logs SET {', '.join(clauses)} WHERE id = ?",
+                                        vals,
+                                    )
+                                summary["updated_logs"] += 1
+                            else:
+                                summary["skipped_existing"] += 1
+                        else:
                             final_a = _prepare_row_for_destination(dst_cols, a_dict, COMMON_COLUMN_DEFAULTS)
                             cols = [k for k in final_a.keys() if k != "id"]
                             placeholders = ", ".join(["?"] * len(cols))
@@ -705,7 +848,7 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                         if fr_dict.get("cycle_id") is not None:
                             fr_dict["cycle_id"] = cycle_id_map.get(int(fr_dict["cycle_id"]))
                         exists = dst_conn.execute(
-                            "SELECT id FROM fine_records WHERE user_id = ? AND league_id = ? AND COALESCE(cycle_id, -1) = COALESCE(?, -1) AND league_day = ? AND kind = ?",
+                            "SELECT * FROM fine_records WHERE user_id = ? AND league_id = ? AND COALESCE(cycle_id, -1) = COALESCE(?, -1) AND league_day = ? AND kind = ?",
                             (
                                 fr_dict["user_id"],
                                 fr_dict.get("league_id"),
@@ -714,7 +857,24 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                                 fr_dict["kind"],
                             ),
                         ).fetchone()
-                        if not exists:
+                        if exists:
+                            if overwrite_existing:
+                                clauses, vals = _build_safe_update(
+                                    dst_cols,
+                                    fr_dict,
+                                    exists,
+                                    ["amount", "is_waived", "is_frozen", "waived_by"],
+                                )
+                                if clauses:
+                                    vals.append(exists["id"])
+                                    dst_conn.execute(
+                                        f"UPDATE fine_records SET {', '.join(clauses)} WHERE id = ?",
+                                        vals,
+                                    )
+                                summary["updated_fines"] += 1
+                            else:
+                                summary["skipped_existing"] += 1
+                        else:
                             final_fr = _prepare_row_for_destination(dst_cols, fr_dict, COMMON_COLUMN_DEFAULTS)
                             cols = [k for k in final_fr.keys() if k != "id"]
                             placeholders = ", ".join(["?"] * len(cols))
@@ -739,7 +899,9 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                                 fp_dict.get("created_at"),
                             ),
                         ).fetchone()
-                        if not exists:
+                        if exists:
+                            summary["skipped_existing"] += 1
+                        else:
                             final_fp = _prepare_row_for_destination(dst_cols, fp_dict, COMMON_COLUMN_DEFAULTS)
                             cols = [k for k in final_fp.keys() if k != "id"]
                             placeholders = ", ".join(["?"] * len(cols))
@@ -761,10 +923,41 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                         else:
                             continue
                         exists = dst_conn.execute(
-                            "SELECT id FROM cycle_results WHERE cycle_id = ? AND user_id = ?",
+                            "SELECT * FROM cycle_results WHERE cycle_id = ? AND user_id = ?",
                             (cr_dict.get("cycle_id"), cr_dict["user_id"]),
                         ).fetchone()
-                        if not exists:
+                        if exists:
+                            if overwrite_existing:
+                                clauses, vals = _build_safe_update(
+                                    dst_cols,
+                                    cr_dict,
+                                    exists,
+                                    [
+                                        "user_name",
+                                        "final_rank",
+                                        "points",
+                                        "total_minutes",
+                                        "total_pages",
+                                        "streak",
+                                        "no_study_days",
+                                        "absent_days_list",
+                                        "late_days_list",
+                                        "half_coupons_used",
+                                        "one_min_coupons_used",
+                                        "half_coupons_remaining",
+                                        "one_min_coupons_remaining",
+                                    ],
+                                )
+                                if clauses:
+                                    vals.append(exists["id"])
+                                    dst_conn.execute(
+                                        f"UPDATE cycle_results SET {', '.join(clauses)} WHERE id = ?",
+                                        vals,
+                                    )
+                                summary["updated_results"] += 1
+                            else:
+                                summary["skipped_existing"] += 1
+                        else:
                             final_cr = _prepare_row_for_destination(dst_cols, cr_dict, COMMON_COLUMN_DEFAULTS)
                             cols = [k for k in final_cr.keys() if k != "id"]
                             placeholders = ", ".join(["?"] * len(cols))
@@ -789,10 +982,14 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                             (gm_dict["group_id"], m_key),
                         ).fetchone()
                         if exists:
-                            dst_conn.execute(
-                                "UPDATE group_messages SET custom_text = ? WHERE id = ?",
-                                (m_text, exists["id"]),
-                            )
+                            if overwrite_existing:
+                                dst_conn.execute(
+                                    "UPDATE group_messages SET custom_text = ? WHERE id = ?",
+                                    (m_text, exists["id"]),
+                                )
+                                summary["updated_messages"] += 1
+                            else:
+                                summary["skipped_existing"] += 1
                         else:
                             final_gm = _prepare_row_for_destination(dst_cols, gm_dict, COMMON_COLUMN_DEFAULTS)
                             cols = [k for k in final_gm.keys() if k != "id"]
@@ -818,10 +1015,14 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                             (gt_dict["group_id"], t_key),
                         ).fetchone()
                         if exists:
-                            dst_conn.execute(
-                                "UPDATE group_terms SET custom_term = ? WHERE id = ?",
-                                (t_val, exists["id"]),
-                            )
+                            if overwrite_existing:
+                                dst_conn.execute(
+                                    "UPDATE group_terms SET custom_term = ? WHERE id = ?",
+                                    (t_val, exists["id"]),
+                                )
+                                summary["updated_terms"] += 1
+                            else:
+                                summary["skipped_existing"] += 1
                         else:
                             final_gt = _prepare_row_for_destination(dst_cols, gt_dict, COMMON_COLUMN_DEFAULTS)
                             cols = [k for k in final_gt.keys() if k != "id"]
@@ -840,17 +1041,29 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                 if src_state_table:
                     for row in src_conn.execute(f"SELECT * FROM {src_state_table}").fetchall():
                         ss_dict = dict(row)
+                        s_key = ss_dict["key"]
+                        s_val = ss_dict.get("value")
                         exists = dst_conn.execute(
-                            "SELECT key FROM system_state WHERE key = ?", (ss_dict["key"],)
+                            "SELECT key, value FROM system_state WHERE key = ?", (s_key,)
                         ).fetchone()
-                        if not exists:
+                        if exists:
+                            if overwrite_existing:
+                                if str(s_key).startswith("superadmin_") and str(exists["value"]) == "1" and str(s_val) != "1":
+                                    continue
+                                dst_conn.execute(
+                                    "UPDATE system_state SET value = ? WHERE key = ?",
+                                    (s_val, s_key),
+                                )
+                            else:
+                                summary["skipped_existing"] += 1
+                        else:
                             dst_conn.execute(
                                 "INSERT INTO system_state (key, value) VALUES (?, ?)",
-                                (ss_dict["key"], ss_dict.get("value")),
+                                (s_key, s_val),
                             )
 
             dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-            logger.info(f"ادغام هوشمند پایگاه داده با موفقیت انجام شد: {summary}")
+            logger.info(f"ادغام هوشمند پایگاه داده ({conflict_strategy}) با موفقیت انجام شد: {summary}")
             merge_ok = True
             return True, "عملیات ادغام هوشمند با موفقیت تکمیل شد.", summary
         except Exception as exc:

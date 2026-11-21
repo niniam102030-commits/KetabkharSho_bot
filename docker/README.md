@@ -19,9 +19,10 @@ cp .env.example .env
 nano .env
 ```
 
-۳. **بیلد و اجرای کانتینر:**
+۳. **دریافت ایمیج و اجرای کانتینر:**
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 ۴. **مشاهده لاگ‌های زنده ربات:**
@@ -43,7 +44,8 @@ chmod +x docker/deploy.sh
 یا دستورات زیر را دستی اجرا کند:
 ```bash
 git pull origin main
-docker compose up -d --build
+docker compose pull
+docker compose up -d --remove-orphans
 ```
 
 ---

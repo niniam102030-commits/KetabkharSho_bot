@@ -2398,7 +2398,13 @@ async def cb_execute_user_move_league(callback: CallbackQuery) -> None:
                 eff_start = cyc.start_shamsi or lg.start_shamsi
                 is_started = DateService.league_has_started(eff_start)
                 current_day = DateService.calculate_league_day(eff_start)
-                gift_points = float(max(0, (current_day - 1) * 10)) if (is_started and current_day > 1) else 0.0
+                raw_current_day = DateService.calculate_raw_league_day(eff_start)
+                is_awaiting_rollover = raw_current_day > settings.LEAGUE_DURATION
+                gift_points = (
+                    float(max(0, (current_day - 1) * 10))
+                    if (is_started and not is_awaiting_rollover and current_day > 1)
+                    else 0.0
+                )
 
                 import fine_service as _fine_service
                 _fine_service.freeze_user_fines(db, u.id, commit=False)
@@ -2446,6 +2452,11 @@ async def cb_execute_user_move_league(callback: CallbackQuery) -> None:
                 if not is_started:
                     days_left_s = DateService.days_until_league_start(eff_start)
                     cycle_status_line = f"📅 شروع رسمی چله {cyc.cycle_number}: `{eff_start}` ({days_left_s} روز مانده)"
+                elif is_awaiting_rollover:
+                    cycle_status_line = (
+                        f"⏳ چله {cyc.cycle_number} به پایان رسیده و چله جدید به‌زودی از روز ۱ آغاز می‌شود.\n"
+                        f"✨ امتیاز هدیه همگام‌سازی: {gift_points}"
+                    )
                 else:
                     cycle_status_line = (
                         f"🏆 چله {cyc.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION}\n"
@@ -2593,7 +2604,13 @@ async def _execute_user_add_second_league_impl(callback: CallbackQuery) -> None:
         eff_start = cyc.start_shamsi or lg.start_shamsi
         is_started = DateService.league_has_started(eff_start)
         current_day = DateService.calculate_league_day(eff_start)
-        gift_points = float(max(0, (current_day - 1) * 10)) if (is_started and current_day > 1) else 0.0
+        raw_current_day = DateService.calculate_raw_league_day(eff_start)
+        is_awaiting_rollover = raw_current_day > settings.LEAGUE_DURATION
+        gift_points = (
+            float(max(0, (current_day - 1) * 10))
+            if (is_started and not is_awaiting_rollover and current_day > 1)
+            else 0.0
+        )
         new_prof_id = generate_new_profile_id(db, tg_id, group_id=lg.group_id, league_id=lg.id)
 
         new_profile = User(
@@ -2625,6 +2642,11 @@ async def _execute_user_add_second_league_impl(callback: CallbackQuery) -> None:
         if not is_started:
             days_left_s = DateService.days_until_league_start(eff_start)
             gift_line = f"📅 شروع رسمی لیگ: `{eff_start}` ({days_left_s} روز مانده)"
+        elif is_awaiting_rollover:
+            gift_line = (
+                "⏳ چله فعلی به پایان رسیده و چله جدید به‌زودی از روز ۱ آغاز می‌شود؛ "
+                "امتیاز شما از ابتدای چله جدید محاسبه خواهد شد."
+            )
         else:
             gift_line = f"✨ امتیاز هدیه همگام‌سازی با روز {current_day} لیگ: {gift_points} امتیاز!"
         add_user_msg = MessageService.apply_terms(
@@ -3676,13 +3698,19 @@ async def handle_admin_database_upload(message: Message) -> None:
         kb_rows = [
             [
                 InlineKeyboardButton(
-                    text="🔀 ادغام هوشمند (افزودن داده‌های جدید)",
-                    callback_data=f"apply_db_merge_{temp_token}",
+                    text="🔀 ادغام (اولویت دیتابیس زنده — فقط رکوردهای جدید)",
+                    callback_data=f"apply_db_merge_live_{temp_token}",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="🔄 جایگزینی کامل (بازیابی قطعی)",
+                    text="🔀 ادغام (اولویت فایل ارسالی — جایگزینی تکراری‌ها + جدیدها)",
+                    callback_data=f"apply_db_merge_over_{temp_token}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 جایگزینی کامل (حذف دیتابیس فعلی و بازیابی قطعی)",
                     callback_data=f"apply_db_replace_{temp_token}",
                 )
             ],
@@ -3705,6 +3733,9 @@ async def handle_admin_database_upload(message: Message) -> None:
             f"📝 ثبت‌های مطالعه: *{stats.get('logs_count', 0)}* رکورد\n"
             f"💰 سوابق جریمه‌ها: *{stats.get('fines_count', 0)}* رکورد\n\n"
             f"⚠️ *لطفاً نحوه اعمال داده‌ها را انتخاب فرمایید:*\n"
+            f"• *ادغام با اولویت دیتابیس زنده:* اطلاعات فعلی سرور دست‌نخورده می‌ماند و فقط رکوردهای جدید ثبت می‌شوند.\n"
+            f"• *ادغام با اولویت فایل ارسالی:* رکوردهای تکراری با فایل ارسالی جایگزین و رکوردهای جدید افزوده می‌شوند.\n"
+            f"• *جایگزینی کامل:* کل دیتابیس فعلی حذف و با فایل ارسالی جایگزین می‌شود.\n"
             f"_(پیش از هر تغییری، یک نسخه پشتیبان خودکار از وضعیت فعلی سرور ذخیره خواهد شد)_"
         )
         await safe_reply(
@@ -3732,11 +3763,26 @@ async def cb_apply_db_merge(callback: CallbackQuery) -> None:
         await callback.answer("عدم دسترسی", show_alert=True)
         return
 
-    token = callback.data.replace("apply_db_merge_", "")
+    raw_data = callback.data or ""
+    if raw_data.startswith("apply_db_merge_live_"):
+        conflict_strategy = "live_priority"
+        token = raw_data[len("apply_db_merge_live_"):]
+    elif raw_data.startswith("apply_db_merge_over_"):
+        conflict_strategy = "uploaded_overwrite"
+        token = raw_data[len("apply_db_merge_over_"):]
+    else:
+        conflict_strategy = "live_priority"
+        token = raw_data[len("apply_db_merge_"):]
+
     entry = _PENDING_DB_UPLOADS.pop(token, None)
     if not entry:
         await callback.answer("اعتبار این درخواست منقضی شده یا در حال اجرا است. لطفاً فایل را دوباره ارسال کنید.", show_alert=True)
         return
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
     temp_path_str, orig_name, _ = entry
     await callback.answer("در حال ادغام هوشمند داده‌ها...")
@@ -3748,7 +3794,9 @@ async def cb_apply_db_merge(callback: CallbackQuery) -> None:
 
     from database import restore_database_merge
 
-    ok, msg, summary = await asyncio.to_thread(restore_database_merge, temp_path_str)
+    ok, msg, summary = await asyncio.to_thread(
+        restore_database_merge, temp_path_str, conflict_strategy
+    )
     temp_p = Path(temp_path_str)
     if temp_p.exists():
         try:
@@ -3773,15 +3821,41 @@ async def cb_apply_db_merge(callback: CallbackQuery) -> None:
 
     await asyncio.to_thread(_post_merge_sync)
 
+    if conflict_strategy == "uploaded_overwrite":
+        mode_line = "📥 *حالت اعمال‌شده:* اولویت با فایل ارسالی (رکوردهای تکراری جایگزین و رکوردهای جدید ثبت شدند)"
+        conflict_line = (
+            f"🔄 رکوردهای تکراری بروزرسانی‌شده: "
+            f"*{summary.get('updated_groups', 0)}* مجموعه، "
+            f"*{summary.get('updated_leagues', 0)}* لیگ، "
+            f"*{summary.get('updated_users', 0)}* کاربر، "
+            f"*{summary.get('updated_logs', 0)}* لاگ، "
+            f"*{summary.get('updated_fines', 0)}* جریمه\n"
+        )
+    else:
+        mode_line = "🛡 *حالت اعمال‌شده:* اولویت با دیتابیس زنده (فقط رکوردهای جدید ثبت شدند و داده‌های فعلی حفظ شدند)"
+        conflict_line = (
+            f"🛡 رکوردهای تکراریِ حفظ‌شده در دیتابیس زنده: *{summary.get('skipped_existing', 0)}* رکورد\n"
+        )
+
+    pwd_conflict_line = ""
+    if summary.get("password_conflicts", 0) > 0:
+        pwd_conflict_line = (
+            f"⚠️ تعداد *{summary['password_conflicts']}* تعارض رمز مجموعه فعال شناسایی "
+            f"و با حفظ یکتایی رمز برطرف شد.\n"
+        )
+
     report_text = (
         f"✅ *عملیات ادغام هوشمند پایگاه داده با موفقیت انجام شد!*\n\n"
+        f"{mode_line}\n\n"
         f"📊 *گزارش تغییرات اعمال‌شده از فایل «{escape_md(orig_name)}»:*\n"
-        f"🏢 مجموعه‌ها: *{summary.get('groups', 0)}* مجموعه جدید اضافه شد\n"
-        f"🏆 لیگ‌ها: *{summary.get('leagues', 0)}* لیگ همگام‌سازی شد\n"
-        f"👥 کاربران: *{summary.get('users', 0)}* کاربر جدید اضافه و کاربران قبلی به‌روز شدند\n"
-        f"📝 لاگ‌های مطالعه: *{summary.get('logs', 0)}* ثبت مطالعه جدید وارد شد\n"
-        f"💰 سوابق جریمه‌ها: *{summary.get('fines', 0)}* جریمه تثبیت شد\n"
-        f"👮 مسئولین جریمه: *{summary.get('fine_managers', 0)}* نفر افزوده شدند\n\n"
+        f"🏢 مجموعه‌های جدید: *{summary.get('groups', 0)}* مجموعه\n"
+        f"🏆 لیگ‌های جدید: *{summary.get('leagues', 0)}* لیگ\n"
+        f"👥 کاربران جدید: *{summary.get('users', 0)}* کاربر\n"
+        f"📝 لاگ‌های مطالعه جدید: *{summary.get('logs', 0)}* رکورد\n"
+        f"💰 سوابق جریمه‌های جدید: *{summary.get('fines', 0)}* رکورد\n"
+        f"👮 مسئولین جریمه جدید: *{summary.get('fine_managers', 0)}* نفر\n"
+        f"{conflict_line}"
+        f"{pwd_conflict_line}\n"
         f"💾 _نسخه پشتیبان ایمن از وضعیت قبل از ادغام در سرور ذخیره شد._\n"
         f"✨ تمام اطلاعات، رمزها، کاربران و امتیازات اکنون در دسترس هستند."
     )
@@ -3800,6 +3874,11 @@ async def cb_apply_db_replace(callback: CallbackQuery) -> None:
     if not entry:
         await callback.answer("اعتبار این درخواست منقضی شده یا در حال اجرا است. لطفاً فایل را دوباره ارسال کنید.", show_alert=True)
         return
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
     temp_path_str, orig_name, _ = entry
     await callback.answer("در حال جایگزینی کامل پایگاه داده...")
@@ -3880,7 +3959,7 @@ async def cmd_restore_help(message: Message) -> None:
         "📥 *راهنمای بارگذاری و بازیابی پایگاه داده:*\n\n"
         "جهت بازیابی یا اضافه کردن اطلاعات:\n"
         "کافیست فایل دیتابیس با پسوند `.db` (مثلاً فایلی که با دستور `/backup` ذخیره کرده‌اید) را به صورت *فایل (Document)* در همین چت ارسال فرمایید.\n\n"
-        "ربات بلافاصله فایل را اعتبارسنجی کرده و امکان *ادغام هوشمند (Merge)* یا *جایگزینی کامل (Replace)* را با حفظ کامل تمامی مجموعه‌ها، رمزها، کاربران، مسئولین جریمه و امتیازات در اختیارتان می‌گذارد."
+        "ربات بلافاصله فایل را اعتبارسنجی کرده و سه گزینه *ادغام با اولویت دیتابیس زنده (فقط رکوردهای جدید)*، *ادغام با اولویت فایل ارسالی (جایگزینی تکراری‌ها + جدیدها)* یا *جایگزینی کامل (Replace)* را با حفظ کامل تمامی مجموعه‌ها، رمزها، کاربران، مسئولین جریمه و امتیازات در اختیارتان می‌گذارد."
     )
     await safe_reply(message, text)
 

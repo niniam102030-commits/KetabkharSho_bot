@@ -1455,6 +1455,193 @@ async def run_all_tests() -> None:
 
     print("✅ [PASS] Scenario 18: Regression suite (Unicode digits, env fallback, cross-group guard, double-cancel, Day-1 archive skip, merge cycle isolation, waive pagination) verified.")
 
+    # -------------------------------------------------------------------------
+    # Scenario 19: تست‌های تاییدشده (موارد ۳، ۴، ۵ و ۶)
+    # -------------------------------------------------------------------------
+    from admin_handlers import cb_execute_user_move_league
+    from database import set_system_state, get_system_state, reload_superadmins_from_db
+
+    # ۱. مورد ۳: جلوگیری از دریافت امتیاز هدیه روز ۴۰ برای عضویت در بامداد روز ۴۱ (پیش از رول‌اوور)
+    day41_start = DateService.date_to_shamsi(
+        DateService.today_date() - timedelta(days=settings.LEAGUE_DURATION)
+    )
+    assert DateService.calculate_raw_league_day(day41_start) == settings.LEAGUE_DURATION + 1
+
+    with get_db() as db:
+        lg_day41 = League(
+            group_id=1,
+            name="لیگ روز ۴۱",
+            floor=10,
+            start_shamsi=day41_start,
+            is_active=True,
+        )
+        db.add(lg_day41)
+        lg_donor_for_move = League(
+            group_id=1,
+            name="لیگ مبدا انتقال روز ۴۱",
+            floor=10,
+            start_shamsi=DateService.today_shamsi(),
+            is_active=True,
+        )
+        db.add(lg_donor_for_move)
+        db.flush()
+        db.add(
+            User(
+                id="770102",
+                telegram_id="770102",
+                group_id=1,
+                name="کاربر انتقال ۴۱",
+                league_id=lg_donor_for_move.id,
+                points=25.0,
+                is_active=True,
+            )
+        )
+        db.add(
+            User(
+                id="770103",
+                telegram_id="770103",
+                group_id=1,
+                name="کاربر لیگ دوم ۴۱",
+                league_id=lg_donor_for_move.id,
+                points=10.0,
+                is_active=True,
+            )
+        )
+        db.commit()
+        lg_day41_id = lg_day41.id
+
+    d41_bot = MockBot()
+    d41_join_fsm = make_fsm(storage, d41_bot.id, "770101")
+    await cb_join_league(
+        MockCallbackQuery(d41_bot, "770101", f"join_{lg_day41_id}"),
+        d41_join_fsm,
+    )
+    await cb_execute_user_move_league(
+        MockCallbackQuery(d41_bot, SUPER_ADMIN_ID, f"adm_domove_{lg_day41_id}:770102")
+    )
+    await cb_execute_user_add_second_league(
+        MockCallbackQuery(d41_bot, SUPER_ADMIN_ID, f"adm_doaddl_{lg_day41_id}:770103")
+    )
+
+    with get_db() as db:
+        u_d41_join = db.query(User).filter(User.telegram_id == "770101", User.league_id == lg_day41_id).first()
+        u_d41_move = db.query(User).filter(User.telegram_id == "770102", User.league_id == lg_day41_id).first()
+        u_d41_add = db.query(User).filter(User.telegram_id == "770103", User.league_id == lg_day41_id).first()
+        assert u_d41_join is not None and u_d41_join.points == 0.0, f"عضویت در روز ۴۱ نباید امتیاز هدیه بدهد: {u_d41_join and u_d41_join.points}"
+        assert u_d41_move is not None and u_d41_move.points == 0.0, f"انتقال به لیگ در روز ۴۱ نباید امتیاز هدیه بدهد: {u_d41_move and u_d41_move.points}"
+        assert u_d41_add is not None and u_d41_add.points == 0.0, f"افزودن لیگ دوم در روز ۴۱ نباید امتیاز هدیه بدهد: {u_d41_add and u_d41_add.points}"
+
+    u_join_msgs = [m["text"] for m in d41_bot.sent_messages if m["chat_id"] == "770101"]
+    assert any("چله فعلی به پایان رسیده" in t for t in u_join_msgs), "پیام انتظار شروع چله جدید به کاربر روز ۴۱ ارسال نشد"
+
+    # ۲. مورد ۴: اعلان ثبت‌نام عضو جدید به GroupAdminهای مجموعه + بدون تکرار برای سوپرادمین
+    DEDICATED_G_ADMIN = "770011"
+    with get_db() as db:
+        if not db.query(GroupAdmin).filter(GroupAdmin.group_id == 2, GroupAdmin.user_id == DEDICATED_G_ADMIN).first():
+            db.add(GroupAdmin(group_id=2, user_id=DEDICATED_G_ADMIN))
+        if not db.query(GroupAdmin).filter(GroupAdmin.group_id == 2, GroupAdmin.user_id == str(SUPER_ADMIN_ID)).first():
+            db.add(GroupAdmin(group_id=2, user_id=str(SUPER_ADMIN_ID)))
+        db.commit()
+
+    notif_bot = MockBot()
+    notif_fsm = make_fsm(storage, notif_bot.id, "770201")
+    await cb_join_league(
+        MockCallbackQuery(notif_bot, "770201", f"join_{lg_g2_id}"),
+        notif_fsm,
+    )
+    g2_adm_notifs = [
+        m for m in notif_bot.sent_messages
+        if m["chat_id"] == DEDICATED_G_ADMIN and "عضو جدید ثبت نام کرد" in m["text"]
+    ]
+    sa_notifs = [
+        m for m in notif_bot.sent_messages
+        if m["chat_id"] == str(SUPER_ADMIN_ID) and "عضو جدید ثبت نام کرد" in m["text"]
+    ]
+    assert len(g2_adm_notifs) == 1, f"اعلان ثبت‌نام به ادمین مجموعه ارسال نشد: {len(g2_adm_notifs)}"
+    assert len(sa_notifs) == 1, f"اعلان ثبت‌نام نباید به سوپرادمین تکراری ارسال شود: {len(sa_notifs)}"
+
+    # ۳. مورد ۵: پرسش استراتژی ادغام از سوپرادمین + اولویت دیتابیس زنده / اولویت فایل ارسالی + یکتایی رمز گروه + محافظت سوپرادمین
+    with get_db() as db:
+        set_system_state(db, "superadmin_5544332211", "1")
+    reload_superadmins_from_db()
+    with get_db() as db:
+        g1_live = db.query(Group).filter(Group.id == 1).first()
+        u1_live = db.query(User).filter(User.id == str(USER_1_ID)).first()
+        live_g1_name = g1_live.name
+        live_g1_pwd = g1_live.password
+        live_u1_name = u1_live.name
+        live_u1_points = u1_live.points
+        assert get_system_state(db, "superadmin_5544332211") == "1"
+
+    conflict_db_path = os.path.join(TEMP_DB_DIR, "conflict_donor.db")
+    c_conn = sqlite3.connect(conflict_db_path)
+    with c_conn:
+        c_conn.execute("CREATE TABLE groups (id INTEGER PRIMARY KEY, name VARCHAR(255), password VARCHAR(8), is_deleted BOOLEAN, created_at DATETIME);")
+        c_conn.execute("CREATE TABLE group_admins (id INTEGER PRIMARY KEY, group_id INTEGER, user_id VARCHAR(100), created_at DATETIME);")
+        c_conn.execute("CREATE TABLE leagues (id VARCHAR(50) PRIMARY KEY, group_id INTEGER, name VARCHAR(255), floor INTEGER, start_shamsi VARCHAR(10), current_day INTEGER, is_deleted BOOLEAN, is_active BOOLEAN, cycle_number INTEGER, fines_enabled BOOLEAN, archive_enabled BOOLEAN);")
+        c_conn.execute("CREATE TABLE users (id VARCHAR(100) PRIMARY KEY, telegram_id VARCHAR(100), group_id INTEGER, name VARCHAR(255), first_name VARCHAR(255), last_name VARCHAR(255), league_id VARCHAR(50), points FLOAT, total_minutes INTEGER, total_pages INTEGER, streak INTEGER, no_study_days INTEGER, absent_days_list TEXT, late_days_list TEXT, half_coupons INTEGER, one_min_coupons INTEGER, user_floor INTEGER, last_log_date VARCHAR(10), today_minutes INTEGER, today_pages INTEGER, today_points FLOAT, today_half_used INTEGER, today_one_min_used INTEGER, is_active BOOLEAN, created_at DATETIME);")
+        c_conn.execute("CREATE TABLE activity_logs (id INTEGER PRIMARY KEY, user_id VARCHAR(100), league_id VARCHAR(50), cycle_id INTEGER, cycle_number INTEGER, league_day INTEGER, minutes INTEGER, pages INTEGER, points_earned FLOAT, half_coupon_used INTEGER, one_min_coupon_used INTEGER, log_date VARCHAR(10), log_hour INTEGER, created_at DATETIME);")
+        c_conn.execute("CREATE TABLE fine_records (id INTEGER PRIMARY KEY, user_id VARCHAR(100), league_id VARCHAR(50), cycle_id INTEGER, league_day INTEGER, kind VARCHAR(20), amount INTEGER, status VARCHAR(20), created_at DATETIME);")
+        c_conn.execute("CREATE TABLE system_state (key VARCHAR(100) PRIMARY KEY, value TEXT);")
+
+        c_conn.execute("INSERT INTO groups VALUES (1, 'گروه یک آپلودی', '554433', 0, CURRENT_TIMESTAMP);")
+        c_conn.execute("INSERT INTO groups VALUES (101, 'گروه جدید تکراری رمز', ?, 0, CURRENT_TIMESTAMP);", (live_g1_pwd,))
+        c_conn.execute("INSERT INTO leagues VALUES (?, 1, 'لیگ تستی آپلودی', 15, '1405/08/01', 1, 0, 1, 1, 0, 1);", (lg1_id,))
+        c_conn.execute("INSERT INTO users VALUES (?, ?, 1, 'کاربر یک آپلودی', 'کاربر', 'آپلودی', ?, 777.5, 100, 50, 2, 0, '', '', 5, 1, NULL, NULL, 0, 0, 0.0, 0, 0, 1, CURRENT_TIMESTAMP);", (str(USER_1_ID), str(USER_1_ID), lg1_id))
+        c_conn.execute("INSERT INTO users VALUES ('user_merge_only_new', 'tg_merge_new', 101, 'عضو جدید ادغامی', 'عضو', 'جدید', ?, 55.0, 60, 20, 1, 0, '', '', 5, 1, NULL, NULL, 0, 0, 0.0, 0, 0, 1, CURRENT_TIMESTAMP);", (lg1_id,))
+        c_conn.execute("INSERT INTO system_state VALUES ('superadmin_5544332211', '0');")
+    c_conn.close()
+
+    # ۳الف. ارسال فایل و بررسی نمایش هر دو گزینه ادغام + جایگزینی + انصراف
+    merge_bot_live = MockBot()
+    doc_live = MockDocument(conflict_db_path, "conflict_donor.db", os.path.getsize(conflict_db_path))
+    await handle_admin_database_upload(MockMessage(merge_bot_live, SUPER_ADMIN_ID, text="", document=doc_live))
+    tok_live = list(_PENDING_DB_UPLOADS.keys())[-1]
+    prompt_kb = merge_bot_live.sent_messages[-1]["reply_markup"].inline_keyboard
+    prompt_cbs = [btn.callback_data for row in prompt_kb for btn in row]
+    assert f"apply_db_merge_live_{tok_live}" in prompt_cbs, "دکمه ادغام با اولویت دیتابیس زنده ساخته نشد"
+    assert f"apply_db_merge_over_{tok_live}" in prompt_cbs, "دکمه ادغام با اولویت فایل ارسالی ساخته نشد"
+    assert f"apply_db_replace_{tok_live}" in prompt_cbs, "دکمه جایگزینی کامل ساخته نشد"
+    assert f"apply_db_cancel_{tok_live}" in prompt_cbs, "دکمه انصراف ساخته نشد"
+
+    # ۳ب. اجرای ادغام با اولویت دیتابیس زنده (live_priority)
+    await cb_apply_db_merge(MockCallbackQuery(merge_bot_live, SUPER_ADMIN_ID, f"apply_db_merge_live_{tok_live}"))
+    assert any("تعارض رمز مجموعه" in m["text"] for m in merge_bot_live.sent_messages), "هشدار تعارض رمز مجموعه در گزارش ارسال نشد"
+
+    with get_db() as db:
+        g1_after_live = db.query(Group).filter(Group.id == 1).first()
+        u1_after_live = db.query(User).filter(User.id == str(USER_1_ID)).first()
+        u_new_after_live = db.query(User).filter(User.id == "user_merge_only_new").first()
+        g101_after_live = db.query(Group).filter(Group.id == 101).first()
+        assert g1_after_live.name == live_g1_name and g1_after_live.password == live_g1_pwd, "در حالت اولویت زنده نباید گروه موجود تغییر کند"
+        assert u1_after_live.name == live_u1_name and u1_after_live.points == live_u1_points, "در حالت اولویت زنده نباید کاربر موجود تغییر کند"
+        assert u_new_after_live is not None and u_new_after_live.points == 55.0, "رکورد جدید در حالت اولویت زنده ثبت نشد"
+        assert g101_after_live is not None and g101_after_live.password != live_g1_pwd, "رمز تکراری برای مجموعه جدید تنظیم شد!"
+
+    # ۳پ. ارسال مجدد فایل و اجرای ادغام با اولویت فایل ارسالی (uploaded_overwrite)
+    merge_bot_over = MockBot()
+    doc_over = MockDocument(conflict_db_path, "conflict_donor_over.db", os.path.getsize(conflict_db_path))
+    await handle_admin_database_upload(MockMessage(merge_bot_over, SUPER_ADMIN_ID, text="", document=doc_over))
+    tok_over = list(_PENDING_DB_UPLOADS.keys())[-1]
+    await cb_apply_db_merge(MockCallbackQuery(merge_bot_over, SUPER_ADMIN_ID, f"apply_db_merge_over_{tok_over}"))
+
+    with get_db() as db:
+        g1_after_over = db.query(Group).filter(Group.id == 1).first()
+        u1_after_over = db.query(User).filter(User.id == str(USER_1_ID)).first()
+        assert g1_after_over.name == "گروه یک آپلودی", "در حالت اولویت فایل ارسالی باید گروه موجود بروزرسانی شود"
+        assert u1_after_over.name == "کاربر یک آپلودی" and u1_after_over.points == 777.5, (
+            f"در حالت اولویت فایل ارسالی باید کاربر موجود با مقادیر فایل بروزرسانی شود: name={u1_after_over.name}, points={u1_after_over.points}"
+        )
+        active_pwds = [g.password for g in db.query(Group).filter(Group.is_deleted == False).all()]
+        assert len(active_pwds) == len(set(active_pwds)), f"رمزهای فعال تکراری شدند: {active_pwds}"
+        assert get_system_state(db, "superadmin_5544332211") == "1", "سوپرادمین فعال نباید توسط فایل ارسالی عزل شود!"
+
+    # ۴. مورد ۶: حذف Dockerfile تکراری و باقی ماندن Dockerfile ریشه
+    assert not Path("docker/Dockerfile").exists(), "فایل تکراری docker/Dockerfile باید حذف شده باشد"
+    assert Path("Dockerfile").exists(), "فایل اصلی Dockerfile باید حفظ شود"
+
+    print("✅ [PASS] Scenario 19: Day-41 gift-point guard, GroupAdmin notifications, interactive DB merge priority & Docker cleanup verified.")
+
 
 
 

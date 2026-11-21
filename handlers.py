@@ -918,7 +918,13 @@ async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> No
         eff_start = cycle.start_shamsi or league.start_shamsi
         is_started = DateService.league_has_started(eff_start)
         current_day = DateService.calculate_league_day(eff_start)
-        gift_points = (current_day - 1) * 10 if (is_started and current_day > 1) else 0
+        raw_current_day = DateService.calculate_raw_league_day(eff_start)
+        is_awaiting_rollover = raw_current_day > settings.LEAGUE_DURATION
+        gift_points = (
+            (current_day - 1) * 10
+            if (is_started and not is_awaiting_rollover and current_day > 1)
+            else 0
+        )
 
         active_user = get_active_user(db, tg_id)
         if active_user and not active_user.league_id:
@@ -994,6 +1000,11 @@ async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> No
         if not is_started:
             days_left = DateService.days_until_league_start(eff_start)
             join_text += f"\n\n📅 این لیگ از تاریخ `{eff_start}` ({days_left} روز دیگر) آغاز خواهد شد."
+        elif is_awaiting_rollover:
+            join_text += (
+                "\n⏳ چله فعلی به پایان رسیده و چله جدید به‌زودی از روز ۱ آغاز می‌شود؛ "
+                "امتیاز شما از ابتدای چله جدید محاسبه خواهد شد."
+            )
         elif gift_points > 0:
             join_text += f"\n✨ امتیاز هدیه همگام‌سازی شما با روز {current_day} لیگ: {gift_points} امتیاز!"
 
@@ -1002,13 +1013,23 @@ async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> No
         join_text = MessageService.apply_terms(db, league.group_id, join_text)
         welcome_user_text = MessageService.apply_terms(db, league.group_id, welcome_user_text)
 
+        day_label = f"{current_day} (در انتظار شروع چله جدید)" if is_awaiting_rollover else str(current_day)
         admin_notif = (
             f"🆕 *عضو جدید ثبت نام کرد!*\n\n"
             f"👤 نام: {escape_md(target_user.name)}\n"
             f"🏆 لیگ: {escape_md(league.name)}\n"
-            f"📍 روز لیگ: {current_day}\n"
+            f"📍 روز لیگ: {day_label}\n"
             f"🎁 امتیاز هدیه: {gift_points}\n"
             f"🆔 آیدی: `{tg_id}`"
+        )
+        group_admin_rows = (
+            db.query(GroupAdmin.user_id)
+            .filter(GroupAdmin.group_id == league.group_id)
+            .all()
+        )
+        notify_admin_ids = sorted(
+            {str(a).strip() for a in settings.ADMIN_IDS if str(a).strip()}
+            | {str(r[0]).strip() for r in group_admin_rows if r[0] and str(r[0]).strip()}
         )
 
     await state.clear()
@@ -1020,8 +1041,8 @@ async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> No
         reply_markup=main_kb,
     )
 
-    # اطلاع‌رسانی به مدیران ارشد (ADMIN_IDS)
-    for adm_id in settings.ADMIN_IDS:
+    # اطلاع‌رسانی به مدیران ارشد و ادمین‌های همان مجموعه (بدون ارسال تکراری)
+    for adm_id in notify_admin_ids:
         await safe_send(callback.bot, adm_id, admin_notif)
 
     await callback.answer()
