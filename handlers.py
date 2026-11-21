@@ -18,7 +18,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     Message,
     CallbackQuery,
-    ReplyKeyboardRemove,
     FSInputFile,
 )
 from sqlalchemy import func
@@ -202,28 +201,23 @@ async def safe_send(
     except TelegramForbiddenError:
         logger.debug(f"کاربر {chat_id} ربات را بلاک کرده یا چت در دسترس نیست.")
         return None
-    except TelegramBadRequest:
-        try:
-            return await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=None,
-            )
-        except Exception as exc:
-            logger.debug(f"عدم امکان ارسال پیام بدون فرمت به {chat_id}: {exc}")
-            return None
-    except Exception:
-        try:
-            return await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode=None,
-            )
-        except Exception as exc:
-            logger.debug(f"عدم امکان ارسال پیام به {chat_id}: {exc}")
-            return None
+    except TelegramBadRequest as exc:
+        if parse_mode is not None:
+            try:
+                return await bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=None,
+                )
+            except Exception as fallback_exc:
+                logger.debug(f"عدم امکان ارسال پیام بدون فرمت به {chat_id}: {fallback_exc}")
+                return None
+        logger.debug(f"خطای BadRequest در ارسال پیام به {chat_id}: {exc}")
+        return None
+    except Exception as exc:
+        logger.debug(f"عدم امکان ارسال پیام به {chat_id}: {exc}")
+        return None
 
 
 async def safe_answer(
@@ -246,22 +240,23 @@ async def safe_answer(
         except Exception as retry_exc:
             logger.debug(f"خطا پس از انتظار FloodWait در پاسخ به پیام: {retry_exc}")
             return None
-    except TelegramBadRequest:
-        try:
-            return await message.answer(
-                text=text, reply_markup=reply_markup, parse_mode=None
-            )
-        except Exception as exc:
-            logger.debug(f"عدم امکان پاسخ بدون فرمت به پیام: {exc}")
-            return None
-    except Exception:
-        try:
-            return await message.answer(
-                text=text, reply_markup=reply_markup, parse_mode=None
-            )
-        except Exception as exc:
-            logger.debug(f"عدم امکان پاسخ به پیام: {exc}")
-            return None
+    except TelegramForbiddenError:
+        logger.debug("کاربر ربات را بلاک کرده یا چت در دسترس نیست.")
+        return None
+    except TelegramBadRequest as exc:
+        if parse_mode is not None:
+            try:
+                return await message.answer(
+                    text=text, reply_markup=reply_markup, parse_mode=None
+                )
+            except Exception as fallback_exc:
+                logger.debug(f"عدم امکان پاسخ بدون فرمت به پیام: {fallback_exc}")
+                return None
+        logger.debug(f"خطای BadRequest در پاسخ به پیام: {exc}")
+        return None
+    except Exception as exc:
+        logger.debug(f"عدم امکان پاسخ به پیام: {exc}")
+        return None
 
 
 class BroadcastThrottle:
@@ -303,22 +298,33 @@ async def safe_send_document(
     file_path: str,
     caption: Optional[str] = None,
     throttle: Optional[BroadcastThrottle] = None,
+    parse_mode: Optional[str] = None,
 ) -> bool:
     """ارسال ایمن سند با یک بار تلاش مجدد پس از TelegramRetryAfter؛ هرگز استثنا پرتاب نمی‌کند"""
     ok = False
+    cur_parse_mode = parse_mode
     for _attempt in range(2):
         try:
-            await bot.send_document(
-                chat_id=chat_id,
-                document=FSInputFile(file_path),
-                caption=caption,
-            )
+            kwargs: Dict[str, Any] = {
+                "chat_id": chat_id,
+                "document": FSInputFile(file_path),
+                "caption": caption,
+            }
+            if cur_parse_mode is not None:
+                kwargs["parse_mode"] = cur_parse_mode
+            await bot.send_document(**kwargs)
             ok = True
             break
         except TelegramRetryAfter as exc:
             await asyncio.sleep(min(exc.retry_after, 30))
             continue
         except TelegramForbiddenError:
+            break
+        except TelegramBadRequest as exc:
+            if cur_parse_mode is not None:
+                cur_parse_mode = None
+                continue
+            logger.warning(f"عدم امکان ارسال سند به {chat_id}: {exc}")
             break
         except Exception as exc:
             logger.warning(f"عدم امکان ارسال سند به {chat_id}: {exc}")
@@ -548,8 +554,20 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             await safe_answer(message, welcome_txt, reply_markup=get_start_menu())
             return
 
-        # اگر کاربر ثبت‌نام کرده اما هنوز لیگی انتخاب نکرده است
-        if not user.league_id:
+        league = (
+            db.query(League)
+            .filter(
+                League.id == user.league_id,
+                League.is_deleted == False,
+                League.is_active == True,
+            )
+            .first()
+            if user.league_id
+            else None
+        )
+
+        # اگر کاربر ثبت‌نام کرده اما هنوز لیگی انتخاب نکرده یا لیگ قبلی حذف/غیرفعال شده است
+        if not league:
             leagues = (
                 db.query(League)
                 .filter(
@@ -586,11 +604,6 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
                 return
 
         kb = build_user_main_menu(db, tg_id, user)
-        league = (
-            db.query(League).filter(League.id == user.league_id).first()
-            if user.league_id
-            else None
-        )
         l_name = f" (لیگ فعال: *{escape_md(league.name)}*)" if league else ""
         welcome_back = MessageService.apply_terms(
             db,
@@ -636,6 +649,13 @@ async def cb_join_new_group_prompt(callback: CallbackQuery, state: FSMContext) -
 @user_router.message(StudyStates.waiting_for_group_password)
 async def process_group_password(message: Message, state: FSMContext) -> None:
     tg_key = str(message.from_user.id)
+    text_raw = (message.text or "").strip()
+    if not text_raw:
+        await safe_answer(
+            message,
+            "🔑 لطفاً رمز ورود مجموعه را به صورت متن ارسال کنید یا با «❌ لغو عملیات» خارج شوید.",
+        )
+        return
     with get_db() as db_chk:
         locked = _pwd_is_locked(db_chk, tg_key)
     if locked:
@@ -644,13 +664,14 @@ async def process_group_password(message: Message, state: FSMContext) -> None:
             "⛔️ به دلیل تلاشهای ناموفق زیاد، موقتاً امکان وارد کردن رمز وجود ندارد. چند دقیقه دیگر تلاش کنید.",
         )
         return
-    if (message.text or "").strip() in RESERVED_MENU_TEXTS:
+    if text_raw in RESERVED_MENU_TEXTS:
         await safe_answer(
             message,
             "🔑 لطفاً رمز ورود مجموعه را وارد کنید یا با «❌ لغو عملیات» خارج شوید.",
         )
         return
-    raw_pwd = DateService.normalize_digits(message.text or "")
+    raw_pwd = DateService.normalize_digits(text_raw)
+    lock_kb = None
     with get_db() as db:
         grp = (
             db.query(Group)
@@ -660,24 +681,33 @@ async def process_group_password(message: Message, state: FSMContext) -> None:
         if not grp:
             verdict = _pwd_register_failure(db, tg_key)
             if verdict != "ok":
-                await state.clear()
+                active_u = get_active_user(db, tg_key)
+                lock_kb = (
+                    build_user_main_menu(db, tg_key, active_u)
+                    if (active_u and active_u.is_active)
+                    else get_start_menu()
+                )
+            else:
                 await safe_answer(
                     message,
-                    "⛔️ تعداد تلاشهای ناموفق زیاد بود. چند دقیقه دیگر دوباره تلاش کنید.",
-                    reply_markup=get_start_menu(),
+                    "❌ رمز عبور اشتباه است.\n\n"
+                    "💡 *راهنمایی*: رمز ورود، یک عدد اختصاصی است که باید آن را از مدیرِ مجموعه خود دریافت کرده باشید.\n\n"
+                    "لطفاً رمز را مجدداً وارد کنید:",
                 )
                 return
-            await safe_answer(
-                message,
-                "❌ رمز عبور اشتباه است.\n\n"
-                "💡 *راهنمایی*: رمز ورود، یک عدد اختصاصی است که باید آن را از مدیرِ مجموعه خود دریافت کرده باشید.\n\n"
-                "لطفاً رمز را مجدداً وارد کنید:",
-            )
-            return
-        group_id = grp.id
+        else:
+            group_id = grp.id
+            set_system_state(db, f"pwd_fail_{tg_key}", "0")
 
-    with get_db() as db_ok:
-        set_system_state(db_ok, f"pwd_fail_{message.from_user.id}", "0")
+    if lock_kb is not None:
+        await state.clear()
+        await safe_answer(
+            message,
+            "⛔️ تعداد تلاشهای ناموفق زیاد بود. چند دقیقه دیگر دوباره تلاش کنید.",
+            reply_markup=lock_kb,
+        )
+        return
+
     await state.update_data(reg_group_id=group_id)
     await state.set_state(StudyStates.register_name)
     await safe_answer(message, "لطفاً فقط نام (کوچک) خود را وارد کنید:")
@@ -688,13 +718,14 @@ async def process_register_first_name(message: Message, state: FSMContext) -> No
     first_name = (message.text or "").strip()
     if (
         len(first_name) < 2
+        or len(first_name) > 80
         or first_name.startswith("/")
         or first_name in RESERVED_MENU_TEXTS
         or first_name.isdigit()
     ):
         await safe_answer(
             message,
-            "❌ نام وارد شده معتبر نیست. لطفاً فقط نام (کوچک) خود را به صورت صحیح (حداقل ۲ حرف) وارد کنید:",
+            "❌ نام وارد شده معتبر نیست. لطفاً فقط نام (کوچک) خود را به صورت صحیح (۲ تا ۸۰ حرف) وارد کنید:",
         )
         return
 
@@ -708,13 +739,14 @@ async def process_register_last_name(message: Message, state: FSMContext) -> Non
     last_name = (message.text or "").strip()
     if (
         len(last_name) < 2
+        or len(last_name) > 80
         or last_name.startswith("/")
         or last_name in RESERVED_MENU_TEXTS
         or last_name.isdigit()
     ):
         await safe_answer(
             message,
-            "❌ نام خانوادگی وارد شده معتبر نیست. لطفاً نام خانوادگی خود را به صورت صحیح وارد کنید:",
+            "❌ نام خانوادگی وارد شده معتبر نیست. لطفاً نام خانوادگی خود را به صورت صحیح (۲ تا ۸۰ حرف) وارد کنید:",
         )
         return
 
@@ -737,17 +769,39 @@ async def process_register_last_name(message: Message, state: FSMContext) -> Non
             prof.first_name = first_name
             prof.last_name = last_name
 
+        has_other_active_league = any(
+            p.is_active and p.league_id for p in all_user_profiles
+        )
+        leagues = (
+            db.query(League)
+            .filter(
+                League.group_id == group_id,
+                League.is_deleted == False,
+                League.is_active == True,
+            )
+            .order_by(League.id.asc())
+            .all()
+        )
+        joined_league_ids = {
+            p.league_id
+            for p in all_user_profiles
+            if p.is_active and p.league_id
+        }
+        available_leagues = [l for l in leagues if l.id not in joined_league_ids]
+
         # بررسی اینکه آیا کاربر از قبل در این مجموعه پروفایل دارد
         existing_profile = next(
             (p for p in all_user_profiles if p.group_id == group_id),
             None,
         )
+        profile_id: Optional[str] = None
         if existing_profile and not existing_profile.league_id:
-            existing_profile.is_active = True
-            profile_id = existing_profile.id
+            if available_leagues or not has_other_active_league:
+                existing_profile.is_active = True
+                profile_id = existing_profile.id
         elif existing_profile and existing_profile.league_id:
             profile_id = existing_profile.id
-        else:
+        elif available_leagues or not has_other_active_league:
             new_prof_id = generate_new_profile_id(db, tg_id, group_id=group_id)
             new_user = User(
                 id=new_prof_id,
@@ -771,24 +825,9 @@ async def process_register_last_name(message: Message, state: FSMContext) -> Non
             profile_id = new_prof_id
 
         db.commit()
-        set_active_user_id(db, tg_id, profile_id)
+        if profile_id is not None:
+            set_active_user_id(db, tg_id, profile_id)
 
-        leagues = (
-            db.query(League)
-            .filter(
-                League.group_id == group_id,
-                League.is_deleted == False,
-                League.is_active == True,
-            )
-            .order_by(League.id.asc())
-            .all()
-        )
-        joined_league_ids = {
-            p.league_id
-            for p in get_user_profiles(db, tg_id, only_active=True)
-            if p.league_id
-        }
-        available_leagues = [l for l in leagues if l.id not in joined_league_ids]
         kb_leagues = (
             get_league_selection(available_leagues, exclude_league_ids=joined_league_ids)
             if available_leagues
@@ -1127,35 +1166,42 @@ async def handle_edit_study_today(message: Message, state: FSMContext) -> None:
     await state.clear()
     tg_id = str(message.from_user.id)
     today_str = DateService.today_str()
+    redirect_to_fresh = False
+    inactive_msg: Optional[str] = None
+    prompt_txt: Optional[str] = None
+    user_id: Optional[str] = None
     with get_db() as db:
         user = get_active_user(db, tg_id)
         if not user or not user.is_active or not user.league_id:
             return
         league = db.query(League).filter(League.id == user.league_id).first()
         if not league or league.is_deleted or not league.is_active:
-            await safe_answer(
-                message,
-                MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست."),
-            )
-            return
-        cycle = get_or_create_active_cycle(db, league)
-        eff_start = cycle.start_shamsi or league.start_shamsi
-        if not DateService.league_has_started(eff_start):
-            await handle_log_study_today(message, state)
-            return
-        if user.last_log_date != today_str or int(user.today_minutes or 0) <= 0:
-            # اگر کاربر هنوز امروز ثبتی ندارد (مثلاً از منوی شب قبل کلیک کرده)، به ثبت عادی هدایت شود
-            await handle_log_study_today(message, state)
-            return
-        eff_floor = user.get_effective_floor(league.floor if league else 10)
-        prompt_txt = (
-            f"🔄 *ویرایش ثبت امروز*\n\n"
-            f"⏱ {escape_md(user.name)} عزیز، کل زمان مطالعه امروز شما چند دقیقه بوده است؟\n"
-            f"(این عدد جایگزین {user.today_minutes} دقیقه قبلی می‌شود | میثاق شما: {eff_floor} دقیقه)\n\n"
-            f"لطفاً فقط عدد بفرستید:"
-        )
-        prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
-        user_id = user.id
+            inactive_msg = MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست.")
+        else:
+            cycle = get_or_create_active_cycle(db, league)
+            eff_start = cycle.start_shamsi or league.start_shamsi
+            if not DateService.league_has_started(eff_start) or (
+                user.last_log_date != today_str or int(user.today_minutes or 0) <= 0
+            ):
+                # اگر لیگ شروع نشده یا هنوز امروز ثبتی ندارد، پس از بستن نشست به ثبت عادی هدایت شود
+                redirect_to_fresh = True
+            else:
+                eff_floor = user.get_effective_floor(league.floor if league else 10)
+                prompt_txt = (
+                    f"🔄 *ویرایش ثبت امروز*\n\n"
+                    f"⏱ {escape_md(user.name)} عزیز، کل زمان مطالعه امروز شما چند دقیقه بوده است؟\n"
+                    f"(این عدد جایگزین {user.today_minutes} دقیقه قبلی می‌شود | میثاق شما: {eff_floor} دقیقه)\n\n"
+                    f"لطفاً فقط عدد بفرستید:"
+                )
+                prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
+                user_id = user.id
+
+    if inactive_msg is not None:
+        await safe_answer(message, inactive_msg)
+        return
+    if redirect_to_fresh:
+        await handle_log_study_today(message, state)
+        return
 
     await state.update_data(
         study_mode="edit", study_user_id=user_id, study_init_date=today_str
@@ -1163,7 +1209,7 @@ async def handle_edit_study_today(message: Message, state: FSMContext) -> None:
     await state.set_state(StudyStates.waiting_for_minutes)
     await safe_answer(
         message,
-        prompt_txt,
+        prompt_txt or "",
         reply_markup=get_cancel_or_back_keyboard(show_back=False),
     )
 
@@ -1173,32 +1219,39 @@ async def handle_append_study_today(message: Message, state: FSMContext) -> None
     await state.clear()
     tg_id = str(message.from_user.id)
     today_str = DateService.today_str()
+    redirect_to_fresh = False
+    inactive_msg: Optional[str] = None
+    prompt_txt: Optional[str] = None
+    user_id: Optional[str] = None
     with get_db() as db:
         user = get_active_user(db, tg_id)
         if not user or not user.is_active or not user.league_id:
             return
         league = db.query(League).filter(League.id == user.league_id).first()
         if not league or league.is_deleted or not league.is_active:
-            await safe_answer(
-                message,
-                MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست."),
-            )
-            return
-        cycle = get_or_create_active_cycle(db, league)
-        eff_start = cycle.start_shamsi or league.start_shamsi
-        if not DateService.league_has_started(eff_start):
-            await handle_log_study_today(message, state)
-            return
-        if user.last_log_date != today_str or int(user.today_minutes or 0) <= 0:
-            await handle_log_study_today(message, state)
-            return
-        prompt_txt = (
-            f"➕ *افزودن زمان به ثبت امروز*\n\n"
-            f"⏱ {escape_md(user.name)} عزیز، چند دقیقه دیگر مطالعه کردید تا به {user.today_minutes} دقیقه قبلی امروز اضافه شود؟\n\n"
-            f"لطفاً فقط عدد بفرستید:"
-        )
-        prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
-        user_id = user.id
+            inactive_msg = MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست.")
+        else:
+            cycle = get_or_create_active_cycle(db, league)
+            eff_start = cycle.start_shamsi or league.start_shamsi
+            if not DateService.league_has_started(eff_start) or (
+                user.last_log_date != today_str or int(user.today_minutes or 0) <= 0
+            ):
+                redirect_to_fresh = True
+            else:
+                prompt_txt = (
+                    f"➕ *افزودن زمان به ثبت امروز*\n\n"
+                    f"⏱ {escape_md(user.name)} عزیز، چند دقیقه دیگر مطالعه کردید تا به {user.today_minutes} دقیقه قبلی امروز اضافه شود؟\n\n"
+                    f"لطفاً فقط عدد بفرستید:"
+                )
+                prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
+                user_id = user.id
+
+    if inactive_msg is not None:
+        await safe_answer(message, inactive_msg)
+        return
+    if redirect_to_fresh:
+        await handle_log_study_today(message, state)
+        return
 
     await state.update_data(
         study_mode="append", study_user_id=user_id, study_init_date=today_str
@@ -1206,7 +1259,7 @@ async def handle_append_study_today(message: Message, state: FSMContext) -> None
     await state.set_state(StudyStates.waiting_for_minutes)
     await safe_answer(
         message,
-        prompt_txt,
+        prompt_txt or "",
         reply_markup=get_cancel_or_back_keyboard(show_back=False),
     )
 
@@ -1282,7 +1335,7 @@ async def _dispatch_menu_interruption(message: Message, state: FSMContext, text_
     if text_val == "🔄 تغییر لیگ فعال":
         await handle_switch_active_league_menu(message, state)
         return True
-    if text_val in ("💰 مشاهده جریمه‌ها", "💳 پرداخت جریمه"):
+    if text_val in ("💰 مشاهده جریمه‌ها", "💳 پرداخت جریمه", "💳 پرداخت جریمه‌ها"):
         # خروج از وضعیت ثبت مطالعه؛ هندلر واقعی در fine_router همین متن را پردازش می‌کند
         await state.clear()
         from fine_handlers import handle_view_fines, handle_pay_fines_menu
@@ -1291,6 +1344,9 @@ async def _dispatch_menu_interruption(message: Message, state: FSMContext, text_
             await handle_view_fines(message, state)
         else:
             await handle_pay_fines_menu(message, state)
+        return True
+    if text_val == "/reminder":
+        await cmd_toggle_reminder(message, state)
         return True
     if text_val in ("/history", "history"):
         await state.clear()
@@ -1311,8 +1367,24 @@ async def process_study_minutes(message: Message, state: FSMContext) -> None:
     txt_clean = (message.text or "").strip()
     if await _dispatch_menu_interruption(message, state, txt_clean):
         return
+    data = await state.get_data()
+    init_date = data.get("study_init_date")
+    today_str = DateService.today_str()
+    tg_id = str(message.from_user.id)
+    if init_date and init_date != today_str:
+        await state.clear()
+        with get_db() as db:
+            u_curr = get_active_user(db, tg_id)
+            kb = build_user_main_menu(db, tg_id, u_curr)
+        await safe_answer(
+            message,
+            "⚠️ به دلیل عبور از نیمه‌شب و تغییر روز، عملیات قبلی لغو شد. لطفاً مجدداً گزینه موردنظر را از منوی اصلی انتخاب کنید.",
+            reply_markup=kb,
+        )
+        return
+
     raw_mins = DateService.normalize_digits(txt_clean)
-    if not raw_mins.isdigit() or not (1 <= int(raw_mins) <= 1440):
+    if not (raw_mins.isascii() and raw_mins.isdigit()) or not (1 <= int(raw_mins) <= 1440):
         await safe_answer(
             message,
             "❌ لطفاً زمان مطالعه را به صورت یک عدد صحیح بین 1 تا 1440 (دقیقه) وارد کنید:",
@@ -1320,9 +1392,8 @@ async def process_study_minutes(message: Message, state: FSMContext) -> None:
         return
 
     minutes = int(raw_mins)
-    data = await state.get_data()
     study_uid = data.get("study_user_id")
-    tg_id = str(message.from_user.id)
+    mode = data.get("study_mode", "fresh")
 
     with get_db() as db:
         user = (
@@ -1330,6 +1401,18 @@ async def process_study_minutes(message: Message, state: FSMContext) -> None:
             if study_uid
             else get_active_user(db, tg_id)
         )
+        if (
+            mode == "append"
+            and user
+            and user.last_log_date == today_str
+            and int(user.today_minutes or 0) + minutes > 1440
+        ):
+            max_add = max(0, 1440 - int(user.today_minutes or 0))
+            await safe_answer(
+                message,
+                f"❌ مجموع زمان مطالعه امروز نمی‌تواند بیشتر از ۱۴۴۰ دقیقه (۲۴ ساعت) باشد (حداکثر قابل افزودن: {max_add} دقیقه):",
+            )
+            return
         user_display = escape_md(user.name) if user else "کاربر"
 
     await state.update_data(study_minutes=minutes)
@@ -1345,7 +1428,7 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
     if await _dispatch_menu_interruption(message, state, txt_clean):
         return
     raw_pages = DateService.normalize_digits(txt_clean)
-    if not raw_pages.isdigit() or not (0 <= int(raw_pages) <= 5000):
+    if not (raw_pages.isascii() and raw_pages.isdigit()) or not (0 <= int(raw_pages) <= 5000):
         await safe_answer(
             message,
             "❌ لطفاً تعداد صفحات را به صورت یک عدد صحیح بین 0 تا 5000 وارد کنید:",
@@ -1513,7 +1596,9 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                 cum_minutes = input_minutes
                 cum_pages = pages
                 day_label = "دیروز"
-                header_msg = MessageService.get_message(db, user.group_id, "late_logged")
+                header_msg = MessageService.get_message(
+                    db, user.group_id, "late_logged", apply_group_terms=False
+                )
 
             else:
                 # ثبت امروز: حالت‌های fresh، edit یا append
@@ -1523,6 +1608,13 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                     user.today_points = 0.0
                     user.today_half_used = 0
                     user.today_one_min_used = 0
+
+                if mode == "append" and user.last_log_date == today_str:
+                    cum_minutes = min(1440, int(user.today_minutes or 0) + input_minutes)
+                    cum_pages = min(5000, int(user.today_pages or 0) + pages)
+                else:
+                    cum_minutes = input_minutes
+                    cum_pages = pages
 
                 # در حالت edit یا append ابتدا مقادیر ثبت‌شده قبلی امروز را برمی‌گردانیم (با رعایت سقف مجاز سهمیه‌ها)
                 if user.last_log_date == today_str and (
@@ -1545,13 +1637,6 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                         settings.DEFAULT_ONE_MIN_COUPONS,
                         max(0, int(user.one_min_coupons or 0) + int(user.today_one_min_used or 0)),
                     )
-
-                if mode == "append" and user.last_log_date == today_str:
-                    cum_minutes = int(user.today_minutes or 0) + input_minutes
-                    cum_pages = int(user.today_pages or 0) + pages
-                else:
-                    cum_minutes = input_minutes
-                    cum_pages = pages
 
                 pts, half_used, one_used, status_msg = ScoringService.calculate_points(
                     minutes=cum_minutes,
@@ -1579,6 +1664,11 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                         ActivityLog.user_id == user.id,
                         ActivityLog.league_id == league.id,
                         ActivityLog.log_date == today_str,
+                        (ActivityLog.cycle_id == cycle.id)
+                        | (
+                            (ActivityLog.cycle_id == None)
+                            & (ActivityLog.cycle_number == league.cycle_number)
+                        ),
                     )
                     .first()
                 )
@@ -1616,12 +1706,16 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                     )
                 db.commit()
 
-                AbsenceService.reconcile_historical_gaps(db, user=user, league=league)
+                gaps_cleaned = AbsenceService.reconcile_historical_gaps(db, user=user, league=league)
                 AbsenceService.reconcile_streaks(db, user=user, league=league)
+                if gaps_cleaned > 0 and league.fines_enabled:
+                    fine_service.sync_league_fines(db, league)
                 db.refresh(user)
 
                 day_label = "امروز"
-                header_msg = MessageService.get_message(db, user.group_id, "study_logged")
+                header_msg = MessageService.get_message(
+                    db, user.group_id, "study_logged", apply_group_terms=False
+                )
 
             # محاسبه رتبه کاربر و روزهای باقیمانده چله
             all_league_users = (
@@ -1742,7 +1836,7 @@ def _fetch_user_profile_sync(tg_id: str) -> Tuple[Optional[str], Optional[str], 
             f"🎫 فرصت‌ها و سهمیه‌های باقیمانده این دوره:\n"
             f"🔹 سهمیه نصف میثاق: {user.half_coupons} از {settings.DEFAULT_HALF_COUPONS} روز\n"
             f"🔸 سهمیه طلایی ۱ دقیقه‌ای: {user.one_min_coupons} از {settings.DEFAULT_ONE_MIN_COUPONS} روز\n\n"
-            f"🔔 برای خاموش/روشنکردن یادآوری شبانه، دستور /reminder را بفرستید.\n"
+            f"🔔 برای خاموش/روشن کردن یادآوری شبانه، دستور /reminder را بفرستید.\n"
             f"⚠️ جهت انصراف، دستور /cancel_my_league را بفرستید."
         )
         profile_text = MessageService.apply_terms(db, user.group_id, profile_text)
@@ -1843,7 +1937,9 @@ async def cb_switch_profile(callback: CallbackQuery, state: FSMContext) -> None:
 
 @user_router.message(Command("history"))
 @user_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "history"))
-async def handle_cycle_history(message: Message) -> None:
+async def handle_cycle_history(message: Message, state: Optional[FSMContext] = None) -> None:
+    if state is not None:
+        await state.clear()
     tg_id = str(message.from_user.id)
     with get_db() as db:
         profiles = get_user_profiles(db, tg_id, only_active=False)
@@ -1885,7 +1981,9 @@ async def handle_cycle_history(message: Message) -> None:
 
 
 @user_router.message(Command("cancel_my_league"))
-async def cmd_cancel_my_league(message: Message) -> None:
+async def cmd_cancel_my_league(message: Message, state: Optional[FSMContext] = None) -> None:
+    if state is not None:
+        await state.clear()
     tg_id = str(message.from_user.id)
     with get_db() as db:
         user = get_active_user(db, tg_id)
@@ -1900,8 +1998,9 @@ async def cmd_cancel_my_league(message: Message) -> None:
             f"⚠️ آیا مطمئن هستید که می‌خواهید از لیگ «{l_name}» انصراف دهید؟\n"
             "با انصراف، پروفایل شما در این لیگ غیرفعال خواهد شد.",
         )
+        target_uid = user.id
 
-    await safe_answer(message, prompt, reply_markup=get_cancel_league_confirm())
+    await safe_answer(message, prompt, reply_markup=get_cancel_league_confirm(user_id=target_uid))
 
 
 @user_router.message(Command("reminder"))
@@ -1912,7 +2011,7 @@ async def cmd_toggle_reminder(message: Message, state: FSMContext) -> None:
         profiles = get_user_profiles(db, tg_id, only_active=True)
         if not profiles:
             await safe_answer(
-                message, "⚠️ ابتدا باید ثبتنام کنید.", reply_markup=get_start_menu()
+                message, "⚠️ ابتدا باید ثبت‌نام کنید.", reply_markup=get_start_menu()
             )
             return
         new_value = not all(bool(p.reminder_enabled) for p in profiles)
@@ -1922,37 +2021,63 @@ async def cmd_toggle_reminder(message: Message, state: FSMContext) -> None:
         kb = build_user_main_menu(db, tg_id)
 
     if new_value:
-        txt = "🔔 یادآوری شبانه روشن شد. برای خاموشکردن دوباره /reminder را بفرستید."
+        txt = "🔔 یادآوری شبانه روشن شد. برای خاموش کردن دوباره /reminder را بفرستید."
     else:
-        txt = "🔕 یادآوری شبانه خاموش شد. برای روشنکردن دوباره /reminder را بفرستید."
+        txt = "🔕 یادآوری شبانه خاموش شد. برای روشن کردن دوباره /reminder را بفرستید."
     await safe_answer(message, txt, reply_markup=kb)
 
 
-@user_router.callback_query(F.data == "confirm_cancel_league")
+@user_router.callback_query(
+    (F.data == "confirm_cancel_league") | F.data.startswith("confirm_cancel_league:")
+)
 async def cb_confirm_cancel_league(callback: CallbackQuery, state: FSMContext) -> None:
     tg_id = str(callback.from_user.id)
-    with get_db() as db:
-        user = get_active_user(db, tg_id)
-        if not user:
-            await callback.answer("کاربر یافت نشد.", show_alert=True)
-            return
+    explicit_uid = (
+        callback.data.split(":", 1)[1].strip()
+        if ":" in (callback.data or "")
+        else None
+    )
+    async with _get_user_lock(tg_id):
+        with get_db() as db:
+            if explicit_uid:
+                user = (
+                    db.query(User)
+                    .filter(
+                        User.id == explicit_uid,
+                        User.telegram_id == tg_id,
+                        User.is_active == True,
+                    )
+                    .first()
+                )
+            else:
+                user = get_active_user(db, tg_id)
+                if user and not user.is_active:
+                    user = None
+            if not user:
+                await callback.answer("پروفایل فعال یافت نشد یا قبلاً انصراف ثبت شده است.", show_alert=True)
+                return
 
-        user.league_id = None
-        user.is_active = False
-        db.commit()
+            fine_service.freeze_user_fines(db, user.id, commit=False)
+            user.league_id = None
+            user.is_active = False
+            db.commit()
 
-        remaining = get_user_profiles(db, tg_id, only_active=True)
-        if remaining:
-            set_active_user_id(db, tg_id, remaining[0].id)
-            kb = build_user_main_menu(db, tg_id, remaining[0])
-            msg = "✅ انصراف شما ثبت شد و به پروفایل دیگرتان منتقل شدید."
-        else:
-            kb = get_start_menu()
-            msg = "✅ انصراف شما از لیگ با موفقیت ثبت شد. هر زمان مایل بودید می‌توانید مجدداً ثبت‌نام کنید."
+            remaining = get_user_profiles(db, tg_id, only_active=True)
+            if remaining:
+                set_active_user_id(db, tg_id, remaining[0].id)
+                kb = build_user_main_menu(db, tg_id, remaining[0])
+                msg = "✅ انصراف شما ثبت شد و به پروفایل دیگرتان منتقل شدید."
+            else:
+                kb = get_start_menu()
+                msg = "✅ انصراف شما از لیگ با موفقیت ثبت شد. هر زمان مایل بودید می‌توانید مجدداً ثبت‌نام کنید."
 
-    await state.clear()
-    await safe_send(callback.bot, callback.message.chat.id, msg, reply_markup=kb)
-    await callback.answer("انصراف ثبت شد.")
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await state.clear()
+        await safe_send(callback.bot, callback.message.chat.id, msg, reply_markup=kb)
+        await callback.answer("انصراف ثبت شد.")
 
 
 # ===========================================================================
@@ -1983,13 +2108,13 @@ def reset_league_members_for_new_start(db: Session, league: League, cycle: Optio
         db.query(ActivityLog).filter(
             ActivityLog.league_id == league.id,
             cycle_filter,
-        ).delete(synchronize_session=False)
+        ).delete(synchronize_session="fetch")
     elif start_greg:
         db.query(ActivityLog).filter(
             ActivityLog.league_id == league.id,
             cycle_filter,
             ActivityLog.log_date < start_greg,
-        ).delete(synchronize_session=False)
+        ).delete(synchronize_session="fetch")
 
     from models import FineRecord
     db.query(FineRecord).filter(
@@ -2090,7 +2215,7 @@ def cleanse_prestart_activity_and_scores(db: Session, league: League, cycle: Opt
                 & (ActivityLog.cycle_number == league.cycle_number)
             ),
             ActivityLog.log_date < start_greg,
-        ).delete(synchronize_session=False)
+        ).delete(synchronize_session="fetch")
 
     from models import FineRecord
     db.query(FineRecord).filter(
@@ -2139,11 +2264,23 @@ def cleanse_prestart_activity_and_scores(db: Session, league: League, cycle: Opt
                     is not None
                 )
                 if not has_valid_logs:
-                    if u.points > 0 or u.total_minutes > 0 or u.total_pages > 0 or u.streak > 0:
+                    is_day_one = start_date_obj >= DateService.today_date()
+                    has_dirty_stats = (
+                        u.points > 0
+                        or u.total_minutes > 0
+                        or u.total_pages > 0
+                        or u.streak > 0
+                        or (is_day_one and (u.no_study_days > 0 or bool(u.absent_days_list) or bool(u.late_days_list)))
+                    )
+                    if has_dirty_stats:
                         u.points = 0.0
                         u.total_minutes = 0
                         u.total_pages = 0
                         u.streak = 0
+                        if is_day_one:
+                            u.no_study_days = 0
+                            u.absent_days_list = ""
+                            u.late_days_list = ""
                         u.today_minutes = 0
                         u.today_pages = 0
                         u.today_points = 0.0
@@ -2384,7 +2521,8 @@ async def send_database_backup(
         )
 
         sent_count = 0
-        for rcpt in sorted(set(str(r).strip() for r in recipients if str(r).strip())):
+        unique_rcpts = sorted(set(str(r).strip() for r in recipients if str(r).strip()))
+        for rcpt in unique_rcpts:
             try:
                 ok = await safe_send_document(
                     bot,
@@ -2392,6 +2530,7 @@ async def send_database_backup(
                     backup_file,
                     caption=caption,
                     throttle=throttle,
+                    parse_mode="Markdown",
                 )
                 if ok:
                     sent_count += 1
@@ -2399,7 +2538,7 @@ async def send_database_backup(
                 logger.warning(f"خطا در ارسال فایل دیتابیس به {rcpt}: {exc}")
 
         logger.info(
-            f"نسخه پشتیبان دیتابیس ({file_size_str}) برای {sent_count} از {len(recipients)} گیرنده با موفقیت ارسال شد."
+            f"نسخه پشتیبان دیتابیس ({file_size_str}) برای {sent_count} از {len(unique_rcpts)} گیرنده با موفقیت ارسال شد."
         )
         return sent_count > 0
     except Exception as exc:
@@ -2431,6 +2570,7 @@ def _init_daily_admin_reports_sync(today_str: str, force: bool) -> Optional[List
 
 def _build_single_admin_report_sync(
     league_id: str,
+    force: bool = False,
 ) -> Optional[Tuple[str, List[str]]]:
     with get_db() as db:
         lg = db.get(League, league_id)
@@ -2441,13 +2581,16 @@ def _build_single_admin_report_sync(
         if not DateService.league_has_started(eff_start):
             return None
         raw_day = DateService.calculate_raw_league_day(eff_start)
+        if raw_day <= 1 and not force:
+            return None
         archived_day = max(1, min(settings.LEAGUE_DURATION, raw_day - 1))
         table_txt = format_league_leaderboard(db, lg)
-        report_text = (
-            f"📊 *آرشیو چله {cyc.cycle_number} روز {archived_day} لیگ: {escape_md(lg.name)}*\n\n"
-            f"{table_txt}"
+        header_txt = MessageService.apply_terms(
+            db,
+            lg.group_id,
+            f"📊 *آرشیو چله {cyc.cycle_number} روز {archived_day} لیگ: {escape_md(lg.name)}*",
         )
-        report_text = MessageService.apply_terms(db, lg.group_id, report_text)
+        report_text = f"{header_txt}\n\n{table_txt}"
 
         group_admins = (
             db.query(GroupAdmin.user_id)
@@ -2482,7 +2625,7 @@ async def send_daily_admin_reports(bot: Bot, force: bool = False) -> None:
         throttle = BroadcastThrottle()
         for league_id in league_ids:
             try:
-                built = await asyncio.to_thread(_build_single_admin_report_sync, league_id)
+                built = await asyncio.to_thread(_build_single_admin_report_sync, league_id, force)
                 if not built:
                     continue
                 report_text, recipients = built
@@ -2510,6 +2653,10 @@ def _complete_and_rollover_cycle(
     """
     today_str = DateService.today_str()
     today_shamsi = DateService.today_shamsi()
+    eff_start = active_cycle.start_shamsi or league.start_shamsi
+    cycle_end_greg = DateService.get_date_for_league_day(
+        eff_start, settings.LEAGUE_DURATION
+    )
 
     users = (
         db.query(User)
@@ -2517,41 +2664,50 @@ def _complete_and_rollover_cycle(
         .all()
     )
 
-    # ۱. شناسایی و جداسازی لاگ‌های صبحگاهی امروز با یک کوئری سریع
+    # ۱. شناسایی و جداسازی کلیه لاگ‌های پس از روز آخر چله قدیم (شامل صبح روز ۴۱ یا تاخیرهای احتمالی)
+    post_cycle_logs_by_user: Dict[str, List[ActivityLog]] = {}
     today_logs_map: Dict[str, ActivityLog] = {}
-    for t_log in (
+    for p_log in (
         db.query(ActivityLog)
         .filter(
             ActivityLog.league_id == league.id,
-            ActivityLog.log_date == today_str,
+            (ActivityLog.cycle_id == active_cycle.id)
+            | (
+                (ActivityLog.cycle_id == None)
+                & (ActivityLog.cycle_number == league.cycle_number)
+            ),
+            ActivityLog.log_date > cycle_end_greg,
         )
         .order_by(ActivityLog.id.asc())
         .all()
     ):
-        today_logs_map.setdefault(t_log.user_id, t_log)
+        post_cycle_logs_by_user.setdefault(p_log.user_id, []).append(p_log)
+        if p_log.log_date == today_str:
+            today_logs_map.setdefault(p_log.user_id, p_log)
 
     early_morning_logs: Dict[str, ActivityLog] = {}
     for u in users:
-        today_log = today_logs_map.get(u.id)
-        if today_log:
-            early_morning_logs[u.id] = today_log
+        for p_log in post_cycle_logs_by_user.get(u.id, ()):
             u.points = max(
-                0.0, round(float(u.points or 0.0) - float(today_log.points_earned or 0.0), 1)
+                0.0, round(float(u.points or 0.0) - float(p_log.points_earned or 0.0), 1)
             )
             u.total_minutes = max(
-                0, int(u.total_minutes or 0) - int(today_log.minutes or 0)
+                0, int(u.total_minutes or 0) - int(p_log.minutes or 0)
             )
             u.total_pages = max(
-                0, int(u.total_pages or 0) - int(today_log.pages or 0)
+                0, int(u.total_pages or 0) - int(p_log.pages or 0)
             )
             u.half_coupons = min(
                 settings.DEFAULT_HALF_COUPONS,
-                int(u.half_coupons or 0) + int(today_log.half_coupon_used or 0),
+                int(u.half_coupons or 0) + int(p_log.half_coupon_used or 0),
             )
             u.one_min_coupons = min(
                 settings.DEFAULT_ONE_MIN_COUPONS,
-                int(u.one_min_coupons or 0) + int(today_log.one_min_coupon_used or 0),
+                int(u.one_min_coupons or 0) + int(p_log.one_min_coupon_used or 0),
             )
+        today_log = today_logs_map.get(u.id)
+        if today_log:
+            early_morning_logs[u.id] = today_log
     db.commit()
 
     # بازسازی دقیق زنجیره و غیبت‌های ۴۰ روزه چله قدیم (بدون احتساب لاگ روز ۴۱)
@@ -2612,12 +2768,11 @@ def _complete_and_rollover_cycle(
         )
 
     active_cycle.status = "finished"
-    active_cycle.end_shamsi = DateService.date_to_shamsi(DateService.yesterday_date())
+    active_cycle.end_shamsi = DateService.date_to_shamsi(cycle_end_greg)
     active_cycle.current_day = settings.LEAGUE_DURATION
     active_cycle.finished_at = datetime.now(timezone.utc)
-    db.commit()
 
-    # ۴. ساخت چله جدید (cycle_number + 1) از روز ۱
+    # ۴. ساخت چله جدید (cycle_number + 1) از روز ۱ (در همان تراکنش اتمیک)
     new_cycle_num = int(league.cycle_number or 1) + 1
     league.cycle_number = new_cycle_num
     league.start_shamsi = today_shamsi
@@ -2631,8 +2786,7 @@ def _complete_and_rollover_cycle(
         status="active",
     )
     db.add(new_cycle)
-    db.commit()
-    db.refresh(new_cycle)
+    db.flush()
 
     # ۵. صفر کردن آمار دوره کاربران و انتقال مطالعات صبحگاهی سحرخیزان به روز ۱ چله جدید
     for u in users:
@@ -2678,8 +2832,6 @@ def _complete_and_rollover_cycle(
             u.today_points = 0.0
             u.today_half_used = 0
             u.today_one_min_used = 0
-
-    db.commit()
 
     for u in users:
         set_system_state(db, f"streak_offset_{u.id}", "0", commit=False)
@@ -2765,6 +2917,7 @@ def _build_morning_cards(
     force: bool,
     admin_ids: set,
     profile_counts: Dict[str, int],
+    active_profile_map: Optional[Dict[str, str]] = None,
 ) -> List[Tuple[str, str, Any]]:
     """
     ساخت کارنامه‌های صبحگاهی یک لیگ (همگام، بدون هیچ I/O شبکه‌ای).
@@ -2861,15 +3014,22 @@ def _build_morning_cards(
                 db, lg.group_id, report_card, terms=terms
             )
             tg_target = str(u.telegram_id or u.id)
-            can_late = (not y_info) and current_day > 1 and joined_before
-            lg_has_fines = bool(getattr(lg, "fines_enabled", False))
-            kb = get_main_menu(
-                is_admin=(tg_target in admin_ids),
-                has_multiple_profiles=(profile_counts.get(tg_target, 1) > 1),
-                can_log_late=can_late,
-                has_fines=lg_has_fines,
-                is_fine_manager=(tg_target in fine_mgr_ids),
-            )
+            prof_count = profile_counts.get(tg_target, 1)
+            active_pid = (active_profile_map or {}).get(tg_target)
+            # برای کاربران چندپروفایلی فقط روی پروفایل فعال کیبورد ارسال شود تا کیبورد لیگ فعال بازنویسی نشود
+            attach_kb = (prof_count <= 1) or (active_pid is None) or (active_pid == u.id)
+            if attach_kb:
+                can_late = (not y_info) and current_day > 1 and joined_before
+                lg_has_fines = bool(getattr(lg, "fines_enabled", False))
+                kb = get_main_menu(
+                    is_admin=(tg_target in admin_ids),
+                    has_multiple_profiles=(prof_count > 1),
+                    can_log_late=can_late,
+                    has_fines=lg_has_fines,
+                    is_fine_manager=(tg_target in fine_mgr_ids),
+                )
+            else:
+                kb = None
             outbox.append((tg_target, report_card, kb))
 
         db.expunge_all()
@@ -2879,7 +3039,9 @@ def _build_morning_cards(
 
 def _init_morning_reports_sync(
     today_str: str, force: bool
-) -> Optional[Tuple[List[str], set, Dict[str, int]]]:
+) -> Optional[Tuple[List[str], set, Dict[str, int], Dict[str, str]]]:
+    from models import SystemState
+
     with get_db() as db:
         last_run = get_system_state(db, "last_daily_user_report_date")
         if last_run == today_str and not force:
@@ -2895,7 +3057,10 @@ def _init_morning_reports_sync(
         admin_ids = {str(a).strip() for a in settings.ADMIN_IDS if str(a).strip()}
         admin_ids |= {
             str(r[0]).strip()
-            for r in db.query(GroupAdmin.user_id).all()
+            for r in db.query(GroupAdmin.user_id)
+            .join(Group, Group.id == GroupAdmin.group_id)
+            .filter(Group.is_deleted == False)
+            .all()
             if r[0]
         }
         profile_counts: Dict[str, int] = {
@@ -2905,9 +3070,17 @@ def _init_morning_reports_sync(
             .group_by(User.telegram_id)
             .all()
         }
+        ap_prefix = "active_profile_"
+        active_profile_map: Dict[str, str] = {
+            k[len(ap_prefix):]: str(v)
+            for k, v in db.query(SystemState.key, SystemState.value)
+            .filter(SystemState.key.startswith(ap_prefix, autoescape=True))
+            .all()
+            if v
+        }
         if not force:
             set_system_state(db, "last_daily_user_report_date", today_str)
-        return league_ids, admin_ids, profile_counts
+        return league_ids, admin_ids, profile_counts, active_profile_map
 
 
 def _check_league_morning_mode_sync(league_id: str) -> Tuple[Optional[str], int]:
@@ -2933,6 +3106,7 @@ def _build_league_morning_cards_sync(
     force: bool,
     admin_ids: set,
     profile_counts: Dict[str, int],
+    active_profile_map: Optional[Dict[str, str]] = None,
 ) -> List[Tuple[str, str, Any]]:
     with get_db() as db:
         lg = db.get(League, league_id)
@@ -2948,6 +3122,7 @@ def _build_league_morning_cards_sync(
             force,
             admin_ids,
             profile_counts,
+            active_profile_map=active_profile_map,
         )
 
 
@@ -2958,6 +3133,9 @@ def _rollover_league_cycle_sync(league_id: str) -> Optional[Dict[str, Any]]:
         if not lg or lg.is_deleted or not lg.is_active:
             return None
         cyc = get_or_create_active_cycle(db, lg)
+        eff_start = cyc.start_shamsi or lg.start_shamsi
+        if DateService.calculate_raw_league_day(eff_start) <= settings.LEAGUE_DURATION:
+            return None
         return _complete_and_rollover_cycle(db, lg, cyc)
 
 
@@ -2973,7 +3151,7 @@ async def _send_daily_user_reports_impl(bot: Bot, force: bool = False) -> None:
     init_data = await asyncio.to_thread(_init_morning_reports_sync, today_str, force)
     if not init_data:
         return
-    league_ids, admin_ids, profile_counts = init_data
+    league_ids, admin_ids, profile_counts, active_profile_map = init_data
 
     throttle = BroadcastThrottle()
     for league_id in league_ids:
@@ -2998,6 +3176,7 @@ async def _send_daily_user_reports_impl(bot: Bot, force: bool = False) -> None:
                     force,
                     admin_ids,
                     profile_counts,
+                    active_profile_map,
                 )
         except Exception as exc:
             logger.error(f"خطا در پردازش گزارش صبحگاهی لیگ {league_id}: {exc}", exc_info=True)
@@ -3039,6 +3218,7 @@ def _build_study_reminders_outbox_sync(
             cyc = (
                 db.query(Cycle.start_shamsi)
                 .filter(Cycle.league_id == lg_id, Cycle.status == "active")
+                .order_by(Cycle.cycle_number.desc(), Cycle.id.desc())
                 .first()
             )
             eff_start = (cyc[0] if cyc and cyc[0] else None) or lg_start

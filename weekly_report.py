@@ -4,7 +4,6 @@ import logging
 from typing import List, Set, Dict, Any, Optional
 
 from aiogram import Bot
-from aiogram.types import FSInputFile
 
 from config import settings
 from database import (

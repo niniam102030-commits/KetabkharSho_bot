@@ -19,7 +19,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session
 
 from config import settings
-from models import User, League, Cycle, ActivityLog, CycleResult, Group, SystemState
+from models import User, League, Cycle, ActivityLog, CycleResult, SystemState
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +186,7 @@ class DateService:
     def date_to_shamsi(cls, target: Union[str, date, datetime]) -> str:
         """تبدیل رشته YYYY-MM-DD یا شیء date/datetime به رشته شمسی YYYY/MM/DD"""
         if isinstance(target, datetime):
-            d = target.date()
+            d = target.astimezone(IRAN_TZ).date() if target.tzinfo is not None else target.date()
         elif isinstance(target, date):
             d = target
         else:
@@ -531,6 +531,7 @@ class ReportService:
                 "name": item.name,
                 "display_name": item.get_display_name(),
                 "points": round(float(item.points or 0.0), 1),
+                "points_sort": round(float(item.points or 0.0), 2),
                 "floor": eff_floor,
                 "total_minutes": int(item.total_minutes or 0),
                 "minutes": int(item.total_minutes or 0),
@@ -550,7 +551,9 @@ class ReportService:
             }
 
         # پشتیبانی کامل از هر دو نوع کلید در دیکشنری ورودی (بند ۹.۴ مشخصات)
-        points = round(float(item.get("points", 0.0) or 0.0), 1)
+        raw_pts = float(item.get("points", 0.0) or 0.0)
+        points = round(raw_pts, 1)
+        points_sort = round(raw_pts, 2)
         floor = int(
             item.get("floor")
             or item.get("effective_floor")
@@ -599,6 +602,7 @@ class ReportService:
             "name": item.get("name") or item.get("user_name") or "کاربر",
             "display_name": item.get("display_name") or item.get("name") or item.get("user_name") or "کاربر",
             "points": points,
+            "points_sort": points_sort,
             "floor": floor,
             "total_minutes": minutes,
             "minutes": minutes,
@@ -679,7 +683,7 @@ class ReportService:
         # مرتب‌سازی نزولی بر اساس (points, floor, total_minutes)
         normalized.sort(
             key=lambda x: (
-                round(float(x.get("points", 0.0)), 2),
+                round(float(x.get("points_sort", x.get("points", 0.0))), 2),
                 int(x.get("floor", league_floor)),
                 int(x.get("total_minutes", x.get("minutes", 0))),
             ),
@@ -707,7 +711,7 @@ class ReportService:
 
         for idx, item in enumerate(normalized, start=1):
             current_key = (
-                round(float(item.get("points", 0.0)), 2),
+                round(float(item.get("points_sort", item.get("points", 0.0))), 2),
                 int(item.get("floor", league_floor)),
                 int(item.get("total_minutes", item.get("minutes", 0))),
             )
@@ -817,10 +821,10 @@ class ReportService:
                 grp_prefix = f"G{lg.group_id}_" if multi_group else ""
                 for cyc in cycles:
                     sheet_title = f"{grp_prefix}{lg.name[:12]}_چله{cyc.cycle_number}_{'فعال' if cyc.status == 'active' else 'پایان'}"
-                    sheet_title = re.sub(r'[\\/*?:\[\]]', "_", sheet_title)[:31]
+                    sheet_title = re.sub(r'[\\/*?:\[\]]', "_", sheet_title).strip("'")[:31] or f"Cycle_{cyc.id}"
                     if sheet_title in wb.sheetnames:
                         suffix = f"_{cyc.id}"
-                        sheet_title = f"{sheet_title[: max(0, 31 - len(suffix))]}{suffix}"
+                        sheet_title = f"{sheet_title[: max(0, 31 - len(suffix))].rstrip(chr(39))}{suffix}"
 
                     ws = wb.create_sheet(title=sheet_title)
                     sheets_added += 1
@@ -899,8 +903,11 @@ class ReportService:
 
         elif isinstance(db_or_data, list):
             for idx, sheet_info in enumerate(db_or_data, start=1):
-                title = str(sheet_info.get("title") or f"Cycle_{idx}")[:31]
-                title = re.sub(r'[\\/*?:\[\]]', "_", title)
+                title = str(sheet_info.get("title") or f"Cycle_{idx}")
+                title = re.sub(r'[\\/*?:\[\]]', "_", title).strip("'")[:31] or f"Cycle_{idx}"
+                if title in wb.sheetnames:
+                    suffix = f"_{idx}"
+                    title = f"{title[: max(0, 31 - len(suffix))].rstrip(chr(39))}{suffix}"
                 ws = wb.create_sheet(title=title)
                 sheets_added += 1
                 users_list = sheet_info.get("users", [])
@@ -996,7 +1003,7 @@ class AbsenceService:
         result = set()
         for part in str(days_str).split(","):
             part = DateService.normalize_digits(part.strip())
-            if part.isdigit():
+            if part.isascii() and part.isdigit():
                 val = int(part)
                 if val > 0:
                     result.add(val)

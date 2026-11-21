@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 import asyncio
 import logging
-import secrets
 from typing import Any
 
 from aiohttp import FormData
@@ -174,15 +173,15 @@ async def main() -> None:
         except Exception as exc:
             logger.error(f"خطای مدیریت‌شده در هوک استارتاپ دیسپچر: {exc}", exc_info=True)
 
-    # اجرای جبرانی جاب‌های جاافتاده و سپس راه‌اندازی زمان‌بند خودکار
-    await run_startup_catchups(bot)
+    # راه‌اندازی زمان‌بند خودکار پیش از اجرای جاب‌های جبرانی تا تغییر ساعت حین catchup از دست نرود
     scheduler = setup_scheduler(bot)
-
-    logger.info(
-        f"ربات باشگاه کتابخوانی «کتابخوارشو» متصل به {settings.API_URL} آماده دریافت پیام‌هاست..."
-    )
-
     try:
+        await run_startup_catchups(bot)
+
+        logger.info(
+            f"ربات باشگاه کتابخوانی «کتابخوارشو» متصل به {settings.API_URL} آماده دریافت پیام‌هاست..."
+        )
+
         await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:

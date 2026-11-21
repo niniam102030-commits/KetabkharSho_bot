@@ -49,6 +49,10 @@ print(f'>>> تست موفق: aiogram نسخه {aiogram.__version__} و تمام 
 # کپی سورس کد پروژه به داخل کانتینر
 COPY . .
 
+# ثبت شناسه کامیت در محیط کانتینر برای نمایش در اعلان استارتاپ و بکاپ‌ها
+ARG GIT_COMMIT=""
+ENV GIT_COMMIT=${GIT_COMMIT}
+
 # ایجاد دایرکتوری‌های داده و لاگ
 RUN mkdir -p /app/data /app/logs /app/data/backups /app/data/reports
 

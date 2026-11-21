@@ -14,8 +14,12 @@ class Config:
 
     def __init__(self) -> None:
         self.BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
-        bale_api = os.getenv("BALE_API_URL") or os.getenv("API_URL", "https://tapi.bale.ai")
-        self.API_URL: str = bale_api.strip().rstrip("/")
+        bale_api = (
+            os.getenv("BALE_API_URL", "").strip()
+            or os.getenv("API_URL", "").strip()
+            or "https://tapi.bale.ai"
+        )
+        self.API_URL: str = bale_api.rstrip("/")
         self.BALE_API_URL: str = self.API_URL
 
         raw_admin_ids: str = os.getenv("ADMIN_IDS", "").strip()
@@ -26,11 +30,14 @@ class Config:
                 adm.strip() for adm in combined_admins.split(",") if adm.strip()
             )
         )
+        self._root_admin_ids: set[str] = set(self.ADMIN_IDS)
+        self._extra_superadmins: set[str] = set()
 
         self.ARCHIVE_CHANNEL: str = os.getenv("ARCHIVE_CHANNEL", "").strip()
-        raw_db_url: str = os.getenv(
-            "DATABASE_URL", "sqlite:///./data/ketabkharsho.db"
-        ).strip()
+        raw_db_url: str = (
+            os.getenv("DATABASE_URL", "").strip()
+            or "sqlite:///./data/ketabkharsho.db"
+        )
         self.DATABASE_URL: str = self._normalize_database_url(raw_db_url)
 
         # تنظیمات QueuePool مخصوص PostgreSQL
@@ -153,6 +160,10 @@ class Config:
             raise ValueError("خطا: مقدار DEFAULT_FLOOR باید حداقل 1 دقیقه باشد.")
         if self.LEAGUE_DURATION < 1:
             raise ValueError("خطا: مقدار LEAGUE_DURATION باید حداقل 1 روز باشد.")
+        if self.DEFAULT_HALF_COUPONS < 0:
+            raise ValueError("خطا: مقدار DEFAULT_HALF_COUPONS نمی‌تواند منفی باشد.")
+        if self.DEFAULT_ONE_MIN_COUPONS < 0:
+            raise ValueError("خطا: مقدار DEFAULT_ONE_MIN_COUPONS نمی‌تواند منفی باشد.")
         for hour_name, hour_val in [
             ("REMINDER_HOUR", self.REMINDER_HOUR),
             ("DAILY_REPORT_HOUR", self.DAILY_REPORT_HOUR),

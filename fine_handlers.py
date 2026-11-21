@@ -43,9 +43,8 @@ from database import (
     get_db,
     get_active_user,
     is_user_admin,
-    get_or_create_active_cycle,
 )
-from models import User, League, Cycle, Group, GroupAdmin, FineRecord, FinePayment
+from models import User, League, Cycle, Group, FineRecord, FinePayment
 from services import escape_md
 from keyboards import VIEW_FINES_TEXT, PAY_FINES_TEXT
 from handlers import (
@@ -337,8 +336,11 @@ async def cb_debtors_list(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     tg = str(callback.from_user.id)
     parts = callback.data.split(":")
+    if len(parts) < 2 or not parts[1]:
+        await callback.answer("درخواست نامعتبر است.", show_alert=True)
+        return
     lid = parts[1]
-    page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    page = int(parts[2]) if len(parts) > 2 and parts[2].isascii() and parts[2].isdigit() else 0
 
     def _work():
         with get_db() as db:
@@ -382,7 +384,11 @@ def _detail_screen(db, lg: League, uid: str) -> Optional[Tuple[str, InlineKeyboa
 async def cb_debtor_detail(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     tg = str(callback.from_user.id)
-    _, lid, uid = callback.data.split(":", 2)
+    parts = callback.data.split(":", 2)
+    if len(parts) < 3:
+        await callback.answer("درخواست نامعتبر است.", show_alert=True)
+        return
+    _, lid, uid = parts
 
     def _work():
         with get_db() as db:
@@ -402,7 +408,11 @@ async def cb_debtor_detail(callback: CallbackQuery, state: FSMContext) -> None:
 @fine_router.callback_query(F.data.startswith("fs:"))
 async def cb_settle_ask(callback: CallbackQuery) -> None:
     tg = str(callback.from_user.id)
-    _, lid, uid = callback.data.split(":", 2)
+    parts = callback.data.split(":", 2)
+    if len(parts) < 3:
+        await callback.answer("درخواست نامعتبر است.", show_alert=True)
+        return
+    _, lid, uid = parts
 
     def _work():
         with get_db() as db:
@@ -444,7 +454,11 @@ async def _notify_payment(bot, tg_target: str, lg_name: str, applied: int, owed_
 async def cb_settle_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     tg = str(callback.from_user.id)
-    _, lid, uid = callback.data.split(":", 2)
+    parts = callback.data.split(":", 2)
+    if len(parts) < 3:
+        await callback.answer("درخواست نامعتبر است.", show_alert=True)
+        return
+    _, lid, uid = parts
 
     def _work():
         with get_db() as db:
@@ -475,7 +489,11 @@ async def cb_settle_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 @fine_router.callback_query(F.data.startswith("fe:"))
 async def cb_custom_amount_ask(callback: CallbackQuery, state: FSMContext) -> None:
     tg = str(callback.from_user.id)
-    _, lid, uid = callback.data.split(":", 2)
+    parts = callback.data.split(":", 2)
+    if len(parts) < 3:
+        await callback.answer("درخواست نامعتبر است.", show_alert=True)
+        return
+    _, lid, uid = parts
 
     def _work():
         with get_db() as db:
@@ -527,6 +545,8 @@ async def process_payment_amount(message: Message, state: FSMContext) -> None:
             if amount > owed:
                 return ("over", owed)
             applied = fine_service.record_payment(db, lid, uid, amount, tg)
+            if applied <= 0:
+                return ("none_left",)
             owed_after = fine_service.get_user_balance(db, lid, uid)["owed"]
             detail = _detail_screen(db, lg, uid)
             return ("ok", applied, str(u.telegram_id), lg.name, owed_after, detail)
@@ -535,6 +555,10 @@ async def process_payment_amount(message: Message, state: FSMContext) -> None:
     if res[0] == "denied":
         await state.clear()
         await safe_answer(message, "⛔️ دسترسی ندارید.")
+        return
+    if res[0] == "none_left":
+        await state.clear()
+        await safe_answer(message, "⚠️ بدهی‌ای برای ثبت باقی نمانده است.")
         return
     if res[0] == "over":
         await safe_answer(message, f"❌ مبلغ بیشتر از بدهی است (حداکثر {format_toman(res[1])}). دوباره وارد کنید:")
@@ -551,19 +575,32 @@ async def process_payment_amount(message: Message, state: FSMContext) -> None:
 # بخشودگی / حذف جریمه‌ها
 # ---------------------------------------------------------------------------
 
-def _waive_screen(db, lg: League, uid: str) -> Tuple[str, InlineKeyboardMarkup]:
-    recs = fine_service.get_user_fine_records(db, lg.id, uid)[:15]
+WAIVE_PAGE_SIZE = 10
+
+
+def _waive_screen(db, lg: League, uid: str, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    all_recs = fine_service.get_user_fine_records(db, lg.id, uid)
+    pages = max(1, (len(all_recs) + WAIVE_PAGE_SIZE - 1) // WAIVE_PAGE_SIZE)
+    page = min(max(0, page), pages - 1)
+    recs = all_recs[page * WAIVE_PAGE_SIZE:(page + 1) * WAIVE_PAGE_SIZE]
     cyc = _cycle_numbers(db, lg.id)
     rows: List[List[InlineKeyboardButton]] = []
     for r in recs:
         label = f"چله {cyc.get(r.cycle_id, '؟')} | {KIND_LABELS.get(r.kind, r.kind)} روز {r.league_day} | {format_toman(r.amount)}"
         prefix = "↩️ بازگردانی: " if r.is_waived else "🗑 حذف: "
-        rows.append([_btn(prefix + label, f"ft:{lg.id}:{r.id}")])
+        rows.append([_btn(prefix + label, f"ft:{lg.id}:{r.id}:{page}")])
+    nav: List[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(_btn("◀️ قبلی", f"fw:{lg.id}:{uid}:{page - 1}"))
+    if page < pages - 1:
+        nav.append(_btn("بعدی ▶️", f"fw:{lg.id}:{uid}:{page + 1}"))
+    if nav:
+        rows.append(nav)
     rows.append([_btn("🔙 بازگشت", f"fd:{lg.id}:{uid}")])
     text = (
-        "🗂 *جریمه‌های ثبت‌شده* (۱۵ مورد آخر)\n"
+        f"🗂 *جریمه‌های ثبت‌شده* (صفحه {page + 1} از {pages} | کل: {len(all_recs)})\n"
         "با زدن هر مورد، جریمه حذف (بخشوده) یا بازگردانده می‌شود."
-        if recs
+        if all_recs
         else "🗂 هیچ جریمه‌ای ثبت نشده است."
     )
     return text, _nav_kb(rows)
@@ -572,12 +609,22 @@ def _waive_screen(db, lg: League, uid: str) -> Tuple[str, InlineKeyboardMarkup]:
 @fine_router.callback_query(F.data.startswith("fw:"))
 async def cb_waive_list(callback: CallbackQuery) -> None:
     tg = str(callback.from_user.id)
-    _, lid, uid = callback.data.split(":", 2)
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("درخواست نامعتبر است.", show_alert=True)
+        return
+    lid = parts[1]
+    page = 0
+    if len(parts) >= 4 and parts[-1].isascii() and parts[-1].isdigit():
+        page = int(parts[-1])
+        uid = ":".join(parts[2:-1])
+    else:
+        uid = ":".join(parts[2:])
 
     def _work():
         with get_db() as db:
             lg = _guard_manager(db, tg, lid)
-            return _waive_screen(db, lg, uid) if lg else None
+            return _waive_screen(db, lg, uid, page) if lg else None
 
     res = await asyncio.to_thread(_work)
     if not res:
@@ -590,17 +637,22 @@ async def cb_waive_list(callback: CallbackQuery) -> None:
 @fine_router.callback_query(F.data.startswith("ft:"))
 async def cb_waive_toggle(callback: CallbackQuery) -> None:
     tg = str(callback.from_user.id)
-    _, lid, rid = callback.data.split(":", 2)
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("درخواست نامعتبر است.", show_alert=True)
+        return
+    lid, rid = parts[1], parts[2]
+    page = int(parts[3]) if len(parts) > 3 and parts[3].isascii() and parts[3].isdigit() else 0
 
     def _work():
         with get_db() as db:
             lg = _guard_manager(db, tg, lid)
-            if not lg or not rid.isdigit():
+            if not lg or not (rid.isascii() and rid.isdigit()):
                 return None
             rec = fine_service.toggle_waive(db, int(rid), lid, tg)
             if not rec:
                 return None
-            return rec.is_waived, _waive_screen(db, lg, rec.user_id)
+            return rec.is_waived, _waive_screen(db, lg, rec.user_id, page)
 
     res = await asyncio.to_thread(_work)
     if not res:
@@ -648,21 +700,45 @@ async def _refresh_league_keyboards(bot, lid: str, text: str, extra_tgs=None, sk
         await dispatch_outbox(bot, outbox, throttle=BroadcastThrottle())
 
 
-async def _announce_new_manager(bot, lid: str, lg_name: str, manager_tg: str) -> None:
-    """پیام تبریک/اعلام مسئولیت با دو دکمه شیشه‌ای + بازسازی فوری کیبورد مسئول"""
-    kb = _nav_kb(
-        [
-            [_btn("📋 لیست جریمه‌ها", f"fv:{lid}")],
-            [_btn("💳 پرداخت جریمه", f"fp:{lid}:0")],
-        ]
+async def _announce_new_manager(
+    bot,
+    lid: str,
+    title_name: str,
+    manager_tg: str,
+    is_enabled: bool = True,
+    is_group: bool = False,
+) -> None:
+    """پیام تبریک/اعلام مسئولیت + بازسازی فوری کیبورد مسئول"""
+    scope_txt = (
+        f"تمام لیگ‌های مجموعه «{escape_md(title_name)}»"
+        if is_group
+        else f"لیگ «{escape_md(title_name)}»"
     )
-    await safe_send(
-        bot,
-        manager_tg,
-        f"🎖 شما به عنوان *مسئول جریمه* لیگ «{escape_md(lg_name)}» انتخاب شدید.\n\n"
-        "از این پس می‌توانید پرداخت‌ها را ثبت کنید، جریمه‌ها را حذف کنید و مبالغ را تنظیم نمایید.",
-        reply_markup=kb,
-    )
+    if is_enabled:
+        kb = (
+            _nav_kb([[_btn("💳 لیست لیگ‌های تحت مدیریت", "fl:list")]])
+            if is_group
+            else _nav_kb(
+                [
+                    [_btn("📋 لیست جریمه‌ها", f"fv:{lid}")],
+                    [_btn("💳 پرداخت جریمه", f"fp:{lid}:0")],
+                ]
+            )
+        )
+        body = (
+            f"🎖 شما به عنوان *مسئول جریمه* {scope_txt} انتخاب شدید.\n\n"
+            "از این پس می‌توانید پرداخت‌ها را ثبت کنید، جریمه‌ها را حذف کنید و مبالغ را تنظیم نمایید."
+        )
+    else:
+        kb = None
+        body = (
+            f"🎖 شما به عنوان *مسئول جریمه* {scope_txt} ثبت شدید.\n\n"
+            "ℹ️ پس از فعال‌سازی سیستم جریمه توسط مدیر، گزینه‌های ثبت پرداخت در منوی شما فعال خواهد شد."
+        )
+    await safe_send(bot, manager_tg, body, reply_markup=kb)
+
+    if not is_enabled:
+        return
 
     def _kb():
         with get_db() as db:
@@ -670,7 +746,8 @@ async def _announce_new_manager(bot, lid: str, lg_name: str, manager_tg: str) ->
 
     menu = await asyncio.to_thread(_kb)
     await safe_send(
-        bot, manager_tg,
+        bot,
+        manager_tg,
         "🔄 منوی شما به‌روز شد؛ گزینه‌های «مشاهده جریمه‌ها» و «پرداخت جریمه» اضافه شدند.",
         reply_markup=menu,
     )
@@ -877,8 +954,11 @@ async def cb_toggle_fines(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_pick_manager(callback: CallbackQuery) -> None:
     tg = str(callback.from_user.id)
     parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("درخواست نامعتبر است.", show_alert=True)
+        return
     lid = parts[2]
-    page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+    page = int(parts[3]) if len(parts) > 3 and parts[3].isascii() and parts[3].isdigit() else 0
     enabling = parts[4] if len(parts) > 4 else "0"
 
     def _work():
@@ -898,6 +978,9 @@ async def cb_pick_manager(callback: CallbackQuery) -> None:
 async def cb_select_manager(callback: CallbackQuery) -> None:
     tg = str(callback.from_user.id)
     parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("درخواست نامعتبر است.", show_alert=True)
+        return
     lid, mtg = parts[2], parts[3]
     enabling = parts[4] if len(parts) > 4 else "0"
 
@@ -917,13 +1000,13 @@ async def cb_select_manager(callback: CallbackQuery) -> None:
                 newly_enabled = True
             fine_service.sync_league_fines(db, lg)
             all_mgrs = fine_service.get_manager_ids(db, lid)
-            return added, newly_enabled, lg.name, _menu_screen(db, lg, True, tg in all_mgrs), all_mgrs
+            return added, newly_enabled, bool(lg.fines_enabled), lg.name, _menu_screen(db, lg, True, tg in all_mgrs), all_mgrs
 
     res = await asyncio.to_thread(_work)
     if not res:
         await callback.answer("⛔️ دسترسی ندارید یا شخص مجاز نیست.", show_alert=True)
         return
-    added, newly_enabled, lg_name, screen, all_mgrs = res
+    added, newly_enabled, is_enabled, lg_name, screen, all_mgrs = res
     await callback.answer("✅ مسئول جریمه ثبت شد." if added else "ℹ️ قبلاً مسئول بوده است.")
     await _edit(callback, screen[0], screen[1])
     if newly_enabled:
@@ -933,15 +1016,18 @@ async def cb_select_manager(callback: CallbackQuery) -> None:
             skip_tgs=set(all_mgrs),
         )
         for m in all_mgrs:
-            await _announce_new_manager(callback.bot, lid, lg_name, m)
+            await _announce_new_manager(callback.bot, lid, lg_name, m, is_enabled=True)
     elif added:
-        await _announce_new_manager(callback.bot, lid, lg_name, mtg)
+        await _announce_new_manager(callback.bot, lid, lg_name, mtg, is_enabled=is_enabled)
 
 
 @fine_router.callback_query(F.data.startswith("fa:sgm:"))
 async def cb_set_group_manager(callback: CallbackQuery) -> None:
     tg = str(callback.from_user.id)
     parts = callback.data.split(":")
+    if len(parts) < 3:
+        await callback.answer("درخواست نامعتبر است.", show_alert=True)
+        return
     lid = parts[2]
     enabling = parts[3] if len(parts) > 3 else "0"
 
@@ -970,13 +1056,14 @@ async def cb_set_group_manager(callback: CallbackQuery) -> None:
             fine_service.sync_league_fines(db, lg)
             grp = db.query(Group).filter(Group.id == lg.group_id).first()
             grp_name = grp.name if grp else ""
-            return count, grp_name, _menu_screen(db, lg, True, True), newly_enabled_leagues
+            has_any_enabled = bool(fine_service.get_managed_leagues(db, tg))
+            return count, grp_name, _menu_screen(db, lg, True, bool(lg.fines_enabled)), newly_enabled_leagues, has_any_enabled
 
     res = await asyncio.to_thread(_work)
     if not res:
         await callback.answer("⛔️ دسترسی ندارید.", show_alert=True)
         return
-    count, grp_name, screen, newly_enabled_leagues = res
+    count, grp_name, screen, newly_enabled_leagues, has_any_enabled = res
     await callback.answer(
         f"✅ شما به عنوان مسئول جریمه تمام لیگ‌های مجموعه «{grp_name}» تعیین شدید.",
         show_alert=True,
@@ -989,7 +1076,9 @@ async def cb_set_group_manager(callback: CallbackQuery) -> None:
             f"💰 سیستم جریمه لیگ «{escape_md(enabled_name)}» فعال شد. از دکمه «مشاهده جریمه‌ها» می‌توانید وضعیت را ببینید.",
             skip_tgs={tg},
         )
-    await _announce_new_manager(callback.bot, lid, grp_name, tg)
+    await _announce_new_manager(
+        callback.bot, lid, grp_name, tg, is_enabled=has_any_enabled, is_group=True
+    )
 
 
 @fine_router.callback_query(F.data.startswith("fa:mg:"))
@@ -1038,6 +1127,9 @@ async def _show_managers(callback: CallbackQuery, lid: str, answered: bool = Fal
 async def cb_remove_manager(callback: CallbackQuery) -> None:
     tg = str(callback.from_user.id)
     parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("درخواست نامعتبر است.", show_alert=True)
+        return
     lid, mtg = parts[2], parts[3]
 
     def _work():
@@ -1078,6 +1170,9 @@ async def cb_remove_manager(callback: CallbackQuery) -> None:
 async def cb_amount_ask(callback: CallbackQuery, state: FSMContext) -> None:
     tg = str(callback.from_user.id)
     parts = callback.data.split(":")
+    if len(parts) < 4:
+        await callback.answer("درخواست نامعتبر است.", show_alert=True)
+        return
     lid, which = parts[2], parts[3]
     if which not in ("a", "l"):
         await callback.answer()

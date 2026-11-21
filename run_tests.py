@@ -21,6 +21,9 @@ os.environ["BOT_TOKEN"] = "123456789:AAH_TEST_TOKEN_KETABKHARSHO"
 os.environ["API_URL"] = "https://tapi.bale.ai"
 os.environ["ADMIN_IDS"] = "900001,900002"
 os.environ["DATABASE_URL"] = f"sqlite:///{TEMP_DB_PATH}"
+os.environ["BACKUP_DIR"] = os.path.join(TEMP_DB_DIR, "backups")
+os.environ["REPORTS_DIR"] = os.path.join(TEMP_DB_DIR, "reports")
+os.environ["LOG_FILE"] = os.path.join(TEMP_DB_DIR, "test.log")
 os.environ["DEFAULT_FLOOR"] = "20"
 os.environ["LEAGUE_DURATION"] = "40"
 os.environ["DEFAULT_HALF_COUPONS"] = "5"
@@ -514,7 +517,7 @@ async def run_all_tests() -> None:
     with get_db() as db:
         u1 = get_active_user(db, USER_1_ID)
         # تنظیم تاریخ عضویت به ۳ روز قبل و حذف لاگ دیروز تا جاب نیمه‌شب برای دیروز (روز ۴ چله) غیبت ثبت کند
-        u1.created_at = datetime.utcnow() - timedelta(days=3)
+        u1.created_at = datetime.now(timezone.utc) - timedelta(days=3)
         db.commit()
 
     await midnight_job(bot, force=True)
@@ -1327,6 +1330,130 @@ async def run_all_tests() -> None:
     assert settings.is_super_admin(SUPER_ADMIN_ID), "ادمین ریشه نباید دسترسی‌اش سلب شود!"
 
     print("✅ [PASS] Scenario 17: Superadmin revocation via inline buttons & root protection verified.")
+
+    # -------------------------------------------------------------------------
+    # Scenario 18: تست‌های رگرسیون ایمنی، همزمانی، ورودی یونیکد، پایداری کیبورد و ایزوله‌سازی چله
+    # -------------------------------------------------------------------------
+    # ۱. عدم کرش با ارقام بالانویس یونیکد («²») در تمام ورودی‌های عددی
+    assert AbsenceService.parse_days_list("1,²,3") == [1, 3]
+    u1_fsm_reg = make_fsm(storage, bot.id, USER_1_ID)
+    await u1_fsm_reg.update_data(
+        study_mode="fresh",
+        study_user_id=str(USER_1_ID),
+        study_init_date=DateService.today_str(),
+    )
+    await u1_fsm_reg.set_state(StudyStates.waiting_for_minutes)
+    await process_study_minutes(MockMessage(bot, USER_1_ID, "²"), u1_fsm_reg)
+    assert await u1_fsm_reg.get_state() == StudyStates.waiting_for_minutes
+    await u1_fsm_reg.set_state(StudyStates.waiting_for_pages)
+    await process_study_pages(MockMessage(bot, USER_1_ID, "²"), u1_fsm_reg)
+    assert await u1_fsm_reg.get_state() == StudyStates.waiting_for_pages
+    await u1_fsm_reg.clear()
+
+    # ۲. اعتبارسنجی fallback متغیرهای محیطی خالی در Config (سازگاری با docker-compose)
+    saved_env = os.environ.copy()
+    try:
+        os.environ["BALE_API_URL"] = ""
+        os.environ["API_URL"] = ""
+        os.environ["DEFAULT_LEAGUE_FLOOR"] = ""
+        os.environ["DEFAULT_FLOOR"] = "25"
+        os.environ["CYCLE_DAYS"] = ""
+        os.environ["LEAGUE_DURATION"] = "35"
+        cfg_empty = Config()
+        assert cfg_empty.API_URL == "https://tapi.bale.ai"
+        assert cfg_empty.DEFAULT_FLOOR == 25
+        assert cfg_empty.LEAGUE_DURATION == 35
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_env)
+
+    # ۳. جلوگیری از عضویت بین‌گروهی غیرمجاز توسط ادمین یک مجموعه دیگر
+    CROSS_ADMIN_ID = "800099"
+    with get_db() as db:
+        db.add(GroupAdmin(group_id=2, user_id=CROSS_ADMIN_ID))
+        lg_g2 = League(
+            group_id=2,
+            name="لیگ گروه ۲",
+            floor=15,
+            start_shamsi=DateService.today_shamsi(),
+            is_active=True,
+        )
+        db.add(lg_g2)
+        db.commit()
+        db.refresh(lg_g2)
+        lg_g2_id = lg_g2.id
+
+    cross_bot = MockBot()
+    await cb_execute_user_add_second_league(
+        MockCallbackQuery(cross_bot, CROSS_ADMIN_ID, f"adm_doaddl_{lg_g2_id}:{USER_1_ID}")
+    )
+    with get_db() as db:
+        cross_prof = (
+            db.query(User)
+            .filter(User.telegram_id == str(USER_1_ID), User.league_id == lg_g2_id)
+            .first()
+        )
+        assert cross_prof is None, "ادمین گروه ۲ نباید بتواند کاربر گروه ۱ را بدون دسترسی عضو کند!"
+
+    # ۴. محافظت در برابر انصراف تکراری/اشتباه از پروفایل دوم هنگام دابل‌کلیک confirm_cancel_league:{uid}
+    from handlers import cb_confirm_cancel_league
+    cancel_bot = MockBot()
+    cancel_fsm = make_fsm(storage, cancel_bot.id, USER_1_ID)
+    with get_db() as db:
+        profs_before = get_user_profiles(db, USER_1_ID, only_active=True)
+        assert len(profs_before) >= 2
+        target_cancel_pid = profs_before[1].id
+    await cb_confirm_cancel_league(
+        MockCallbackQuery(cancel_bot, USER_1_ID, f"confirm_cancel_league:{target_cancel_pid}"),
+        cancel_fsm,
+    )
+    # کلیک مجدد روی همان دکمه نباید پروفایل اول را غیرفعال کند
+    await cb_confirm_cancel_league(
+        MockCallbackQuery(cancel_bot, USER_1_ID, f"confirm_cancel_league:{target_cancel_pid}"),
+        cancel_fsm,
+    )
+    with get_db() as db:
+        profs_after = get_user_profiles(db, USER_1_ID, only_active=True)
+        assert len(profs_after) == len(profs_before) - 1, "دابل‌کلیک انصراف نباید پروفایل دوم را حذف کند!"
+
+    # ۵. عدم ارسال گزارش آرشیو بامداد در روز ۱ لیگ (وقتی force=False است)
+    from handlers import _build_single_admin_report_sync
+    day1_report = _build_single_admin_report_sync(lg_g2_id, force=False)
+    assert day1_report is None, "آرشیو بامداد در روز ۱ چله نباید ارسال شود!"
+
+    # ۶. اطمینان از عدم نگاشت cycle_id نامعتبر در restore_database_merge (سناریو ۱۵)
+    with get_db() as db:
+        merged_log = db.query(ActivityLog).filter(ActivityLog.user_id == "user_donor_99").first()
+        assert merged_log is not None and merged_log.cycle_id is None, (
+            f"لاگ ادغام‌شده بدون چله متناظر نباید به چله لیگ دیگری متصل شود: cycle_id={merged_log.cycle_id}"
+        )
+
+    # ۷. صفحه‌بندی فهرست بخشودگی جریمه برای بیش از ۱۰ رکورد
+    from fine_handlers import _waive_screen
+    from models import FineRecord
+    with get_db() as db:
+        lg1_obj = db.query(League).filter(League.id == lg1_id).first()
+        cyc_cur = get_or_create_active_cycle(db, lg1_obj)
+        for d_i in range(10, 23):
+            db.add(
+                FineRecord(
+                    league_id=lg1_id,
+                    user_id=str(USER_1_ID),
+                    cycle_id=cyc_cur.id,
+                    kind="absent",
+                    league_day=d_i,
+                    amount=5000,
+                )
+            )
+        db.commit()
+        w_txt0, w_kb0 = _waive_screen(db, lg1_obj, str(USER_1_ID), page=0)
+        w_cbs0 = [b.callback_data for r in w_kb0.inline_keyboard for b in r]
+        assert f"fw:{lg1_id}:{USER_1_ID}:1" in w_cbs0, "دکمه صفحه بعدی بخشودگی ساخته نشد"
+        w_txt1, w_kb1 = _waive_screen(db, lg1_obj, str(USER_1_ID), page=1)
+        w_cbs1 = [b.callback_data for r in w_kb1.inline_keyboard for b in r]
+        assert f"fw:{lg1_id}:{USER_1_ID}:0" in w_cbs1, "دکمه صفحه قبلی بخشودگی ساخته نشد"
+
+    print("✅ [PASS] Scenario 18: Regression suite (Unicode digits, env fallback, cross-group guard, double-cancel, Day-1 archive skip, merge cycle isolation, waive pagination) verified.")
 
 
 

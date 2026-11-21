@@ -144,6 +144,7 @@ def get_managed_leagues(db: Session, telegram_id: Any) -> List[League]:
             League.fines_enabled == True,
             League.is_deleted == False,
         )
+        .distinct()
         .order_by(League.name.asc())
         .all()
     )
@@ -198,13 +199,13 @@ def _sync_league_fines_impl(db: Session, league: League, commit: bool = True) ->
     - رکوردهای چله فعال که دیگر در لیست‌ها نیستند (مثلاً با ثبت دیرهنگام) حذف می‌شوند (به جز بخشوده‌شده‌ها).
     خروجی: تعداد تغییرات.
     """
-    if not league or not league.fines_enabled:
+    if not league or league.is_deleted or not league.fines_enabled:
         return 0
 
     from database import get_or_create_active_cycle  # جلوگیری از import حلقوی
     from services import DateService
 
-    cycle = get_or_create_active_cycle(db, league)
+    cycle = get_or_create_active_cycle(db, league, commit=commit)
     eff_start = cycle.start_shamsi or league.start_shamsi
     if not DateService.league_has_started(eff_start):
         return 0

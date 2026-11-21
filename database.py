@@ -149,10 +149,8 @@ _BACKUP_LOCK = threading.RLock()
 
 
 def reload_superadmins_from_db() -> None:
-    """بارگذاری مجدد سوپرادمین‌های پایدار از جدول system_state به حافظه"""
-    settings.ADMIN_IDS = sorted(settings.root_admin_ids)
-    if hasattr(settings, "_extra_superadmins"):
-        settings._extra_superadmins.clear()
+    """بارگذاری مجدد سوپرادمین‌های پایدار از جدول system_state به حافظه (به‌روزرسانی اتمیک)"""
+    new_extra: set[str] = set()
     with get_db() as db:
         extra_sas = (
             db.query(SystemState.key)
@@ -165,7 +163,10 @@ def reload_superadmins_from_db() -> None:
         for r in extra_sas:
             uid = r[0][len("superadmin_"):].strip()
             if uid:
-                settings.add_super_admin(uid)
+                new_extra.add(uid)
+    new_admins = list(dict.fromkeys(sorted(settings.root_admin_ids) + sorted(new_extra)))
+    settings._extra_superadmins = new_extra
+    settings.ADMIN_IDS = new_admins
 
 
 def demote_super_admin(user_id: str | int) -> Tuple[bool, str]:
@@ -470,6 +471,7 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
         src_conn.row_factory = sqlite3.Row
         dst_conn = sqlite3.connect(str(live_path), timeout=60)
         dst_conn.row_factory = sqlite3.Row
+        merge_ok = False
 
         try:
             src_tables = {
@@ -681,7 +683,7 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                     for row in src_conn.execute("SELECT * FROM activity_logs").fetchall():
                         a_dict = dict(row)
                         if a_dict.get("cycle_id") is not None:
-                            a_dict["cycle_id"] = cycle_id_map.get(int(a_dict["cycle_id"]), a_dict["cycle_id"])
+                            a_dict["cycle_id"] = cycle_id_map.get(int(a_dict["cycle_id"]))
                         exists = dst_conn.execute(
                             "SELECT id FROM activity_logs WHERE user_id = ? AND COALESCE(league_id, '') = COALESCE(?, '') AND log_date = ?",
                             (a_dict["user_id"], a_dict.get("league_id"), a_dict["log_date"]),
@@ -701,7 +703,7 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                     for row in src_conn.execute("SELECT * FROM fine_records").fetchall():
                         fr_dict = dict(row)
                         if fr_dict.get("cycle_id") is not None:
-                            fr_dict["cycle_id"] = cycle_id_map.get(int(fr_dict["cycle_id"]), fr_dict["cycle_id"])
+                            fr_dict["cycle_id"] = cycle_id_map.get(int(fr_dict["cycle_id"]))
                         exists = dst_conn.execute(
                             "SELECT id FROM fine_records WHERE user_id = ? AND league_id = ? AND COALESCE(cycle_id, -1) = COALESCE(?, -1) AND league_day = ? AND kind = ?",
                             (
@@ -752,7 +754,12 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
                     for row in src_conn.execute("SELECT * FROM cycle_results").fetchall():
                         cr_dict = dict(row)
                         if cr_dict.get("cycle_id") is not None:
-                            cr_dict["cycle_id"] = cycle_id_map.get(int(cr_dict["cycle_id"]), cr_dict["cycle_id"])
+                            mapped_cid = cycle_id_map.get(int(cr_dict["cycle_id"]))
+                            if mapped_cid is None:
+                                continue
+                            cr_dict["cycle_id"] = mapped_cid
+                        else:
+                            continue
                         exists = dst_conn.execute(
                             "SELECT id FROM cycle_results WHERE cycle_id = ? AND user_id = ?",
                             (cr_dict.get("cycle_id"), cr_dict["user_id"]),
@@ -844,14 +851,21 @@ def restore_database_merge(uploaded_file_path: str) -> Tuple[bool, str, Dict[str
 
             dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
             logger.info(f"ادغام هوشمند پایگاه داده با موفقیت انجام شد: {summary}")
+            merge_ok = True
             return True, "عملیات ادغام هوشمند با موفقیت تکمیل شد.", summary
         except Exception as exc:
+            merge_ok = False
             logger.error(f"خطا در ادغام هوشمند دیتابیس: {exc}", exc_info=True)
             return False, f"خطا در ادغام دیتابیس: {exc}", summary
         finally:
             dst_conn.close()
             src_conn.close()
             engine.dispose()
+            if merge_ok:
+                try:
+                    reload_superadmins_from_db()
+                except Exception as reload_exc:
+                    logger.warning(f"عدم امکان بازخوانی سوپرادمین‌ها پس از ادغام: {reload_exc}")
 
 
 def _run_migrations() -> None:
@@ -972,7 +986,12 @@ def _run_postgres_fine_migrations() -> None:
             logger.warning(f"عدم امکان اجرای مایگریشن جریمه ({stmt}): {exc}")
 
 
-def get_or_create_active_cycle(db: Session, league: League, default_start_shamsi: Optional[str] = None) -> Cycle:
+def get_or_create_active_cycle(
+    db: Session,
+    league: League,
+    default_start_shamsi: Optional[str] = None,
+    commit: bool = True,
+) -> Cycle:
     """تضمین وجود دقیقاً یک چله (Cycle) فعال برای لیگ و برگرداندن آن"""
     active_cycles = (
         db.query(Cycle)
@@ -996,7 +1015,10 @@ def get_or_create_active_cycle(db: Session, league: League, default_start_shamsi
             primary_cycle.cycle_number = league.cycle_number
             dirty = True
         if dirty:
-            db.commit()
+            if commit:
+                db.commit()
+            else:
+                db.flush()
         return primary_cycle
 
     from services import DateService
@@ -1016,8 +1038,11 @@ def get_or_create_active_cycle(db: Session, league: League, default_start_shamsi
         status="active",
     )
     db.add(new_cycle)
-    db.commit()
-    db.refresh(new_cycle)
+    if commit:
+        db.commit()
+        db.refresh(new_cycle)
+    else:
+        db.flush()
     return new_cycle
 
 
@@ -1226,7 +1251,11 @@ def get_active_user(db: Session, telegram_id: str | int) -> Optional[User]:
     if active_prof_id:
         user = (
             db.query(User)
-            .filter(User.id == active_prof_id, User.is_active == True)
+            .filter(
+                User.id == active_prof_id,
+                User.telegram_id == tg_id,
+                User.is_active == True,
+            )
             .first()
         )
         if user:

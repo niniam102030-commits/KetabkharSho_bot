@@ -101,14 +101,15 @@ def get_league_selection(
     return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
 
 
-def get_cancel_league_confirm() -> InlineKeyboardMarkup:
+def get_cancel_league_confirm(user_id: Optional[str] = None) -> InlineKeyboardMarkup:
     """۵. تایید انصراف از لیگ"""
+    confirm_cb = f"confirm_cancel_league:{user_id}" if user_id else "confirm_cancel_league"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="✅ بله، انصراف می‌دهم",
-                    callback_data="confirm_cancel_league",
+                    callback_data=confirm_cb,
                 )
             ],
             [
