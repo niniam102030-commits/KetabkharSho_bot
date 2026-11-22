@@ -456,7 +456,7 @@ class ScoringService:
     ) -> List[Tuple[int, User]]:
         """
         مرتب‌سازی نزولی کاربران و تخصیص رتبه نمایشی یکسان (Tie-breaking)
-        در صورت برابری هر سه معیار.
+        در صورت برابری (امتیاز، کف مؤثر)؛ مجموع دقایق فقط ترتیب نمایش است.
         خروجی: لیستی از تاپل‌های (displayed_rank, user)
         """
         sorted_users = sorted(
@@ -465,17 +465,19 @@ class ScoringService:
             reverse=True,
         )
         ranked: List[Tuple[int, User]] = []
-        prev_key: Optional[Tuple[float, int, int]] = None
+        prev_rank_key: Optional[Tuple[float, int]] = None
         current_rank = 1
 
         for idx, u in enumerate(sorted_users, start=1):
-            key = cls.get_user_sort_key(u, league_floor)
-            if prev_key is not None and key == prev_key:
+            # رتبه فقط بر اساس (امتیاز، کف مؤثر) تعیین می‌شود؛ مجموع دقایق
+            # فقط ترتیب نمایش در جدول است و رتبه را تغییر نمی‌دهد.
+            rank_key = cls.get_user_sort_key(u, league_floor)[:2]
+            if prev_rank_key is not None and rank_key == prev_rank_key:
                 rank_to_assign = current_rank
             else:
                 rank_to_assign = idx
                 current_rank = idx
-                prev_key = key
+                prev_rank_key = rank_key
             ranked.append((rank_to_assign, u))
 
         return ranked
@@ -706,21 +708,21 @@ class ReportService:
         ]
 
         rows: List[List[Any]] = []
-        prev_key: Optional[Tuple[float, int, int]] = None
+        prev_rank_key: Optional[Tuple[float, int]] = None
         current_rank = 1
 
         for idx, item in enumerate(normalized, start=1):
-            current_key = (
+            # رتبه فقط بر اساس (امتیاز، کف)؛ دقایق فقط ترتیب نمایش است.
+            current_rank_key = (
                 round(float(item.get("points_sort", item.get("points", 0.0))), 2),
                 int(item.get("floor", league_floor)),
-                int(item.get("total_minutes", item.get("minutes", 0))),
             )
-            if prev_key is not None and current_key == prev_key:
+            if prev_rank_key is not None and current_rank_key == prev_rank_key:
                 rank = current_rank
             else:
                 rank = idx
                 current_rank = idx
-                prev_key = current_key
+                prev_rank_key = current_rank_key
 
             rows.append(
                 [
