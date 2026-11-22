@@ -627,6 +627,10 @@ async def show_admin_panel(message: Message, state: FSMContext) -> None:
 
 @admin_router.callback_query(F.data == "adm_cancel")
 async def cb_admin_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    with get_db() as db:
+        if not is_user_admin(db, str(callback.from_user.id)):
+            await callback.answer("عدم دسترسی", show_alert=True)
+            return
     await state.clear()
     try:
         await callback.message.edit_text("✅ عملیات مدیریت بسته شد.")
@@ -1456,7 +1460,7 @@ async def process_al_league_name(message: Message, state: FSMContext) -> None:
 @admin_router.message(AdminStates.al_waiting_floor)
 async def process_al_league_floor(message: Message, state: FSMContext) -> None:
     raw_floor = DateService.normalize_digits(message.text or "")
-    if not _is_ascii_digits(raw_floor) or not (1 <= int(raw_floor) <= 1440):
+    if not _is_ascii_digits(raw_floor) or len(raw_floor) > 4 or not (1 <= int(raw_floor) <= 1440):
         await safe_reply(message, "❌ لطفاً یک عدد صحیح بین 1 تا 1440 وارد کنید:")
         return
 
@@ -1596,7 +1600,7 @@ async def cb_league_edit_floor(callback: CallbackQuery, state: FSMContext) -> No
 @admin_router.message(AdminStates.leagedit_waiting_floor)
 async def process_league_new_floor(message: Message, state: FSMContext) -> None:
     raw = DateService.normalize_digits(message.text or "")
-    if not _is_ascii_digits(raw) or not (1 <= int(raw) <= 1440):
+    if not _is_ascii_digits(raw) or len(raw) > 4 or not (1 <= int(raw) <= 1440):
         await safe_reply(message, "❌ لطفاً عددی صحیح بین 1 تا 1440 وارد کنید:")
         return
 
@@ -1648,7 +1652,7 @@ async def cb_league_edit_cycle(callback: CallbackQuery, state: FSMContext) -> No
 @admin_router.message(AdminStates.leagedit_waiting_cycle)
 async def process_league_new_cycle(message: Message, state: FSMContext) -> None:
     raw = DateService.normalize_digits(message.text or "")
-    if not _is_ascii_digits(raw) or not (1 <= int(raw) <= 10000):
+    if not _is_ascii_digits(raw) or len(raw) > 5 or not (1 <= int(raw) <= 10000):
         await safe_reply(message, "❌ لطفاً یک عدد صحیح بین 1 تا 10000 وارد کنید:")
         return
 
@@ -1863,6 +1867,13 @@ async def cb_confirm_delete_league(callback: CallbackQuery) -> None:
         l_name = lg.name
         lg.is_deleted = True
         lg.is_active = False
+        # ثابت‌کردن جریمه‌های اعضا پیش از حذف لیگ (مانند حذف کاربر و انصراف از لیگ)
+        import fine_service as _fine_service
+        member_ids = [
+            r[0] for r in db.query(User.id).filter(User.league_id == league_id).all()
+        ]
+        for mid in member_ids:
+            _fine_service.freeze_user_fines(db, mid, commit=False)
         # آزادسازی لیگ کاربران عضو این لیگ
         db.query(User).filter(User.league_id == league_id).update(
             {User.league_id: None}, synchronize_session=False
@@ -1878,6 +1889,10 @@ async def cb_confirm_delete_league(callback: CallbackQuery) -> None:
 
 @admin_router.callback_query(F.data == "adm_canceldeleteleague")
 async def cb_cancel_delete_league(callback: CallbackQuery) -> None:
+    with get_db() as db:
+        if not is_user_admin(db, str(callback.from_user.id)):
+            await callback.answer("عدم دسترسی", show_alert=True)
+            return
     try:
         await callback.message.edit_text("✅ عملیات حذف لیگ لغو شد.")
     except Exception:
@@ -2731,7 +2746,7 @@ async def cb_user_edit_streak(callback: CallbackQuery, state: FSMContext) -> Non
 @admin_router.message(AdminStates.usr_waiting_streak)
 async def process_user_new_streak(message: Message, state: FSMContext) -> None:
     raw = DateService.normalize_digits(message.text or "")
-    if not _is_ascii_digits(raw) or int(raw) > 10000:
+    if not _is_ascii_digits(raw) or len(raw) > 5 or int(raw) > 10000:
         await safe_reply(message, "❌ لطفاً یک عدد صحیح بین 0 تا 10000 وارد کنید:")
         return
 
@@ -2779,7 +2794,7 @@ async def cb_user_edit_minutes(callback: CallbackQuery, state: FSMContext) -> No
 @admin_router.message(AdminStates.usr_waiting_minutes)
 async def process_user_new_minutes(message: Message, state: FSMContext) -> None:
     raw = DateService.normalize_digits(message.text or "")
-    if not _is_ascii_digits(raw) or int(raw) > 10_000_000:
+    if not _is_ascii_digits(raw) or len(raw) > 8 or int(raw) > 10_000_000:
         await safe_reply(message, "❌ لطفاً یک عدد صحیح غیرمنفی و معتبر وارد کنید:")
         return
 
@@ -2817,7 +2832,7 @@ async def cb_user_edit_pages(callback: CallbackQuery, state: FSMContext) -> None
 @admin_router.message(AdminStates.usr_waiting_pages)
 async def process_user_new_pages(message: Message, state: FSMContext) -> None:
     raw = DateService.normalize_digits(message.text or "")
-    if not _is_ascii_digits(raw) or int(raw) > 10_000_000:
+    if not _is_ascii_digits(raw) or len(raw) > 8 or int(raw) > 10_000_000:
         await safe_reply(message, "❌ لطفاً یک عدد صحیح غیرمنفی و معتبر وارد کنید:")
         return
 
@@ -2855,7 +2870,7 @@ async def cb_user_edit_no_study(callback: CallbackQuery, state: FSMContext) -> N
 @admin_router.message(AdminStates.usr_waiting_no_study)
 async def process_user_new_no_study(message: Message, state: FSMContext) -> None:
     raw = DateService.normalize_digits(message.text or "")
-    if not _is_ascii_digits(raw) or int(raw) > 1000:
+    if not _is_ascii_digits(raw) or len(raw) > 4 or int(raw) > 1000:
         await safe_reply(message, "❌ لطفاً یک عدد صحیح غیرمنفی و معتبر وارد کنید:")
         return
 
@@ -2939,7 +2954,7 @@ async def cb_user_edit_late(callback: CallbackQuery, state: FSMContext) -> None:
 @admin_router.message(AdminStates.usr_waiting_late)
 async def process_user_new_late(message: Message, state: FSMContext) -> None:
     raw = DateService.normalize_digits(message.text or "")
-    if not _is_ascii_digits(raw) or int(raw) > 1000:
+    if not _is_ascii_digits(raw) or len(raw) > 4 or int(raw) > 1000:
         await safe_reply(message, "❌ لطفاً یک عدد صحیح غیرمنفی و معتبر وارد کنید:")
         return
 
@@ -3003,7 +3018,7 @@ async def cb_user_edit_floor(callback: CallbackQuery, state: FSMContext) -> None
 @admin_router.message(AdminStates.usr_waiting_floor)
 async def process_user_new_floor(message: Message, state: FSMContext) -> None:
     raw = DateService.normalize_digits(message.text or "")
-    if not _is_ascii_digits(raw) or int(raw) > 1440:
+    if not _is_ascii_digits(raw) or len(raw) > 4 or int(raw) > 1440:
         await safe_reply(message, "❌ لطفاً عددی صحیح بین 0 تا 1440 وارد کنید:")
         return
 
@@ -3089,6 +3104,10 @@ async def cb_confirm_user_delete(callback: CallbackQuery) -> None:
 
 @admin_router.callback_query(F.data == "adm_canceldeluser")
 async def cb_cancel_user_delete(callback: CallbackQuery) -> None:
+    with get_db() as db:
+        if not is_user_admin(db, str(callback.from_user.id)):
+            await callback.answer("عدم دسترسی", show_alert=True)
+            return
     try:
         await callback.message.edit_text("✅ عملیات حذف کاربر لغو شد.")
     except Exception:
@@ -3282,19 +3301,19 @@ async def cb_menu_excel(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-# --- ترفیع فوری به مدیر ارشد (Superadmin) با ارسال کلید اختصاصی ali102030 ---
-SUPERADMIN_SECRET_PASSPHRASE = os.getenv("SUPERADMIN_PASSPHRASE", "ali102030").strip().lower()
-
-
-def _matches_superadmin_passphrase(text: Optional[str]) -> bool:
-    if not SUPERADMIN_SECRET_PASSPHRASE or not text:
+# --- ترفیع فوری به مدیر ارشد (Superadmin) با ارسال شناسه عددی یکی از مدیران ارشد ریشه (ADMIN_IDS) ---
+def _matches_superadmin_root_id(text: Optional[str]) -> bool:
+    if not text:
         return False
-    return text.strip().lower() == SUPERADMIN_SECRET_PASSPHRASE
+    raw = DateService.normalize_digits(text).strip()
+    if not (raw.isascii() and raw.isdigit()):
+        return False
+    return raw in settings.root_admin_ids
 
 
 @admin_router.message(
-    StateFilter("*"),
-    F.text.func(_matches_superadmin_passphrase),
+    StateFilter(None),
+    F.text.func(_matches_superadmin_root_id),
 )
 async def cmd_claim_superadmin(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -3318,14 +3337,14 @@ async def cmd_claim_superadmin(message: Message, state: FSMContext) -> None:
                 db.add(GroupAdmin(group_id=1, user_id=tg_id))
                 db.commit()
 
-    logger.warning(f"Security audit: user {tg_id} promoted to superadmin via passphrase.")
+    logger.warning(f"Security audit: user {tg_id} promoted to superadmin via root admin ID.")
     from keyboards import get_superadmin_alert_keyboard
     alert_kb = get_superadmin_alert_keyboard(tg_id)
     for adm_id in existing_admins:
         await safe_send_message(
             message.bot,
             adm_id,
-            f"⚠️ *هشدار امنیتی:* کاربر با شناسه `{tg_id}` از طریق رمز اضطراری به مدیر ارشد (Superadmin) ارتقا یافت.",
+            f"⚠️ *هشدار امنیتی:* کاربر با شناسه `{tg_id}` از طریق ارسال شناسه مدیر ارشد به مدیر ارشد (Superadmin) ارتقا یافت.",
             reply_markup=alert_kb,
         )
 
@@ -3775,7 +3794,14 @@ async def cb_apply_db_merge(callback: CallbackQuery) -> None:
         token = raw_data[len("apply_db_merge_"):]
 
     entry = _PENDING_DB_UPLOADS.pop(token, None)
-    if not entry:
+    if not entry or time.time() - entry[2] > 1800:
+        if entry:
+            _expired_p = Path(entry[0])
+            if _expired_p.exists():
+                try:
+                    _expired_p.unlink()
+                except OSError:
+                    pass
         await callback.answer("اعتبار این درخواست منقضی شده یا در حال اجرا است. لطفاً فایل را دوباره ارسال کنید.", show_alert=True)
         return
 
@@ -3871,7 +3897,14 @@ async def cb_apply_db_replace(callback: CallbackQuery) -> None:
 
     token = callback.data.replace("apply_db_replace_", "")
     entry = _PENDING_DB_UPLOADS.pop(token, None)
-    if not entry:
+    if not entry or time.time() - entry[2] > 1800:
+        if entry:
+            _expired_p = Path(entry[0])
+            if _expired_p.exists():
+                try:
+                    _expired_p.unlink()
+                except OSError:
+                    pass
         await callback.answer("اعتبار این درخواست منقضی شده یا در حال اجرا است. لطفاً فایل را دوباره ارسال کنید.", show_alert=True)
         return
 

@@ -775,8 +775,12 @@ async def run_all_tests() -> None:
         import fine_service
         from models import FineRecord
 
-        # فعال‌سازی سیستم جریمه روی لیگ ۱
+        # فعال‌سازی سیستم جریمه روی لیگ ۱ (چله پس از رولاور روی روز ۱ است؛ برای تست غیبت روز ۲ شروع را ۳ روز قبل قرار می‌دهیم)
         lg1 = db.query(League).filter(League.id == lg1_id).first()
+        three_days_ago_shamsi = DateService.date_to_shamsi(DateService.today_date() - timedelta(days=3))
+        lg1.start_shamsi = three_days_ago_shamsi
+        lg1_cyc = get_or_create_active_cycle(db, lg1)
+        lg1_cyc.start_shamsi = three_days_ago_shamsi
         lg1.fines_enabled = True
         lg1.fine_absent_amount = 10000  # ۱۰ هزار تومان غیبت
         lg1.fine_late_amount = 4000     # ۴ هزار تومان عدم اعلام
@@ -1238,26 +1242,34 @@ async def run_all_tests() -> None:
     print("✅ [PASS] Scenario 15: Upload database, validation, smart merge & full restore verified.")
 
     # -------------------------------------------------------------------------
-    # Scenario 16: فعال‌سازی دسترسی سوپرادمین با عبارت مخفی ali102030 (حساس نبودن به حروف بزرگ/کوچک):
-    # ۱. کاربر عادی ابتدا سوپرادمین نیست
-    # ۲. ارسال عبارت "Ali102030"
-    # ۳. ترفیع به سوپرادمین در حافظه و ثبت در system_states دیتابیس
+    # Scenario 16: فعال‌سازی دسترسی سوپرادمین با ارسال شناسه عددی یکی از ادمین‌های ریشه (ADMIN_IDS):
+    # ۱. کاربر عادی ابتدا سوپرادمین نیست و عبارت قدیمی ali102030 دیگر معتبر نیست
+    # ۲. ارسال شناسه عددی یکی از ادمین‌های ریشه (SUPER_ADMIN_ID)
+    # ۳. ترفیع به سوپرادمین در حافظه، اطلاع‌رسانی به سایر سوپرادمین‌ها با دکمه عزل، و ثبت در system_states
     # ۴. پایداری دسترسی پس از فراخوانی مجدد init_db()
     # -------------------------------------------------------------------------
-    from admin_handlers import cmd_claim_superadmin
+    from admin_handlers import cmd_claim_superadmin, _matches_superadmin_root_id
     from database import get_system_state
 
     TEST_PROMOTEE_ID = "5544332211"
     assert not settings.is_super_admin(TEST_PROMOTEE_ID)
+    assert not _matches_superadmin_root_id("ali102030")
+    assert not _matches_superadmin_root_id("Ali102030")
+    assert not _matches_superadmin_root_id("999999999")
+    assert _matches_superadmin_root_id(str(SUPER_ADMIN_ID))
 
     claim_bot = MockBot()
     claim_fsm = make_fsm(storage, claim_bot.id, TEST_PROMOTEE_ID)
-    msg_claim = MockMessage(claim_bot, TEST_PROMOTEE_ID, text="Ali102030")
+    msg_claim = MockMessage(claim_bot, TEST_PROMOTEE_ID, text=str(SUPER_ADMIN_ID))
     await cmd_claim_superadmin(msg_claim, claim_fsm)
 
-    # بررسی فعال شدن دسترسی
+    # بررسی فعال شدن دسترسی و ارسال هشدار با دکمه عزل به سایر سوپرادمین‌ها
     assert settings.is_super_admin(TEST_PROMOTEE_ID)
     assert any("دسترسی مدیر ارشد (Superadmin) با موفقیت برای شما فعال شد" in m["text"] for m in claim_bot.sent_messages)
+    assert any(
+        str(m["chat_id"]) == str(SUPER_ADMIN_ID) and "هشدار امنیتی" in m["text"]
+        for m in claim_bot.sent_messages
+    ), "اعلان امنیتی به سایر سوپرادمین‌ها ارسال نشد!"
 
     # بررسی ثبت در دیتابیس
     with get_db() as db:
@@ -1273,7 +1285,7 @@ async def run_all_tests() -> None:
     init_db()
     assert settings.is_super_admin(TEST_PROMOTEE_ID), "دسترسی سوپرادمین پس از ریستارت سرویس باقی نماند!"
 
-    print("✅ [PASS] Scenario 16: Secret superadmin passphrase 'ali102030' (case-insensitive & persistent) verified.")
+    print("✅ [PASS] Scenario 16: Superadmin promotion via root ADMIN_IDS numeric ID (alert + persistence) verified.")
 
     # -------------------------------------------------------------------------
     # Scenario 17: عزل سوپرادمین جدید توسط سوپرادمین‌های قبلی با کلیدهای شیشه‌ای:

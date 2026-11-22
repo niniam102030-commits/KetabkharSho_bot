@@ -17,8 +17,8 @@ Base = declarative_base()
 
 
 def generate_league_id() -> str:
-    """تولید شناسه ۸ کاراکتری یکتا برای لیگ‌ها"""
-    return str(uuid.uuid4())[:8]
+    """تولید شناسه یکتا برای لیگ‌ها"""
+    return uuid.uuid4().hex
 
 
 class Group(Base):
@@ -153,7 +153,7 @@ class LeagueFineManager(Base):
 
     __tablename__ = "league_fine_managers"
     __table_args__ = (
-        Index("ix_lfm_league_tg", "league_id", "telegram_id"),
+        Index("ix_lfm_league_tg", "league_id", "telegram_id", unique=True),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)

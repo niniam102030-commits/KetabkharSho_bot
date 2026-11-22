@@ -91,7 +91,11 @@ def add_manager(db: Session, league_id: str, telegram_id: Any) -> bool:
     if is_fine_manager(db, league_id, telegram_id):
         return False
     db.add(LeagueFineManager(league_id=league_id, telegram_id=str(telegram_id)))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return False
     return True
 
 
@@ -117,7 +121,11 @@ def set_group_fine_manager(
             lg.fines_enabled = True
             sync_league_fines(db, lg, commit=False)
     if assigned or auto_enable:
-        db.commit()
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            return 0
     return assigned
 
 
@@ -228,6 +236,7 @@ def _sync_league_fines_impl(db: Session, league: League, commit: bool = True) ->
     for rec in existing_rows:
         existing[(rec.user_id, rec.kind, int(rec.league_day))] = rec
 
+    current_day = DateService.calculate_league_day(eff_start)
     desired_keys = set()
     changes = 0
     for u in users:
@@ -235,6 +244,8 @@ def _sync_league_fines_impl(db: Session, league: League, commit: bool = True) ->
         late_days = set(AbsenceService.parse_days_list(u.late_days_list))
         for kind, days in ((KIND_ABSENT, absent_days), (KIND_LATE, late_days)):
             for d in days:
+                if not (1 <= int(d) <= current_day):
+                    continue
                 key = (u.id, kind, int(d))
                 desired_keys.add(key)
                 if key not in existing and amounts[kind] > 0:
@@ -260,12 +271,7 @@ def _sync_league_fines_impl(db: Session, league: League, commit: bool = True) ->
             changes += 1
 
     if commit and changes:
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()
-            logger.warning(f"رکورد جریمه تکراری برای لیگ {league.id} نادیده گرفته شد.")
-            return 0
+        db.commit()
     elif commit:
         db.flush()
     return changes

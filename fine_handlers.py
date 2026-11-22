@@ -406,7 +406,8 @@ async def cb_debtor_detail(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @fine_router.callback_query(F.data.startswith("fs:"))
-async def cb_settle_ask(callback: CallbackQuery) -> None:
+async def cb_settle_ask(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     tg = str(callback.from_user.id)
     parts = callback.data.split(":", 2)
     if len(parts) < 3:
@@ -431,7 +432,7 @@ async def cb_settle_ask(callback: CallbackQuery) -> None:
     await callback.answer()
     kb = _nav_kb(
         [
-            [_btn("✅ بله، تسویه شد", f"fc:{lid}:{uid}")],
+            [_btn("✅ بله، تسویه شد", f"fc:{lid}:{uid}:{res[1]}")],
             [_btn("🔙 انصراف", f"fd:{lid}:{uid}")],
         ]
     )
@@ -454,11 +455,12 @@ async def _notify_payment(bot, tg_target: str, lg_name: str, applied: int, owed_
 async def cb_settle_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     tg = str(callback.from_user.id)
-    parts = callback.data.split(":", 2)
+    parts = callback.data.split(":", 3)
     if len(parts) < 3:
         await callback.answer("درخواست نامعتبر است.", show_alert=True)
         return
-    _, lid, uid = parts
+    _, lid, uid = parts[0], parts[1], parts[2]
+    expected_owed = int(parts[3]) if len(parts) > 3 and parts[3].isascii() and parts[3].isdigit() else None
 
     def _work():
         with get_db() as db:
@@ -469,6 +471,8 @@ async def cb_settle_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             if not u:
                 return None
             owed = fine_service.get_user_balance(db, lid, uid)["owed"]
+            if expected_owed is not None:
+                owed = min(owed, expected_owed)
             applied = fine_service.record_payment(db, lid, uid, owed, tg) if owed > 0 else 0
             screen = _debtors_screen(db, lg, 0)
             return applied, str(u.telegram_id), lg.name, screen

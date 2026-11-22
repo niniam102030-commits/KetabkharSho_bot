@@ -113,7 +113,8 @@ def _backup_postgres() -> Optional[str]:
         backup_dir = Path(settings.BACKUP_DIR)
         backup_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_file = backup_dir / f"ketabkharsho_pg_backup_{timestamp}.dump"
+        uniq = uuid.uuid4().hex[:6]
+        out_file = backup_dir / f"ketabkharsho_pg_backup_{timestamp}_{uniq}.dump"
 
         cmd = [pg_dump_bin, "--format=custom", "--no-owner", "--file", str(out_file)]
         if url.host:
@@ -295,7 +296,7 @@ def validate_sqlite_file(file_path: str) -> Tuple[bool, str, Dict[str, int]]:
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
-            if not any(k in tables for k in ("users", "leagues", "groups")):
+            if not all(k in tables for k in ("users", "leagues", "groups")):
                 return False, "جداول استاندارد ربات کتابخوارشو در فایل یافت نشد.", {}
 
             if "groups" in tables:
@@ -428,7 +429,12 @@ def _prepare_row_for_destination(
         if col in row_dict and row_dict[col] is not None:
             final_dict[col] = row_dict[col]
         elif info["notnull"] and info["default"] is None:
-            final_dict[col] = defaults.get(col, 0)
+            if col in defaults:
+                final_dict[col] = defaults[col]
+            elif "CHAR" in str(info["type"]).upper() or "TEXT" in str(info["type"]).upper():
+                final_dict[col] = ""
+            else:
+                final_dict[col] = 0
     return final_dict
 
 
@@ -1199,7 +1205,22 @@ def _run_postgres_fine_migrations() -> None:
             logger.warning(f"عدم امکان اجرای مایگریشن جریمه ({stmt}): {exc}")
 
 
+_CYCLE_CREATE_LOCK = threading.RLock()
+
+
 def get_or_create_active_cycle(
+    db: Session,
+    league: League,
+    default_start_shamsi: Optional[str] = None,
+    commit: bool = True,
+) -> Cycle:
+    with _CYCLE_CREATE_LOCK:
+        return _get_or_create_active_cycle_impl(
+            db, league, default_start_shamsi, commit
+        )
+
+
+def _get_or_create_active_cycle_impl(
     db: Session,
     league: League,
     default_start_shamsi: Optional[str] = None,
@@ -1478,7 +1499,7 @@ def get_active_user(db: Session, telegram_id: str | int) -> Optional[User]:
     profiles = get_user_profiles(db, tg_id, only_active=True)
     if profiles:
          chosen = profiles[0]
-         set_active_user_id(db, tg_id, chosen.id)
+         set_system_state(db, f"active_profile_{tg_id}", str(chosen.id), commit=False)
          return chosen
 
     # بررسی وجود رکورد مستقیم با id == telegram_id (حتی اگر غیرفعال شده یا تازه ثبت‌نام می‌کند)

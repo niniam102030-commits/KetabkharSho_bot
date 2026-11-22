@@ -1061,7 +1061,7 @@ class AbsenceService:
                     existing_set.add(cand)
 
         # ۳. اولویت سوم: از انتهای چله به عقب (۴۰، ۳۹، ...) تا با ثبت مطالعه امروز و فردا تداخل نکند
-        upper_bound = max(max_day, target_count + len(excluded) + 10)
+        upper_bound = max_day
         for cand in range(max_day, 0, -1):
             if len(existing_set) >= target_count:
                 break
@@ -1070,7 +1070,7 @@ class AbsenceService:
 
         candidate = 1
         while len(existing_set) < target_count and candidate <= upper_bound:
-            if candidate not in existing_set and candidate not in excluded:
+            if candidate not in existing_set and candidate not in excluded and candidate != current_day:
                 existing_set.add(candidate)
             candidate += 1
 
@@ -1078,7 +1078,7 @@ class AbsenceService:
         for cand in range(upper_bound, 0, -1):
             if len(existing_set) >= target_count:
                 break
-            if cand not in existing_set:
+            if cand not in existing_set and cand not in excluded and cand != current_day:
                 existing_set.add(cand)
         return cls.format_days_list(existing_set)
 
@@ -1109,7 +1109,7 @@ class AbsenceService:
         curr = last_processed_d + timedelta(days=1)
         # حداکثر بررسی ۴۰ روز گذشته برای جلوگیری از حلقه بی‌نهایت
         if (yesterday_d - curr).days > settings.LEAGUE_DURATION:
-            curr = yesterday_d - timedelta(days=settings.LEAGUE_DURATION)
+            curr = yesterday_d - timedelta(days=settings.LEAGUE_DURATION - 1)
 
         while curr <= yesterday_d:
             missing.append(curr.strftime("%Y-%m-%d"))
@@ -1138,7 +1138,7 @@ class AbsenceService:
         for lg in active_leagues:
             if not lg.start_shamsi:
                 lg.start_shamsi = DateService.today_shamsi()
-            active_cycle = get_or_create_active_cycle(db, lg)
+            active_cycle = get_or_create_active_cycle(db, lg, commit=False)
 
             users = (
                 db.query(User)
@@ -1261,7 +1261,7 @@ class AbsenceService:
                 continue
 
             if lg.id not in cycle_cache:
-                cycle_cache[lg.id] = get_or_create_active_cycle(db, lg)
+                cycle_cache[lg.id] = get_or_create_active_cycle(db, lg, commit=False)
             cyc = cycle_cache[lg.id]
 
             if user is None:
@@ -1473,7 +1473,7 @@ class AbsenceService:
                 continue
 
             if lg.id not in cycle_cache:
-                cycle_cache[lg.id] = get_or_create_active_cycle(db, lg)
+                cycle_cache[lg.id] = get_or_create_active_cycle(db, lg, commit=False)
             cyc = cycle_cache[lg.id]
 
             if user is None:

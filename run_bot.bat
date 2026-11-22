@@ -23,6 +23,12 @@ echo [2/3] Dar hale barresi file .env va niazmandiha...
 if not exist ".env" (
     echo [WARNING] File .env vojood nadarad! Lotfan ghabl az ejra .env ra tanzim konid.
 )
+"%PYTHON_EXE%" -m pip install -r requirements.txt
+if %ERRORLEVEL% neq 0 (
+    echo [ERROR] Nasbe niazmandiha ba khata movajeh shod.
+    pause
+    exit /b 1
+)
 
 echo.
 echo [3/3] Dar hale ejraye robat (main.py)...

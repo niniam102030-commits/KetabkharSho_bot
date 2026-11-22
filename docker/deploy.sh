@@ -28,6 +28,13 @@ docker image prune -f
 
 echo ""
 echo "=================================================="
+sleep 5
+if ! docker compose ps --status running | grep -q "ketabkharsho_bot"; then
+  echo "❌ کانتینر ربات در حال اجرا نیست؛ لاگ‌های اخیر:"
+  docker compose logs --tail=100 ketabkharsho-bot
+  exit 1
+fi
+
 echo "✅ نسخه جدید ربات با موفقیت فعال و اجرا شد!"
 echo "=================================================="
 docker compose ps

@@ -56,9 +56,6 @@ async def _send_weekly_reports_impl(bot: Bot, force: bool = False) -> None:
             .order_by(League.id.asc())
             .all()
         ]
-        if not force:
-            set_system_state(db, "last_weekly_report_date", today_str)
-
     if not league_ids:
         return
 
@@ -67,7 +64,9 @@ async def _send_weekly_reports_impl(bot: Bot, force: bool = False) -> None:
     async def _deliver(rcpt: str, text: str, caption: str, path: str) -> None:
         """ارسال متن و اکسل به یک گیرنده؛ خطای یک گیرنده بقیه را متوقف نمی‌کند"""
         try:
-            await safe_send(bot, rcpt, text)
+            text_ok = await safe_send(bot, rcpt, text)
+            if not text_ok:
+                logger.warning(f"ارسال متن گزارش هفتگی به {rcpt} ناموفق بود.")
             await throttle.tick()
             ok = await safe_send_document(bot, rcpt, path, caption=caption, throttle=throttle)
             if not ok:
@@ -125,6 +124,10 @@ async def _send_weekly_reports_impl(bot: Bot, force: bool = False) -> None:
 
     logger.info(f"گزارش‌های هفتگی جمعه برای تاریخ {today_str} با موفقیت ارسال شد.")
 
+    if not force:
+        with get_db() as db:
+            set_system_state(db, "last_weekly_report_date", today_str)
+
     # ۴. ارسال خودکار فایل دیتابیس به همراه گزارش‌های دوره‌ای برای مدیران اصلی
     try:
         from handlers import send_database_backup
@@ -134,13 +137,8 @@ async def _send_weekly_reports_impl(bot: Bot, force: bool = False) -> None:
             event_title="گزارش هفتگی دوره‌ای جمعه",
             throttle=throttle,
         )
-        if settings.ARCHIVE_CHANNEL:
-            await send_database_backup(
-                bot=bot,
-                recipients=[settings.ARCHIVE_CHANNEL],
-                event_title="گزارش هفتگی دوره‌ای جمعه (کانال آرشیو)",
-                throttle=throttle,
-            )
+        # نسخه پشتیبان دیتابیس فقط برای سوپرادمین‌ها ارسال می‌شود؛
+        # ارسال آن به کانال آرشیو (مخاطب گسترده) عمداً حذف شد.
     except Exception as exc:
         logger.error(f"خطا در ارسال خودکار نسخه پشتیبان دیتابیس در گزارش هفتگی: {exc}", exc_info=True)
 

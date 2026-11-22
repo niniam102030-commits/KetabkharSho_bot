@@ -1194,10 +1194,13 @@ async def handle_edit_study_today(message: Message, state: FSMContext) -> None:
     with get_db() as db:
         user = get_active_user(db, tg_id)
         if not user or not user.is_active or not user.league_id:
-            return
-        league = db.query(League).filter(League.id == user.league_id).first()
+            inactive_msg = "⚠️ شما هنوز عضو هیچ لیگی نیستید."
+            league = None
+        else:
+            league = db.query(League).filter(League.id == user.league_id).first()
         if not league or league.is_deleted or not league.is_active:
-            inactive_msg = MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست.")
+            if inactive_msg is None:
+                inactive_msg = MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست.")
         else:
             cycle = get_or_create_active_cycle(db, league)
             eff_start = cycle.start_shamsi or league.start_shamsi
@@ -1247,10 +1250,13 @@ async def handle_append_study_today(message: Message, state: FSMContext) -> None
     with get_db() as db:
         user = get_active_user(db, tg_id)
         if not user or not user.is_active or not user.league_id:
-            return
-        league = db.query(League).filter(League.id == user.league_id).first()
+            inactive_msg = "⚠️ شما هنوز عضو هیچ لیگی نیستید."
+            league = None
+        else:
+            league = db.query(League).filter(League.id == user.league_id).first()
         if not league or league.is_deleted or not league.is_active:
-            inactive_msg = MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست.")
+            if inactive_msg is None:
+                inactive_msg = MessageService.apply_terms(db, user.group_id, "⚠️ لیگ فعلی شما فعال نیست.")
         else:
             cycle = get_or_create_active_cycle(db, league)
             eff_start = cycle.start_shamsi or league.start_shamsi
@@ -1405,7 +1411,7 @@ async def process_study_minutes(message: Message, state: FSMContext) -> None:
         return
 
     raw_mins = DateService.normalize_digits(txt_clean)
-    if not (raw_mins.isascii() and raw_mins.isdigit()) or not (1 <= int(raw_mins) <= 1440):
+    if not (raw_mins.isascii() and raw_mins.isdigit()) or len(raw_mins) > 4 or not (1 <= int(raw_mins) <= 1440):
         await safe_answer(
             message,
             "❌ لطفاً زمان مطالعه را به صورت یک عدد صحیح بین 1 تا 1440 (دقیقه) وارد کنید:",
@@ -1449,7 +1455,7 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
     if await _dispatch_menu_interruption(message, state, txt_clean):
         return
     raw_pages = DateService.normalize_digits(txt_clean)
-    if not (raw_pages.isascii() and raw_pages.isdigit()) or not (0 <= int(raw_pages) <= 5000):
+    if not (raw_pages.isascii() and raw_pages.isdigit()) or len(raw_pages) > 4 or not (0 <= int(raw_pages) <= 5000):
         await safe_answer(
             message,
             "❌ لطفاً تعداد صفحات را به صورت یک عدد صحیح بین 0 تا 5000 وارد کنید:",
@@ -2584,8 +2590,7 @@ def _init_daily_admin_reports_sync(today_str: str, force: bool) -> Optional[List
             .order_by(League.id.asc())
             .all()
         ]
-        if not force:
-            set_system_state(db, "last_daily_admin_report_date", today_str)
+        # علامت «اجرا شد» فقط پس از ارسال موفق گزارش‌ها در send_daily_admin_reports ثبت می‌شود
         return league_ids
 
 
@@ -2659,6 +2664,10 @@ async def send_daily_admin_reports(bot: Bot, force: bool = False) -> None:
                     await send_text_chunks(bot, rcpt, report_text, throttle=throttle)
                 except Exception as exc:
                     logger.warning(f"خطا در ارسال گزارش آرشیو به {rcpt}: {exc}")
+
+        if not force:
+            with get_db() as db:
+                set_system_state(db, "last_daily_admin_report_date", today_str)
 
 
 def _complete_and_rollover_cycle(
@@ -3099,8 +3108,7 @@ def _init_morning_reports_sync(
             .all()
             if v
         }
-        if not force:
-            set_system_state(db, "last_daily_user_report_date", today_str)
+        # علامت «اجرا شد» فقط پس از ارسال موفق کارنامه‌ها در _send_daily_user_reports_impl ثبت می‌شود
         return league_ids, admin_ids, profile_counts, active_profile_map
 
 
@@ -3209,17 +3217,21 @@ async def _send_daily_user_reports_impl(bot: Bot, force: bool = False) -> None:
             await dispatch_outbox(bot, outbox, throttle)
         del outbox
 
+    if not force:
+        with get_db() as db:
+            set_system_state(db, "last_daily_user_report_date", today_str)
+
 
 def _build_study_reminders_outbox_sync(
     today_str: str, force: bool
-) -> List[Tuple[str, str, Any]]:
+) -> Optional[List[Tuple[str, str, Any]]]:
     """استخراج لیست کاربران ثبت‌نکرده و ساخت پیام‌های یادآوری در ترد مجزا"""
     outbox: List[Tuple[str, str, Any]] = []
 
     with get_db() as db:
         last_run = get_system_state(db, "last_reminder_date")
         if last_run == today_str and not force:
-            return []
+            return None
 
         league_rows = (
             db.query(
@@ -3326,9 +3338,6 @@ def _build_study_reminders_outbox_sync(
 
             outbox.append((tg_id, full_msg, None))
 
-        if not force:
-            set_system_state(db, "last_reminder_date", today_str)
-
     return outbox
 
 
@@ -3346,5 +3355,10 @@ async def send_study_reminders(bot: Bot, force: bool = False) -> None:
         outbox = await asyncio.to_thread(
             _build_study_reminders_outbox_sync, today_str, force
         )
+        if outbox is None:
+            return
         if outbox:
             await dispatch_outbox(bot, outbox, BroadcastThrottle())
+        if not force:
+            with get_db() as db:
+                set_system_state(db, "last_reminder_date", today_str)

@@ -53,8 +53,13 @@ COPY . .
 ARG GIT_COMMIT=""
 ENV GIT_COMMIT=${GIT_COMMIT}
 
-# ایجاد دایرکتوری‌های داده و لاگ
-RUN mkdir -p /app/data /app/logs /app/data/backups /app/data/reports
+# ایجاد دایرکتوری‌های داده و لاگ و کاربر غیر روت برای اجرای ربات
+RUN mkdir -p /app/data /app/logs /app/data/backups /app/data/reports \
+    && groupadd --system app \
+    && useradd --system --gid app --home-dir /app app \
+    && chown -R app:app /app
+
+USER app
 
 # دستور اجرای ربات
 CMD ["python", "main.py"]

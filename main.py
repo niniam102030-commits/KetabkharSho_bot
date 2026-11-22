@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from pathlib import Path
 import asyncio
 import logging
@@ -85,6 +86,8 @@ async def run_startup_catchups(bot: Bot) -> None:
     """
     now_ir = DateService.now_iran()
     today_str = DateService.today_str()
+    days_since_friday = (now_ir.weekday() - 4) % 7
+    last_friday_str = (now_ir.date() - timedelta(days=days_since_friday)).strftime("%Y-%m-%d")
     current_hour = now_ir.hour
 
     (
@@ -96,7 +99,8 @@ async def run_startup_catchups(bot: Bot) -> None:
     ) = await asyncio.to_thread(_read_startup_states_and_cleanup_sync)
 
     # ۱. جبران جاب نیمه‌شب (ثبت غیبت روزهای گذشته و بروزرسانی روز چله)
-    if last_midnight != today_str:
+    # در اولین اجرای بدون وضعیت قبلی، در میانه روز اجرا نشود
+    if last_midnight and last_midnight != today_str:
         logger.info("اجرای جبرانی جاب نیمه‌شب (midnight_job) در استارتاپ...")
         try:
             await midnight_job(bot)
@@ -111,11 +115,11 @@ async def run_startup_catchups(bot: Bot) -> None:
         except Exception as exc:
             logger.error(f"خطا در اجرای جبرانی send_daily_admin_reports: {exc}", exc_info=True)
 
-    # ۳. جبران گزارش هفتگی روزهای جمعه (در پایتون جمعه برابر با weekday == 4 است)
+    # ۳. جبران گزارش هفتگی: اگر ربات جمعه خاموش بوده، شنبه هم جبران شود
     if (
-        now_ir.weekday() == 4
-        and current_hour >= settings.WEEKLY_REPORT_HOUR
-        and last_weekly_rep != today_str
+        now_ir.weekday() in (4, 5)
+        and (now_ir.weekday() == 5 or current_hour >= settings.WEEKLY_REPORT_HOUR)
+        and last_weekly_rep not in (today_str, last_friday_str)
     ):
         logger.info("اجرای جبرانی گزارش هفتگی جمعه (send_weekly_reports) در استارتاپ...")
         try:
@@ -173,10 +177,10 @@ async def main() -> None:
         except Exception as exc:
             logger.error(f"خطای مدیریت‌شده در هوک استارتاپ دیسپچر: {exc}", exc_info=True)
 
-    # راه‌اندازی زمان‌بند خودکار پیش از اجرای جاب‌های جبرانی تا تغییر ساعت حین catchup از دست نرود
-    scheduler = setup_scheduler(bot)
+    scheduler = None
     try:
         await run_startup_catchups(bot)
+        scheduler = setup_scheduler(bot)
 
         logger.info(
             f"ربات باشگاه کتابخوانی «کتابخوارشو» متصل به {settings.API_URL} آماده دریافت پیام‌هاست..."
@@ -186,7 +190,7 @@ async def main() -> None:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         logger.info("در حال خاموش کردن زمان‌بند و بستن نشست ربات...")
-        if scheduler.running:
+        if scheduler is not None and scheduler.running:
             scheduler.shutdown(wait=False)
         await bot.session.close()
         engine.dispose()
