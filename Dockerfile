@@ -16,11 +16,12 @@ ENV PYTHONUNBUFFERED=1 \
 # تعیین دایرکتوری کاری در کانتینر
 WORKDIR /app
 
-# نصب ابزارهای پایه و داده‌های زمانی IANA
+# نصب ابزارهای پایه، داده‌های زمانی IANA و gosu برای اجرای امن با کاربر غیرروت
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     ca-certificates \
     curl \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # ارتقای ابزارهای پکیج‌منیجر پایتون به آخرین نسخه
@@ -53,13 +54,16 @@ COPY . .
 ARG GIT_COMMIT=""
 ENV GIT_COMMIT=${GIT_COMMIT}
 
-# ایجاد دایرکتوری‌های داده و لاگ و کاربر غیر روت برای اجرای ربات
+# ایجاد دایرکتوری‌های داده و لاگ، کاربر غیر روت و entrypoint برای تنظیم دسترسی حجم‌های موجود بدون حذف داده
 RUN mkdir -p /app/data /app/logs /app/data/backups /app/data/reports \
     && groupadd --system app \
     && useradd --system --gid app --home-dir /app app \
-    && chown -R app:app /app
+    && chown -R app:app /app \
+    && cp /app/docker/entrypoint.sh /usr/local/bin/entrypoint.sh \
+    && sed -i 's/\r$//' /usr/local/bin/entrypoint.sh \
+    && chmod +x /usr/local/bin/entrypoint.sh
 
-USER app
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # دستور اجرای ربات
 CMD ["python", "main.py"]

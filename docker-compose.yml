@@ -1,6 +1,6 @@
 services:
   ketabkharsho-bot:
-    image: ghcr.io/niniam102030-commits/ketabkharsho_bot:${BOT_IMAGE_TAG:?BOT_IMAGE_TAG must be set to a release tag or digest}
+    image: ghcr.io/niniam102030-commits/ketabkharsho_bot:${BOT_IMAGE_TAG:-latest}
     pull_policy: always
     container_name: ketabkharsho_bot
     restart: unless-stopped
