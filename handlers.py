@@ -65,6 +65,7 @@ from keyboards import (
     get_profile_switch_keyboard,
     get_cancel_or_back_keyboard,
     get_optional_pages_keyboard,
+    get_study_minutes_keyboard,
     EDIT_YESTERDAY_TEXT,
     SKIP_PAGES_TEXT,
 )
@@ -1140,6 +1141,76 @@ async def handle_back_to_main_menu(message: Message, state: FSMContext) -> None:
     await safe_answer(message, txt, reply_markup=kb)
 
 
+def _build_minutes_quick_options(
+    db: Session,
+    user: User,
+    league: League,
+    mode: str = "fresh",
+    existing_yest_log: Optional[ActivityLog] = None,
+) -> Tuple[Any, Dict[str, int]]:
+    """
+    ساخت کیبورد ۳ گزینه‌ای ورود سریع دقایق مطالعه (میثاق کامل / نصف میثاق / سهمیه طلایی)
+    متناسب با میثاق اختصاصی کاربر (یا میثاق لیگ) و واژه‌نامه اختصاصی مجموعه.
+    خروجی: (reply_markup, {button_text: minutes_int})
+    """
+    effective_floor = user.get_effective_floor(
+        league.floor if league else settings.DEFAULT_FLOOR
+    )
+    half_mins = max(1, (effective_floor + 1) // 2)
+    half_limit = (
+        league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)
+        if league
+        else settings.DEFAULT_HALF_COUPONS
+    )
+    one_limit = (
+        league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)
+        if league
+        else settings.DEFAULT_ONE_MIN_COUPONS
+    )
+
+    avail_half = max(0, int(user.half_coupons or 0))
+    avail_one = max(0, int(user.one_min_coupons or 0))
+    if mode == "edit":
+        avail_half = min(half_limit, avail_half + max(0, int(user.today_half_used or 0)))
+        avail_one = min(one_limit, avail_one + max(0, int(user.today_one_min_used or 0)))
+    elif mode == "edit_yesterday" and existing_yest_log is not None:
+        avail_half = min(
+            half_limit,
+            avail_half + max(0, int(existing_yest_log.half_coupon_used or 0)),
+        )
+        avail_one = min(
+            one_limit,
+            avail_one + max(0, int(existing_yest_log.one_min_coupon_used or 0)),
+        )
+
+    terms = MessageService.get_terms(db, user.group_id)
+    full_label = MessageService.apply_terms(
+        db, user.group_id, f"✅ میثاق کامل ({effective_floor} دقیقه)", terms=terms
+    )
+    quick_map: Dict[str, int] = {full_label: effective_floor}
+
+    half_label: Optional[str] = None
+    if avail_half > 0 and effective_floor > 1:
+        half_label = MessageService.apply_terms(
+            db, user.group_id, f"🌗 نصف میثاق ({half_mins} دقیقه)", terms=terms
+        )
+        quick_map[half_label] = half_mins
+
+    golden_label: Optional[str] = None
+    if avail_one > 0 and effective_floor > 2:
+        golden_label = MessageService.apply_terms(
+            db, user.group_id, "🌟 سهمیه طلایی (1 دقیقه)", terms=terms
+        )
+        quick_map[golden_label] = 1
+
+    kb = get_study_minutes_keyboard(
+        full_label=full_label,
+        half_label=half_label,
+        golden_label=golden_label,
+    )
+    return kb, quick_map
+
+
 @user_router.message(F.text == "📝 ثبت مطالعه امروز")
 async def handle_log_study_today(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -1243,19 +1314,23 @@ async def handle_log_study_today(message: Message, state: FSMContext) -> None:
             f"⏱ {escape_md(user.name)} عزیز!\n\n"
             f"امروز{league_text} چند دقیقه مطالعه کردید؟\n"
             f"(میثاق شما: {effective_floor} دقیقه)\n\n"
-            f"لطفاً فقط عدد بفرستید:"
+            f"می‌توانید یکی از گزینه‌های زیر را انتخاب کنید یا عدد دقایق مطالعه خود را مستقیم بنویسید:"
         )
         prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
         user_id = user.id
+        mins_kb, quick_map = _build_minutes_quick_options(db, user, league, mode="fresh")
 
     await state.update_data(
-        study_mode="fresh", study_user_id=user_id, study_init_date=today_str
+        study_mode="fresh",
+        study_user_id=user_id,
+        study_init_date=today_str,
+        quick_minutes_map=quick_map,
     )
     await state.set_state(StudyStates.waiting_for_minutes)
     await safe_answer(
         message,
         prompt_txt,
-        reply_markup=get_cancel_or_back_keyboard(show_back=False),
+        reply_markup=mins_kb,
     )
 
 
@@ -1292,10 +1367,11 @@ async def handle_edit_study_today(message: Message, state: FSMContext) -> None:
                     f"🔄 *ویرایش ثبت امروز*\n\n"
                     f"⏱ {escape_md(user.name)} عزیز، کل زمان مطالعه امروز شما چند دقیقه بوده است؟\n"
                     f"(این عدد جایگزین {user.today_minutes} دقیقه قبلی می‌شود | میثاق شما: {eff_floor} دقیقه)\n\n"
-                    f"لطفاً فقط عدد بفرستید:"
+                    f"می‌توانید یکی از گزینه‌های زیر را انتخاب کنید یا عدد دقایق مطالعه خود را مستقیم بنویسید:"
                 )
                 prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
                 user_id = user.id
+                mins_kb, quick_map = _build_minutes_quick_options(db, user, league, mode="edit")
 
     if inactive_msg is not None:
         await safe_answer(message, inactive_msg)
@@ -1305,13 +1381,16 @@ async def handle_edit_study_today(message: Message, state: FSMContext) -> None:
         return
 
     await state.update_data(
-        study_mode="edit", study_user_id=user_id, study_init_date=today_str
+        study_mode="edit",
+        study_user_id=user_id,
+        study_init_date=today_str,
+        quick_minutes_map=quick_map,
     )
     await state.set_state(StudyStates.waiting_for_minutes)
     await safe_answer(
         message,
         prompt_txt or "",
-        reply_markup=get_cancel_or_back_keyboard(show_back=False),
+        reply_markup=mins_kb,
     )
 
 
@@ -1403,19 +1482,23 @@ async def handle_log_study_yesterday(message: Message, state: FSMContext) -> Non
             f"شما در حال ثبت مطالعه برای *دیروز*{league_text} هستید.\n"
             f"(میثاق شما: {effective_floor} دقیقه - امتیاز این ثبت نصف محاسبه می‌شود)\n\n"
             f"دیروز چند دقیقه مطالعه کردید؟\n\n"
-            f"لطفاً فقط عدد بفرستید:"
+            f"می‌توانید یکی از گزینه‌های زیر را انتخاب کنید یا عدد دقایق مطالعه خود را مستقیم بنویسید:"
         )
         prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
         user_id = user.id
+        mins_kb, quick_map = _build_minutes_quick_options(db, user, league, mode="late")
 
     await state.update_data(
-        study_mode="late", study_user_id=user_id, study_init_date=today_str
+        study_mode="late",
+        study_user_id=user_id,
+        study_init_date=today_str,
+        quick_minutes_map=quick_map,
     )
     await state.set_state(StudyStates.waiting_for_minutes)
     await safe_answer(
         message,
         prompt_txt,
-        reply_markup=get_cancel_or_back_keyboard(show_back=False),
+        reply_markup=mins_kb,
     )
 
 
@@ -1507,19 +1590,25 @@ async def handle_edit_study_yesterday(message: Message, state: FSMContext) -> No
             f"✏️ *ویرایش مطالعه دیروز*\n\n"
             f"⏱ {escape_md(user.name)} عزیز، کل زمان مطالعه دیروز{league_text} شما چند دقیقه بوده است؟\n"
             f"(این عدد جایگزین {existing_yest_log.minutes} دقیقه قبلی دیروز می‌شود | میثاق شما: {effective_floor} دقیقه)\n\n"
-            f"لطفاً فقط عدد بفرستید:"
+            f"می‌توانید یکی از گزینه‌های زیر را انتخاب کنید یا عدد دقایق مطالعه خود را مستقیم بنویسید:"
         )
         prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
         user_id = user.id
+        mins_kb, quick_map = _build_minutes_quick_options(
+            db, user, league, mode="edit_yesterday", existing_yest_log=existing_yest_log
+        )
 
     await state.update_data(
-        study_mode="edit_yesterday", study_user_id=user_id, study_init_date=today_str
+        study_mode="edit_yesterday",
+        study_user_id=user_id,
+        study_init_date=today_str,
+        quick_minutes_map=quick_map,
     )
     await state.set_state(StudyStates.waiting_for_minutes)
     await safe_answer(
         message,
         prompt_txt,
-        reply_markup=get_cancel_or_back_keyboard(show_back=False),
+        reply_markup=mins_kb,
     )
 
 
@@ -1597,15 +1686,21 @@ async def process_study_minutes(message: Message, state: FSMContext) -> None:
         )
         return
 
-    raw_mins = DateService.normalize_digits(txt_clean)
-    if not (raw_mins.isascii() and raw_mins.isdigit()) or len(raw_mins) > 4 or not (1 <= int(raw_mins) <= 1440):
-        await safe_answer(
-            message,
-            "❌ لطفاً زمان مطالعه را به صورت یک عدد صحیح بین 1 تا 1440 (دقیقه) وارد کنید:",
-        )
-        return
+    quick_map = data.get("quick_minutes_map") or {}
+    if txt_clean in quick_map:
+        minutes = int(quick_map[txt_clean])
+    else:
+        raw_mins = DateService.normalize_digits(txt_clean)
+        if not (raw_mins.isascii() and raw_mins.isdigit()) or len(raw_mins) > 4 or not (1 <= int(raw_mins) <= 1440):
+            hint = (
+                "یکی از گزینه‌های زیر را انتخاب کنید یا زمان مطالعه را به صورت یک عدد صحیح بین 1 تا 1440 (دقیقه) وارد کنید:"
+                if quick_map
+                else "زمان مطالعه را به صورت یک عدد صحیح بین 1 تا 1440 (دقیقه) وارد کنید:"
+            )
+            await safe_answer(message, f"❌ لطفاً {hint}")
+            return
+        minutes = int(raw_mins)
 
-    minutes = int(raw_mins)
     study_uid = data.get("study_user_id")
     mode = data.get("study_mode", "fresh")
 
@@ -1646,7 +1741,9 @@ async def process_study_minutes(message: Message, state: FSMContext) -> None:
         )
     else:
         await safe_answer(
-            message, f"📄 حالا {user_display} عزیز بفرمایید چند صفحه خواندید؟"
+            message,
+            f"📄 حالا {user_display} عزیز بفرمایید چند صفحه خواندید؟",
+            reply_markup=get_cancel_or_back_keyboard(show_back=False),
         )
 
 
@@ -2087,7 +2184,7 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
             days_left = max(0, settings.LEAGUE_DURATION - current_day)
             league_title = f"لیگ «{escape_md(league.name)}»"
 
-            # آماده‌سازی اعلان هم‌لیگی‌ها فقط در ثبت جدید امروز و در صورت فعال بودن در مجموعه
+            # آماده‌سازی اعلان هم‌لیگی‌ها فقط در ثبت جدید امروز، فقط برای اعضای همین لیگ که امروز هنوز ثبت نداشته‌اند
             if mode == "fresh" and group_obj and group_obj.peer_notify_enabled:
                 actor_name = escape_md(user.get_display_name())
                 league_name_md = escape_md(league.name)
@@ -2095,6 +2192,8 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                 for peer in all_league_users:
                     p_tg = str(peer.telegram_id or "").strip()
                     if not p_tg or p_tg in seen_peers or not peer.peer_notify_enabled:
+                        continue
+                    if peer.last_log_date == today_str and int(peer.today_minutes or 0) > 0:
                         continue
                     seen_peers.add(p_tg)
                     raw_tmpl = random.choice(_PEER_NOTIFY_TEMPLATES).format(

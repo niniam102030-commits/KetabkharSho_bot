@@ -330,6 +330,28 @@ def get_optional_pages_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def get_study_minutes_keyboard(
+    full_label: str,
+    half_label: Optional[str] = None,
+    golden_label: Optional[str] = None,
+) -> ReplyKeyboardMarkup:
+    """
+    کیبورد ترکیبی مرحله ورود زمان مطالعه:
+    کاربر می‌تواند یکی از ۳ گزینه سریع (میثاق کامل / نصف میثاق / سهمیه طلایی) را لمس کند
+    یا مستقیماً عدد دقایق مطالعه خود را تایپ کند.
+    """
+    rows: List[List[KeyboardButton]] = [[KeyboardButton(text=full_label)]]
+    coupon_row: List[KeyboardButton] = []
+    if half_label:
+        coupon_row.append(KeyboardButton(text=half_label))
+    if golden_label:
+        coupon_row.append(KeyboardButton(text=golden_label))
+    if coupon_row:
+        rows.append(coupon_row)
+    rows.append([KeyboardButton(text=CANCEL_TEXT)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
 def get_inline_cancel_keyboard(show_back: bool = False) -> InlineKeyboardMarkup:
     """کیبورد شیشه‌ای مراحل دریافت ورودی در پنل ادمین"""
     row: List[InlineKeyboardButton] = []

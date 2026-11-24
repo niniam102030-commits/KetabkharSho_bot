@@ -2007,18 +2007,6 @@
       "source_location": "L4991"
     },
     {
-      "id": "database_set_system_state",
-      "label": "set_system_state()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 14,
-      "community_name": "main.py",
-      "file_type": "code",
-      "norm_label": "set_system_state()",
-      "source_file": "database.py",
-      "source_location": "L1465"
-    },
-    {
       "id": "handlers_midnight_job",
       "label": "midnight_job()",
       "_callable": true,
@@ -3231,64 +3219,16 @@
       "source_location": "L419"
     },
     {
-      "id": "admin_handlers_apply_league_quota_change",
-      "label": "_apply_league_quota_change()",
+      "id": "run_tests_make_fsm",
+      "label": "make_fsm()",
       "_callable": true,
       "_origin": "ast",
       "community": 20,
-      "community_name": "cleanse_prestart_activity_and_scores",
+      "community_name": "make_fsm",
       "file_type": "code",
-      "norm_label": "_apply_league_quota_change()",
-      "source_file": "admin_handlers.py",
-      "source_location": "L5032"
-    },
-    {
-      "id": "handlers_cleanse_prestart_activity_and_scores",
-      "label": "cleanse_prestart_activity_and_scores()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 20,
-      "community_name": "cleanse_prestart_activity_and_scores",
-      "file_type": "code",
-      "norm_label": "cleanse_prestart_activity_and_scores()",
-      "source_file": "handlers.py",
-      "source_location": "L2605"
-    },
-    {
-      "id": "handlers_reset_league_members_for_new_start",
-      "label": "reset_league_members_for_new_start()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 20,
-      "community_name": "cleanse_prestart_activity_and_scores",
-      "file_type": "code",
-      "norm_label": "reset_league_members_for_new_start()",
-      "source_file": "handlers.py",
-      "source_location": "L2538"
-    },
-    {
-      "id": "models_league_get_half_coupons_limit",
-      "label": ".get_half_coupons_limit()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 20,
-      "community_name": "cleanse_prestart_activity_and_scores",
-      "file_type": "code",
-      "norm_label": ".get_half_coupons_limit()",
-      "source_file": "models.py",
-      "source_location": "L158"
-    },
-    {
-      "id": "models_league_get_one_min_coupons_limit",
-      "label": ".get_one_min_coupons_limit()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 20,
-      "community_name": "cleanse_prestart_activity_and_scores",
-      "file_type": "code",
-      "norm_label": ".get_one_min_coupons_limit()",
-      "source_file": "models.py",
-      "source_location": "L164"
+      "norm_label": "make_fsm()",
+      "source_file": "run_tests.py",
+      "source_location": "L254"
     },
     {
       "id": "handlers_build_league_morning_cards_sync",
@@ -3483,18 +3423,6 @@
       "source_location": "L91"
     },
     {
-      "id": "run_tests_make_fsm",
-      "label": "make_fsm()",
-      "_callable": true,
-      "_origin": "ast",
-      "community": 22,
-      "community_name": "AdminStates",
-      "file_type": "code",
-      "norm_label": "make_fsm()",
-      "source_file": "run_tests.py",
-      "source_location": "L254"
-    },
-    {
       "id": "admin_handlers_build_admin_help_text",
       "label": "_build_admin_help_text()",
       "_callable": true,
@@ -3591,6 +3519,18 @@
       "source_location": "L254"
     },
     {
+      "id": "admin_handlers_apply_league_quota_change",
+      "label": "_apply_league_quota_change()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 27,
+      "community_name": "run_tests.py",
+      "file_type": "code",
+      "norm_label": "_apply_league_quota_change()",
+      "source_file": "admin_handlers.py",
+      "source_location": "L5032"
+    },
+    {
       "id": "admin_handlers_matches_superadmin_root_id",
       "label": "_matches_superadmin_root_id()",
       "_callable": true,
@@ -3627,6 +3567,30 @@
       "source_location": "L1457"
     },
     {
+      "id": "database_set_system_state",
+      "label": "set_system_state()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 27,
+      "community_name": "run_tests.py",
+      "file_type": "code",
+      "norm_label": "set_system_state()",
+      "source_file": "database.py",
+      "source_location": "L1465"
+    },
+    {
+      "id": "handlers_cleanse_prestart_activity_and_scores",
+      "label": "cleanse_prestart_activity_and_scores()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 27,
+      "community_name": "run_tests.py",
+      "file_type": "code",
+      "norm_label": "cleanse_prestart_activity_and_scores()",
+      "source_file": "handlers.py",
+      "source_location": "L2605"
+    },
+    {
       "id": "handlers_complete_and_rollover_cycle",
       "label": "_complete_and_rollover_cycle()",
       "_callable": true,
@@ -3661,6 +3625,42 @@
       "norm_label": "_init_morning_reports_sync()",
       "source_file": "handlers.py",
       "source_location": "L3511"
+    },
+    {
+      "id": "handlers_reset_league_members_for_new_start",
+      "label": "reset_league_members_for_new_start()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 27,
+      "community_name": "run_tests.py",
+      "file_type": "code",
+      "norm_label": "reset_league_members_for_new_start()",
+      "source_file": "handlers.py",
+      "source_location": "L2538"
+    },
+    {
+      "id": "models_league_get_half_coupons_limit",
+      "label": ".get_half_coupons_limit()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 27,
+      "community_name": "run_tests.py",
+      "file_type": "code",
+      "norm_label": ".get_half_coupons_limit()",
+      "source_file": "models.py",
+      "source_location": "L158"
+    },
+    {
+      "id": "models_league_get_one_min_coupons_limit",
+      "label": ".get_one_min_coupons_limit()",
+      "_callable": true,
+      "_origin": "ast",
+      "community": 27,
+      "community_name": "run_tests.py",
+      "file_type": "code",
+      "norm_label": ".get_one_min_coupons_limit()",
+      "source_file": "models.py",
+      "source_location": "L164"
     },
     {
       "id": "run_tests_mockdocument_init",
@@ -7165,17 +7165,6 @@
       "source_location": ""
     },
     {
-      "id": "database_rationale_1466",
-      "label": "\u0630\u062e\u06cc\u0631\u0647 \u06cc\u0627 \u0628\u0647\u200c\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc \u06cc\u06a9 \u06a9\u0644\u06cc\u062f \u062f\u0631 \u062c\u062f\u0648\u0644 SystemState (\u0628\u0627 commit=False \u0641\u0642\u0637 flush\u2026",
-      "_origin": "ast",
-      "community": 14,
-      "community_name": "main.py",
-      "file_type": "rationale",
-      "norm_label": "\u0630\u062e\u06cc\u0631\u0647 \u06cc\u0627 \u0628\u0647\u200c\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc \u06cc\u06a9 \u06a9\u0644\u06cc\u062f \u062f\u0631 \u062c\u062f\u0648\u0644 systemstate (\u0628\u0627 commit=false \u0641\u0642\u0637 flush...",
-      "source_file": "database.py",
-      "source_location": "L1466"
-    },
-    {
       "id": "handlers_rationale_2821",
       "label": "\u06f1. \u062c\u0627\u0628 \u0633\u0627\u0639\u062a 00:00 \u0646\u06cc\u0645\u0647\u200c\u0634\u0628: - \u0628\u062f\u0648\u0646 \u0627\u0631\u0633\u0627\u0644 \u0647\u06cc\u0686 \u067e\u06cc\u0627\u0645\u06cc \u0628\u0647 \u06a9\u0627\u0631\u0628\u0631\u0627\u0646. - \u067e\u0627\u06a9\u0633\u0627\u0632\u06cc \u062e\u0648\u062f\u06a9\u0627\u0631\u2026",
       "_origin": "ast",
@@ -7943,59 +7932,26 @@
       "source_location": "L221"
     },
     {
-      "id": "admin_handlers_rationale_5038",
-      "label": "\u062a\u063a\u06cc\u06cc\u0631 \u0633\u0642\u0641 \u0633\u0647\u0645\u06cc\u0647 \u0646\u0635\u0641 \u0645\u06cc\u062b\u0627\u0642 (kind='half') \u06cc\u0627 \u0637\u0644\u0627\u06cc\u06cc \u06f1 \u062f\u0642\u06cc\u0642\u0647\u200c\u0627\u06cc (kind='one') \u0628\u0631\u0627\u06cc\u2026",
+      "id": "memorystorage",
+      "label": "MemoryStorage",
       "_origin": "ast",
       "community": 20,
-      "community_name": "cleanse_prestart_activity_and_scores",
-      "file_type": "rationale",
-      "norm_label": "\u062a\u063a\u06cc\u06cc\u0631 \u0633\u0642\u0641 \u0633\u0647\u0645\u06cc\u0647 \u0646\u0635\u0641 \u0645\u06cc\u062b\u0627\u0642 (kind='half') \u06cc\u0627 \u0637\u0644\u0627\u06cc\u06cc \u06f1 \u062f\u0642\u06cc\u0642\u0647\u200c\u0627\u06cc (kind='one') \u0628\u0631\u0627\u06cc...",
-      "source_file": "admin_handlers.py",
-      "source_location": "L5038"
+      "community_name": "make_fsm",
+      "file_type": "code",
+      "norm_label": "memorystorage",
+      "source_file": "",
+      "source_location": ""
     },
     {
-      "id": "handlers_rationale_2539",
-      "label": "\u0635\u0641\u0631 \u06a9\u0631\u062f\u0646 \u0642\u0637\u0639\u06cc \u0627\u0645\u062a\u06cc\u0627\u0632 \u0648 \u0622\u0645\u0627\u0631 \u0647\u0645\u0647 \u0627\u0639\u0636\u0627\u06cc \u0641\u0639\u0627\u0644 \u06cc\u06a9 \u0644\u06cc\u06af \u0642\u0628\u0644 \u0627\u0632 \u0634\u0631\u0648\u0639 \u0631\u0633\u0645\u06cc \u06cc\u0627 \u062f\u0631 \u0644\u062d\u0638\u0647\u200c\u06cc\u2026",
+      "id": "run_tests_py_fsmcontext",
+      "label": "FSMContext",
       "_origin": "ast",
       "community": 20,
-      "community_name": "cleanse_prestart_activity_and_scores",
-      "file_type": "rationale",
-      "norm_label": "\u0635\u0641\u0631 \u06a9\u0631\u062f\u0646 \u0642\u0637\u0639\u06cc \u0627\u0645\u062a\u06cc\u0627\u0632 \u0648 \u0627\u0645\u0627\u0631 \u0647\u0645\u0647 \u0627\u0639\u0636\u0627\u06cc \u0641\u0639\u0627\u0644 \u06cc\u06a9 \u0644\u06cc\u06af \u0642\u0628\u0644 \u0627\u0632 \u0634\u0631\u0648\u0639 \u0631\u0633\u0645\u06cc \u06cc\u0627 \u062f\u0631 \u0644\u062d\u0638\u0647\u200c\u06cc...",
-      "source_file": "handlers.py",
-      "source_location": "L2539"
-    },
-    {
-      "id": "handlers_rationale_2606",
-      "label": "\u067e\u0627\u0644\u0627\u06cc\u0634 \u0648 \u0646\u0627\u062f\u06cc\u062f\u0647 \u06af\u0631\u0641\u062a\u0646 \u0642\u0637\u0639\u06cc \u06a9\u0644\u06cc\u0647 \u0627\u0645\u062a\u06cc\u0627\u0632\u0627\u062a \u0648 \u0644\u0627\u06af\u200c\u0647\u0627\u06cc \u062b\u0628\u062a\u200c\u0634\u062f\u0647 \u0642\u0628\u0644 \u0627\u0632 \u062a\u0627\u0631\u06cc\u062e \u0634\u0631\u0648\u0639\u2026",
-      "_origin": "ast",
-      "community": 20,
-      "community_name": "cleanse_prestart_activity_and_scores",
-      "file_type": "rationale",
-      "norm_label": "\u067e\u0627\u0644\u0627\u06cc\u0634 \u0648 \u0646\u0627\u062f\u06cc\u062f\u0647 \u06af\u0631\u0641\u062a\u0646 \u0642\u0637\u0639\u06cc \u06a9\u0644\u06cc\u0647 \u0627\u0645\u062a\u06cc\u0627\u0632\u0627\u062a \u0648 \u0644\u0627\u06af\u200c\u0647\u0627\u06cc \u062b\u0628\u062a\u200c\u0634\u062f\u0647 \u0642\u0628\u0644 \u0627\u0632 \u062a\u0627\u0631\u06cc\u062e \u0634\u0631\u0648\u0639...",
-      "source_file": "handlers.py",
-      "source_location": "L2606"
-    },
-    {
-      "id": "models_rationale_159",
-      "label": "\u0628\u0631\u06af\u0631\u062f\u0627\u0646\u062f\u0646 \u0633\u0642\u0641 \u0633\u0647\u0645\u06cc\u0647 \u0646\u0635\u0641 \u0645\u06cc\u062b\u0627\u0642 \u0644\u06cc\u06af",
-      "_origin": "ast",
-      "community": 20,
-      "community_name": "cleanse_prestart_activity_and_scores",
-      "file_type": "rationale",
-      "norm_label": "\u0628\u0631\u06af\u0631\u062f\u0627\u0646\u062f\u0646 \u0633\u0642\u0641 \u0633\u0647\u0645\u06cc\u0647 \u0646\u0635\u0641 \u0645\u06cc\u062b\u0627\u0642 \u0644\u06cc\u06af",
-      "source_file": "models.py",
-      "source_location": "L159"
-    },
-    {
-      "id": "models_rationale_165",
-      "label": "\u0628\u0631\u06af\u0631\u062f\u0627\u0646\u062f\u0646 \u0633\u0642\u0641 \u0633\u0647\u0645\u06cc\u0647 \u0637\u0644\u0627\u06cc\u06cc \u06f1 \u062f\u0642\u06cc\u0642\u0647\u200c\u0627\u06cc \u0644\u06cc\u06af",
-      "_origin": "ast",
-      "community": 20,
-      "community_name": "cleanse_prestart_activity_and_scores",
-      "file_type": "rationale",
-      "norm_label": "\u0628\u0631\u06af\u0631\u062f\u0627\u0646\u062f\u0646 \u0633\u0642\u0641 \u0633\u0647\u0645\u06cc\u0647 \u0637\u0644\u0627\u06cc\u06cc \u06f1 \u062f\u0642\u06cc\u0642\u0647\u200c\u0627\u06cc \u0644\u06cc\u06af",
-      "source_file": "models.py",
-      "source_location": "L165"
+      "community_name": "make_fsm",
+      "file_type": "code",
+      "norm_label": "fsmcontext",
+      "source_file": "",
+      "source_location": ""
     },
     {
       "id": "handlers_py_any",
@@ -8148,28 +8104,6 @@
       "community_name": "AdminStates",
       "file_type": "code",
       "norm_label": "statesgroup",
-      "source_file": "",
-      "source_location": ""
-    },
-    {
-      "id": "memorystorage",
-      "label": "MemoryStorage",
-      "_origin": "ast",
-      "community": 22,
-      "community_name": "AdminStates",
-      "file_type": "code",
-      "norm_label": "memorystorage",
-      "source_file": "",
-      "source_location": ""
-    },
-    {
-      "id": "run_tests_py_fsmcontext",
-      "label": "FSMContext",
-      "_origin": "ast",
-      "community": 22,
-      "community_name": "AdminStates",
-      "file_type": "code",
-      "norm_label": "fsmcontext",
       "source_file": "",
       "source_location": ""
     },
@@ -8350,6 +8284,17 @@
       "source_location": "L1"
     },
     {
+      "id": "admin_handlers_rationale_5038",
+      "label": "\u062a\u063a\u06cc\u06cc\u0631 \u0633\u0642\u0641 \u0633\u0647\u0645\u06cc\u0647 \u0646\u0635\u0641 \u0645\u06cc\u062b\u0627\u0642 (kind='half') \u06cc\u0627 \u0637\u0644\u0627\u06cc\u06cc \u06f1 \u062f\u0642\u06cc\u0642\u0647\u200c\u0627\u06cc (kind='one') \u0628\u0631\u0627\u06cc\u2026",
+      "_origin": "ast",
+      "community": 27,
+      "community_name": "run_tests.py",
+      "file_type": "rationale",
+      "norm_label": "\u062a\u063a\u06cc\u06cc\u0631 \u0633\u0642\u0641 \u0633\u0647\u0645\u06cc\u0647 \u0646\u0635\u0641 \u0645\u06cc\u062b\u0627\u0642 (kind='half') \u06cc\u0627 \u0637\u0644\u0627\u06cc\u06cc \u06f1 \u062f\u0642\u06cc\u0642\u0647\u200c\u0627\u06cc (kind='one') \u0628\u0631\u0627\u06cc...",
+      "source_file": "admin_handlers.py",
+      "source_location": "L5038"
+    },
+    {
       "id": "database_rationale_1458",
       "label": "\u062f\u0631\u06cc\u0627\u0641\u062a \u0645\u0642\u062f\u0627\u0631 \u06cc\u06a9 \u06a9\u0644\u06cc\u062f \u0627\u0632 \u062c\u062f\u0648\u0644 SystemState",
       "_origin": "ast",
@@ -8359,6 +8304,17 @@
       "norm_label": "\u062f\u0631\u06cc\u0627\u0641\u062a \u0645\u0642\u062f\u0627\u0631 \u06cc\u06a9 \u06a9\u0644\u06cc\u062f \u0627\u0632 \u062c\u062f\u0648\u0644 systemstate",
       "source_file": "database.py",
       "source_location": "L1458"
+    },
+    {
+      "id": "database_rationale_1466",
+      "label": "\u0630\u062e\u06cc\u0631\u0647 \u06cc\u0627 \u0628\u0647\u200c\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc \u06cc\u06a9 \u06a9\u0644\u06cc\u062f \u062f\u0631 \u062c\u062f\u0648\u0644 SystemState (\u0628\u0627 commit=False \u0641\u0642\u0637 flush\u2026",
+      "_origin": "ast",
+      "community": 27,
+      "community_name": "run_tests.py",
+      "file_type": "rationale",
+      "norm_label": "\u0630\u062e\u06cc\u0631\u0647 \u06cc\u0627 \u0628\u0647\u200c\u0631\u0648\u0632\u0631\u0633\u0627\u0646\u06cc \u06cc\u06a9 \u06a9\u0644\u06cc\u062f \u062f\u0631 \u062c\u062f\u0648\u0644 systemstate (\u0628\u0627 commit=false \u0641\u0642\u0637 flush...",
+      "source_file": "database.py",
+      "source_location": "L1466"
     },
     {
       "id": "database_rationale_175",
@@ -8372,6 +8328,28 @@
       "source_location": "L175"
     },
     {
+      "id": "handlers_rationale_2539",
+      "label": "\u0635\u0641\u0631 \u06a9\u0631\u062f\u0646 \u0642\u0637\u0639\u06cc \u0627\u0645\u062a\u06cc\u0627\u0632 \u0648 \u0622\u0645\u0627\u0631 \u0647\u0645\u0647 \u0627\u0639\u0636\u0627\u06cc \u0641\u0639\u0627\u0644 \u06cc\u06a9 \u0644\u06cc\u06af \u0642\u0628\u0644 \u0627\u0632 \u0634\u0631\u0648\u0639 \u0631\u0633\u0645\u06cc \u06cc\u0627 \u062f\u0631 \u0644\u062d\u0638\u0647\u200c\u06cc\u2026",
+      "_origin": "ast",
+      "community": 27,
+      "community_name": "run_tests.py",
+      "file_type": "rationale",
+      "norm_label": "\u0635\u0641\u0631 \u06a9\u0631\u062f\u0646 \u0642\u0637\u0639\u06cc \u0627\u0645\u062a\u06cc\u0627\u0632 \u0648 \u0627\u0645\u0627\u0631 \u0647\u0645\u0647 \u0627\u0639\u0636\u0627\u06cc \u0641\u0639\u0627\u0644 \u06cc\u06a9 \u0644\u06cc\u06af \u0642\u0628\u0644 \u0627\u0632 \u0634\u0631\u0648\u0639 \u0631\u0633\u0645\u06cc \u06cc\u0627 \u062f\u0631 \u0644\u062d\u0638\u0647\u200c\u06cc...",
+      "source_file": "handlers.py",
+      "source_location": "L2539"
+    },
+    {
+      "id": "handlers_rationale_2606",
+      "label": "\u067e\u0627\u0644\u0627\u06cc\u0634 \u0648 \u0646\u0627\u062f\u06cc\u062f\u0647 \u06af\u0631\u0641\u062a\u0646 \u0642\u0637\u0639\u06cc \u06a9\u0644\u06cc\u0647 \u0627\u0645\u062a\u06cc\u0627\u0632\u0627\u062a \u0648 \u0644\u0627\u06af\u200c\u0647\u0627\u06cc \u062b\u0628\u062a\u200c\u0634\u062f\u0647 \u0642\u0628\u0644 \u0627\u0632 \u062a\u0627\u0631\u06cc\u062e \u0634\u0631\u0648\u0639\u2026",
+      "_origin": "ast",
+      "community": 27,
+      "community_name": "run_tests.py",
+      "file_type": "rationale",
+      "norm_label": "\u067e\u0627\u0644\u0627\u06cc\u0634 \u0648 \u0646\u0627\u062f\u06cc\u062f\u0647 \u06af\u0631\u0641\u062a\u0646 \u0642\u0637\u0639\u06cc \u06a9\u0644\u06cc\u0647 \u0627\u0645\u062a\u06cc\u0627\u0632\u0627\u062a \u0648 \u0644\u0627\u06af\u200c\u0647\u0627\u06cc \u062b\u0628\u062a\u200c\u0634\u062f\u0647 \u0642\u0628\u0644 \u0627\u0632 \u062a\u0627\u0631\u06cc\u062e \u0634\u0631\u0648\u0639...",
+      "source_file": "handlers.py",
+      "source_location": "L2606"
+    },
+    {
       "id": "handlers_rationale_3106",
       "label": "\u0641\u0631\u0622\u06cc\u0646\u062f \u06a9\u0627\u0645\u0644 \u067e\u0627\u06cc\u0627\u0646 \u0686\u0644\u0647 \u06f4\u06f0 \u0631\u0648\u0632\u0647 \u062f\u0631 \u0633\u0627\u0639\u062a \u06f8 \u0635\u0628\u062d \u0631\u0648\u0632 \u06f4\u06f1\u0627\u0645: \u06f1. \u062a\u0641\u06a9\u06cc\u06a9 \u0645\u0637\u0627\u0644\u0639\u0627\u062a \u0635\u0628\u062d\u06af\u0627\u0647\u06cc\u2026",
       "_origin": "ast",
@@ -8381,6 +8359,28 @@
       "norm_label": "\u0641\u0631\u0627\u06cc\u0646\u062f \u06a9\u0627\u0645\u0644 \u067e\u0627\u06cc\u0627\u0646 \u0686\u0644\u0647 \u06f4\u06f0 \u0631\u0648\u0632\u0647 \u062f\u0631 \u0633\u0627\u0639\u062a \u06f8 \u0635\u0628\u062d \u0631\u0648\u0632 \u06f4\u06f1\u0627\u0645: \u06f1. \u062a\u0641\u06a9\u06cc\u06a9 \u0645\u0637\u0627\u0644\u0639\u0627\u062a \u0635\u0628\u062d\u06af\u0627\u0647\u06cc...",
       "source_file": "handlers.py",
       "source_location": "L3106"
+    },
+    {
+      "id": "models_rationale_159",
+      "label": "\u0628\u0631\u06af\u0631\u062f\u0627\u0646\u062f\u0646 \u0633\u0642\u0641 \u0633\u0647\u0645\u06cc\u0647 \u0646\u0635\u0641 \u0645\u06cc\u062b\u0627\u0642 \u0644\u06cc\u06af",
+      "_origin": "ast",
+      "community": 27,
+      "community_name": "run_tests.py",
+      "file_type": "rationale",
+      "norm_label": "\u0628\u0631\u06af\u0631\u062f\u0627\u0646\u062f\u0646 \u0633\u0642\u0641 \u0633\u0647\u0645\u06cc\u0647 \u0646\u0635\u0641 \u0645\u06cc\u062b\u0627\u0642 \u0644\u06cc\u06af",
+      "source_file": "models.py",
+      "source_location": "L159"
+    },
+    {
+      "id": "models_rationale_165",
+      "label": "\u0628\u0631\u06af\u0631\u062f\u0627\u0646\u062f\u0646 \u0633\u0642\u0641 \u0633\u0647\u0645\u06cc\u0647 \u0637\u0644\u0627\u06cc\u06cc \u06f1 \u062f\u0642\u06cc\u0642\u0647\u200c\u0627\u06cc \u0644\u06cc\u06af",
+      "_origin": "ast",
+      "community": 27,
+      "community_name": "run_tests.py",
+      "file_type": "rationale",
+      "norm_label": "\u0628\u0631\u06af\u0631\u062f\u0627\u0646\u062f\u0646 \u0633\u0642\u0641 \u0633\u0647\u0645\u06cc\u0647 \u0637\u0644\u0627\u06cc\u06cc \u06f1 \u062f\u0642\u06cc\u0642\u0647\u200c\u0627\u06cc \u0644\u06cc\u06af",
+      "source_file": "models.py",
+      "source_location": "L165"
     },
     {
       "id": "models_rationale_239",
@@ -26470,7 +26470,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1688",
+      "source_location": "L1689",
       "weight": 1.0
     },
     {
@@ -26482,7 +26482,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1764",
+      "source_location": "L1766",
       "weight": 1.0
     },
     {
@@ -26494,7 +26494,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1768",
+      "source_location": "L1770",
       "weight": 1.0
     },
     {
@@ -26506,7 +26506,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1769",
+      "source_location": "L1771",
       "weight": 1.0
     },
     {
@@ -26518,7 +26518,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1780",
+      "source_location": "L1782",
       "weight": 1.0
     },
     {
@@ -26530,7 +26530,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1781",
+      "source_location": "L1783",
       "weight": 1.0
     },
     {
@@ -26542,7 +26542,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1786",
+      "source_location": "L1788",
       "weight": 1.0
     },
     {
@@ -26554,7 +26554,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1793",
+      "source_location": "L1795",
       "weight": 1.0
     },
     {
@@ -26566,7 +26566,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1794",
+      "source_location": "L1796",
       "weight": 1.0
     },
     {
@@ -26578,7 +26578,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1795",
+      "source_location": "L1797",
       "weight": 1.0
     },
     {
@@ -26590,7 +26590,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1802",
+      "source_location": "L1804",
       "weight": 1.0
     },
     {
@@ -26602,7 +26602,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1816",
+      "source_location": "L1818",
       "weight": 1.0
     },
     {
@@ -26614,7 +26614,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1821",
+      "source_location": "L1823",
       "weight": 1.0
     },
     {
@@ -26626,7 +26626,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1822",
+      "source_location": "L1824",
       "weight": 1.0
     },
     {
@@ -26638,7 +26638,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1833",
+      "source_location": "L1835",
       "weight": 1.0
     },
     {
@@ -26650,7 +26650,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1834",
+      "source_location": "L1836",
       "weight": 1.0
     },
     {
@@ -26662,7 +26662,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "run_tests.py",
-      "source_location": "L1843",
+      "source_location": "L1845",
       "weight": 1.0
     },
     {
@@ -33315,6 +33315,18 @@
     },
     {
       "source": "run_tests",
+      "target": "database_set_active_user_id",
+      "relation": "imports",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "import",
+      "source_file": "run_tests.py",
+      "source_location": "L1679",
+      "weight": 1.0
+    },
+    {
+      "source": "run_tests",
       "target": "shutil",
       "relation": "imports",
       "_origin": "ast",
@@ -33322,7 +33334,7 @@
       "confidence_score": 1.0,
       "context": "import",
       "source_file": "run_tests.py",
-      "source_location": "L1873",
+      "source_location": "L1875",
       "weight": 1.0
     },
     {
@@ -36010,7 +36022,7 @@
       "confidence_score": 1.0,
       "context": "import",
       "source_file": "run_tests.py",
-      "source_location": "L1866",
+      "source_location": "L1868",
       "weight": 1.0
     },
     {

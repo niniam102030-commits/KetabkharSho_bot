@@ -19,7 +19,7 @@
   "17": "get_active_user",
   "18": "_send_group_feature_list",
   "19": "build_user_main_menu",
-  "20": "cleanse_prestart_activity_and_scores",
+  "20": "make_fsm",
   "21": "MessageService",
   "22": "AdminStates",
   "23": "_cancel_flow",

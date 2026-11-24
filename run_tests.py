@@ -1854,7 +1854,48 @@ async def run_all_tests() -> None:
     assert len(peer_msgs_to_b) == 1, f"باید دقیقاً ۱ اعلان انگیزشی برای کاربر B ارسال شود: {peer_msgs_to_b}"
     assert len(peer_msgs_to_a) == 0, "کاربر ثبت‌کننده نباید اعلان هم‌لیگی برای خودش دریافت کند"
 
-    print("✅ [PASS] Scenario 20: Configurable league quotas (lq), edit yesterday (ey), peer study notifications (pn / /peer_notify) & optional pages (op) verified.")
+    # ۵) تست حالت ترکیبی ۳ دکمه‌ای با میثاق اختصاصی فردی + اصطلاحات سفارشی مجموعه + عدم ارسال اعلان به کاربری که امروز ثبت کرده
+    with get_db() as db:
+        # تنظیم واژه‌نامه اختصاصی برای مجموعه ۲۰
+        MessageService.set_term(db, g20_id, "meesaq", "پیمان")
+        MessageService.set_term(db, g20_id, "half_coupon", "سهمیه نیم‌پیمان")
+        MessageService.set_term(db, g20_id, "golden_coupon", "کارت طلایی")
+        # تنظیم میثاق شخصی فرد (۱۵ دقیقه -> نصف میثاق باید ۸ دقیقه شود) برای کاربر B و روشن کردن اعلان برای کاربر A
+        ub_edit = db.query(User).filter(User.id == s20_peer_b).first()
+        ub_edit.user_floor = 15
+        ua_edit = db.query(User).filter(User.id == s20_peer_a).first()
+        ua_edit.peer_notify_enabled = True  # کاربر A امروز قبلاً ثبت کرده پس نباید اعلان بگیرد!
+        db.commit()
+
+    hybrid_bot = MockBot()
+    u_b_today_state = make_fsm(storage, hybrid_bot.id, s20_peer_b)
+    await handle_log_study_today(MockMessage(hybrid_bot, s20_peer_b, "📝 ثبت مطالعه امروز"), u_b_today_state)
+    # بررسی کلیدهای ساخته‌شده با اصطلاحات سفارشی و میثاق شخصی ۱۵ (نصف = ۸)
+    prompt_msg = hybrid_bot.sent_messages[-1]
+    btn_texts = [
+        btn.text
+        for row in prompt_msg["reply_markup"].keyboard
+        for btn in row
+    ]
+    assert "✅ پیمان کامل (15 دقیقه)" in btn_texts, f"کلید میثاق کامل با واژه‌نامه سفارشی یافت نشد: {btn_texts}"
+    assert "🌗 نیم‌پیمان (8 دقیقه)" in btn_texts, f"کلید نصف میثاق (۸ دقیقه برای کف ۱۵) یافت نشد: {btn_texts}"
+    assert "🌟 کارت طلایی (1 دقیقه)" in btn_texts, f"کلید سهمیه طلایی با واژه‌نامه سفارشی یافت نشد: {btn_texts}"
+
+    # انتخاب دکمه «🌗 نیم‌پیمان (8 دقیقه)» توسط کاربر B و رد کردن صفحات
+    await process_study_minutes(MockMessage(hybrid_bot, s20_peer_b, "🌗 نیم‌پیمان (8 دقیقه)"), u_b_today_state)
+    await process_study_pages(MockMessage(hybrid_bot, s20_peer_b, SKIP_PAGES_TEXT), u_b_today_state)
+    await asyncio.sleep(0.15)
+
+    with get_db() as db:
+        ub_chk = db.query(User).filter(User.id == s20_peer_b).first()
+        assert ub_chk.today_minutes == 8 and ub_chk.today_points == 10.0 and ub_chk.half_coupons == 7, (
+            f"تبدیل دکمه نصف میثاق به عدد ۸ نادرست بود: mins={ub_chk.today_minutes}, pts={ub_chk.today_points}, half={ub_chk.half_coupons}"
+        )
+    # کاربر A چون امروز قبلاً ثبت مطالعه داشته، با وجود روشن بودن peer_notify_enabled نباید اعلان بگیرد!
+    msgs_to_a_after_b = [m for m in hybrid_bot.sent_messages if str(m["chat_id"]) == s20_peer_a]
+    assert len(msgs_to_a_after_b) == 0, f"کاربری که امروز ثبت کرده نباید اعلان هم‌لیگی بگیرد: {msgs_to_a_after_b}"
+
+    print("✅ [PASS] Scenario 20: Configurable league quotas (lq), edit yesterday (ey), peer study notifications (pn / /peer_notify), optional pages (op) & hybrid 3-option minutes verified.")
 
 
 

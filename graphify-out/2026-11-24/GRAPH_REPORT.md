@@ -1,12 +1,12 @@
 # Graph Report - ربات کتابخوارشو  (2026-11-24)
 
 ## Corpus Check
-- 17 files · ~117,104 words
+- 17 files · ~117,109 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 6 file(s) not represented in the graph (top: (none) 4, .example 1, .bat 1)
 
 ## Summary
-- 854 nodes · 3906 edges · 30 communities (21 shown, 9 thin omitted)
+- 854 nodes · 3907 edges · 30 communities (20 shown, 10 thin omitted)
 - Extraction: 88% EXTRACTED · 12% INFERRED · 0% AMBIGUOUS · INFERRED: 484 edges (avg confidence: 0.94)
 - Token cost: 0 input · 0 output
 
@@ -36,7 +36,7 @@
 - get_active_user
 - _send_group_feature_list
 - build_user_main_menu
-- cleanse_prestart_activity_and_scores
+- make_fsm
 - MessageService
 - AdminStates
 - _cancel_flow
@@ -74,7 +74,7 @@
 ## Import Cycles
 - None detected.
 
-## Communities (30 total, 9 thin omitted)
+## Communities (30 total, 10 thin omitted)
 
 ### Community 0 - "fine_handlers.py"
 Cohesion: 0.06
@@ -122,7 +122,7 @@ Nodes (5): MockBot, MockCallbackQuery, MockChat, MockMessage, MockUser
 
 ### Community 14 - "main.py"
 Cohesion: 0.10
-Nodes (12): cmd_test_all_jobs(), set_system_state(), midnight_job(), send_daily_admin_reports(), send_daily_user_reports(), send_study_reminders(), _read_startup_states_and_cleanup_sync(), run_startup_catchups() (+4 more)
+Nodes (11): cmd_test_all_jobs(), midnight_job(), send_daily_admin_reports(), send_daily_user_reports(), send_study_reminders(), _read_startup_states_and_cleanup_sync(), run_startup_catchups(), _run_safe_job() (+3 more)
 
 ### Community 16 - "run_all_tests"
 Cohesion: 0.17
@@ -140,10 +140,6 @@ Nodes (16): _build_group_feature_card(), _build_league_quota_card(), cb_em_reset
 Cohesion: 0.14
 Nodes (13): cb_execute_user_add_second_league(), _execute_user_add_second_league_impl(), _get_admin_profile_lock(), _split_league_user_payload(), generate_new_profile_id(), set_active_user_id(), build_user_main_menu(), cb_confirm_cancel_league() (+5 more)
 
-### Community 20 - "cleanse_prestart_activity_and_scores"
-Cohesion: 0.27
-Nodes (3): _apply_league_quota_change(), cleanse_prestart_activity_and_scores(), reset_league_members_for_new_start()
-
 ### Community 21 - "MessageService"
 Cohesion: 0.11
 Nodes (9): _build_league_morning_cards_sync(), _build_morning_cards(), _build_study_reminders_outbox_sync(), _base(), _terms(), cb_join_new_group_prompt(), _fetch_user_leaderboard_sync(), _get_database_stats_sync() (+1 more)
@@ -153,8 +149,8 @@ Cohesion: 0.40
 Nodes (3): _build_admin_help_text(), _cancel_flow(), global_cancel_message()
 
 ### Community 27 - "run_tests.py"
-Cohesion: 0.08
-Nodes (14): _matches_superadmin_root_id(), demote_super_admin(), get_system_state(), _complete_and_rollover_cycle(), _init_daily_admin_reports_sync(), _init_morning_reports_sync(), ActivityLog, Cycle (+6 more)
+Cohesion: 0.07
+Nodes (18): _apply_league_quota_change(), _matches_superadmin_root_id(), demote_super_admin(), get_system_state(), set_system_state(), cleanse_prestart_activity_and_scores(), _complete_and_rollover_cycle(), _init_daily_admin_reports_sync() (+10 more)
 
 ### Community 28 - "admin_handlers.py"
 Cohesion: 0.09
@@ -163,7 +159,7 @@ Nodes (57): _cleanup_expired_db_uploads(), cmd_add_group_admin(), cmd_add_league
 ## Knowledge Gaps
 - **4 isolated node(s):** `deploy.sh script`, `entrypoint.sh script`, `🛠️ ۱. راه‌اندازی اولیه روی سرور (توسط مسئول سرور)`, `💾 ۳. امنیت داده‌ها و دیتابیس (Volumes)`
   These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 273 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **9 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **10 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
@@ -176,7 +172,7 @@ _Questions this graph is uniquely positioned to answer:_
   _4 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `fine_handlers.py` be split into smaller, more focused modules?**
   _Cohesion score 0.057133985405992856 - nodes in this community are weakly interconnected._
-- **Why does `run_all_tests()` connect `run_all_tests` to `fine_handlers.py`, `DateService`, `League`, `ReportService`, `get_db`, `send_startup_notification`, `database.py`, `User`, `FSMContext`, `handlers.py`, `AbsenceService`, `MockBot`, `main.py`, `get_active_user`, `_send_group_feature_list`, `build_user_main_menu`, `cleanse_prestart_activity_and_scores`, `MessageService`, `AdminStates`, `_prepare_log_snapshot_sync`, `run_tests.py`, `admin_handlers.py`, `Config`?**
+- **Why does `run_all_tests()` connect `run_all_tests` to `fine_handlers.py`, `DateService`, `League`, `ReportService`, `get_db`, `send_startup_notification`, `database.py`, `User`, `FSMContext`, `handlers.py`, `AbsenceService`, `MockBot`, `main.py`, `get_active_user`, `_send_group_feature_list`, `build_user_main_menu`, `make_fsm`, `MessageService`, `AdminStates`, `_prepare_log_snapshot_sync`, `run_tests.py`, `admin_handlers.py`, `Config`?**
   _High betweenness centrality (0.098) - this node is a cross-community bridge._
 - **Are the 101 inferred relationships involving `League` (e.g. with `_apply_league_quota_change()` and `_build_global_stats_text_sync()`) actually correct?**
   _`League` has 101 INFERRED edges - model-reasoned connections that need verification._
