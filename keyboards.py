@@ -21,6 +21,8 @@ def get_start_menu() -> ReplyKeyboardMarkup:
 
 VIEW_FINES_TEXT = "💰 مشاهده جریمه‌ها"
 PAY_FINES_TEXT = "💳 پرداخت جریمه"
+EDIT_YESTERDAY_TEXT = "✏️ ویرایش مطالعه دیروز"
+SKIP_PAGES_TEXT = "⏭ رد کردن (بدون ثبت صفحه)"
 
 
 def get_main_menu(
@@ -29,8 +31,9 @@ def get_main_menu(
     can_log_late: bool = False,
     has_fines: bool = False,
     is_fine_manager: bool = False,
+    can_edit_yesterday: bool = False,
 ) -> ReplyKeyboardMarkup:
-    """۲. منوی اصلی کاربران (پویا بر اساس وضعیت ثبت با تاخیر، چندپروفایلی، جریمه و دسترسی ادمین)"""
+    """۲. منوی اصلی کاربران (پویا بر اساس وضعیت ثبت با تاخیر، ویرایش دیروز، چندپروفایلی، جریمه و دسترسی ادمین)"""
     rows: List[List[KeyboardButton]] = [
         [
             KeyboardButton(text="📝 ثبت مطالعه امروز"),
@@ -40,6 +43,8 @@ def get_main_menu(
 
     if can_log_late:
         rows.append([KeyboardButton(text="⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)")])
+    elif can_edit_yesterday:
+        rows.append([KeyboardButton(text=EDIT_YESTERDAY_TEXT)])
 
     if has_fines or is_fine_manager:
         fine_row: List[KeyboardButton] = []
@@ -65,14 +70,19 @@ def get_main_menu(
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-def get_study_edit_menu(can_log_late: bool = False) -> ReplyKeyboardMarkup:
-    """۳. منوی ویرایش مطالعه امروز (به همراه گزینه ثبت مطالعه دیروز در صورت واجد شرایط بودن)"""
+def get_study_edit_menu(
+    can_log_late: bool = False,
+    can_edit_yesterday: bool = False,
+) -> ReplyKeyboardMarkup:
+    """۳. منوی ویرایش مطالعه امروز (به همراه گزینه ثبت یا ویرایش مطالعه دیروز در صورت واجد شرایط بودن)"""
     rows: List[List[KeyboardButton]] = [
         [KeyboardButton(text="🔄 ویرایش مطالعه امروز")],
         [KeyboardButton(text="➕ افزودن زمان به ثبت امروز")],
     ]
     if can_log_late:
         rows.append([KeyboardButton(text="⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)")])
+    elif can_edit_yesterday:
+        rows.append([KeyboardButton(text=EDIT_YESTERDAY_TEXT)])
     rows.append([KeyboardButton(text="🔙 بازگشت")])
     return ReplyKeyboardMarkup(
         keyboard=rows,
@@ -195,6 +205,26 @@ def get_admin_main_inline_menu() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="🎫 سهمیه‌های لیگ",
+                    callback_data="adm_menu_league_quotas",
+                ),
+                InlineKeyboardButton(
+                    text="✏️ ویرایش مطالعه دیروز",
+                    callback_data="adm_menu_edit_yesterday",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📣 اعلان مطالعه هم‌لیگی‌ها",
+                    callback_data="adm_menu_peer_notify",
+                ),
+                InlineKeyboardButton(
+                    text="📄 اختیاری کردن صفحات",
+                    callback_data="adm_menu_optional_pages",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
                     text="💾 دانلود دیتابیس",
                     callback_data="adm_menu_backup_db",
                 ),
@@ -287,6 +317,17 @@ def get_cancel_or_back_keyboard(show_back: bool = True) -> ReplyKeyboardMarkup:
         row.append(KeyboardButton(text=BACK_STEP_TEXT))
     row.append(KeyboardButton(text=CANCEL_TEXT))
     return ReplyKeyboardMarkup(keyboard=[row], resize_keyboard=True)
+
+
+def get_optional_pages_keyboard() -> ReplyKeyboardMarkup:
+    """کیبورد مرحله ورود صفحات زمانی که ثبت صفحات برای مجموعه اختیاری است"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=SKIP_PAGES_TEXT)],
+            [KeyboardButton(text=CANCEL_TEXT)],
+        ],
+        resize_keyboard=True,
+    )
 
 
 def get_inline_cancel_keyboard(show_back: bool = False) -> InlineKeyboardMarkup:

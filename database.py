@@ -385,10 +385,15 @@ COMMON_COLUMN_DEFAULTS: Dict[str, Any] = {
     "is_deleted": 0,
     "is_active": 1,
     "reminder_enabled": 1,
+    "peer_notify_enabled": 0,
+    "allow_edit_yesterday": 0,
+    "optional_pages": 0,
     "archive_enabled": 1,
     "fines_enabled": 0,
     "fine_absent_amount": 0,
     "fine_late_amount": 0,
+    "half_coupons_limit": settings.DEFAULT_HALF_COUPONS,
+    "one_min_coupons_limit": settings.DEFAULT_ONE_MIN_COUPONS,
     "is_waived": 0,
     "is_frozen": 0,
     "floor": 10,
@@ -1098,6 +1103,9 @@ def _run_migrations() -> None:
         "groups": [
             ("password", "VARCHAR(8) DEFAULT '1234' NOT NULL"),
             ("is_deleted", "BOOLEAN DEFAULT 0 NOT NULL"),
+            ("allow_edit_yesterday", "BOOLEAN DEFAULT 0 NOT NULL"),
+            ("peer_notify_enabled", "BOOLEAN DEFAULT 0 NOT NULL"),
+            ("optional_pages", "BOOLEAN DEFAULT 0 NOT NULL"),
             ("created_at", "DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL"),
         ],
         "group_admins": [
@@ -1133,6 +1141,7 @@ def _run_migrations() -> None:
             ("today_one_min_used", "INTEGER DEFAULT 0"),
             ("is_active", "BOOLEAN DEFAULT 1"),
             ("reminder_enabled", "BOOLEAN DEFAULT 1"),
+            ("peer_notify_enabled", "BOOLEAN DEFAULT 0 NOT NULL"),
         ],
         "leagues": [
             ("telegram_id", "VARCHAR(100)"),
@@ -1148,6 +1157,8 @@ def _run_migrations() -> None:
             ("fines_enabled", "BOOLEAN DEFAULT 0 NOT NULL"),
             ("fine_absent_amount", "INTEGER DEFAULT 0 NOT NULL"),
             ("fine_late_amount", "INTEGER DEFAULT 0 NOT NULL"),
+            ("half_coupons_limit", f"INTEGER DEFAULT {settings.DEFAULT_HALF_COUPONS} NOT NULL"),
+            ("one_min_coupons_limit", f"INTEGER DEFAULT {settings.DEFAULT_ONE_MIN_COUPONS} NOT NULL"),
         ],
         "fine_records": [
             ("is_frozen", "BOOLEAN DEFAULT 0 NOT NULL"),
@@ -1195,7 +1206,13 @@ def _run_postgres_fine_migrations() -> None:
         "ALTER TABLE leagues ADD COLUMN IF NOT EXISTS fines_enabled BOOLEAN DEFAULT FALSE NOT NULL",
         "ALTER TABLE leagues ADD COLUMN IF NOT EXISTS fine_absent_amount INTEGER DEFAULT 0 NOT NULL",
         "ALTER TABLE leagues ADD COLUMN IF NOT EXISTS fine_late_amount INTEGER DEFAULT 0 NOT NULL",
+        f"ALTER TABLE leagues ADD COLUMN IF NOT EXISTS half_coupons_limit INTEGER DEFAULT {settings.DEFAULT_HALF_COUPONS} NOT NULL",
+        f"ALTER TABLE leagues ADD COLUMN IF NOT EXISTS one_min_coupons_limit INTEGER DEFAULT {settings.DEFAULT_ONE_MIN_COUPONS} NOT NULL",
         "ALTER TABLE fine_records ADD COLUMN IF NOT EXISTS is_frozen BOOLEAN DEFAULT FALSE NOT NULL",
+        "ALTER TABLE groups ADD COLUMN IF NOT EXISTS allow_edit_yesterday BOOLEAN DEFAULT FALSE NOT NULL",
+        "ALTER TABLE groups ADD COLUMN IF NOT EXISTS peer_notify_enabled BOOLEAN DEFAULT FALSE NOT NULL",
+        "ALTER TABLE groups ADD COLUMN IF NOT EXISTS optional_pages BOOLEAN DEFAULT FALSE NOT NULL",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS peer_notify_enabled BOOLEAN DEFAULT FALSE NOT NULL",
     ]
     for stmt in statements:
         try:

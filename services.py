@@ -519,11 +519,27 @@ class ReportService:
         return clean[:50] or "report"
 
     @classmethod
-    def _extract_row_dict(cls, item: Union[User, Dict[str, Any]], league_floor: int = 10) -> Dict[str, Any]:
+    def _extract_row_dict(
+        cls,
+        item: Union[User, Dict[str, Any]],
+        league_floor: int = 10,
+        half_coupons_limit: Optional[int] = None,
+        one_min_coupons_limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         استخراج یکپارچه اطلاعات کاربر چه به صورت شیء User پاس داده شود
         و چه به صورت دیکشنری با کلیدهای مختلف (minutes / total_minutes و غیره).
         """
+        h_lim = (
+            int(half_coupons_limit)
+            if half_coupons_limit is not None
+            else settings.DEFAULT_HALF_COUPONS
+        )
+        o_lim = (
+            int(one_min_coupons_limit)
+            if one_min_coupons_limit is not None
+            else settings.DEFAULT_ONE_MIN_COUPONS
+        )
         if isinstance(item, User):
             eff_floor = item.get_effective_floor(league_floor)
             half_rem = int(item.half_coupons or 0)
@@ -546,8 +562,8 @@ class ReportService:
                 "late_days_list": item.late_days_list or "-",
                 "half_coupons_remaining": half_rem,
                 "one_min_coupons_remaining": one_rem,
-                "half_coupons_used": max(0, settings.DEFAULT_HALF_COUPONS - half_rem),
-                "one_min_coupons_used": max(0, settings.DEFAULT_ONE_MIN_COUPONS - one_rem),
+                "half_coupons_used": max(0, h_lim - half_rem),
+                "one_min_coupons_used": max(0, o_lim - one_rem),
                 "today_minutes": int(item.today_minutes or 0),
                 "today_pages": int(item.today_pages or 0),
             }
@@ -894,8 +910,8 @@ class ReportService:
                                     int(u.no_study_days or 0),
                                     u.absent_days_list or "-",
                                     u.late_days_list or "-",
-                                    max(0, settings.DEFAULT_HALF_COUPONS - half_rem),
-                                    max(0, settings.DEFAULT_ONE_MIN_COUPONS - one_rem),
+                                    max(0, lg.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS) - half_rem),
+                                    max(0, lg.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS) - one_rem),
                                     half_rem,
                                     one_rem,
                                 ]

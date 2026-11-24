@@ -30,6 +30,9 @@ class Group(Base):
     name = Column(String(255), nullable=False)
     password = Column(String(8), nullable=False, index=True)
     is_deleted = Column(Boolean, default=False, nullable=False)
+    allow_edit_yesterday = Column(Boolean, default=False, nullable=False)
+    peer_notify_enabled = Column(Boolean, default=False, nullable=False)
+    optional_pages = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
@@ -92,6 +95,7 @@ class User(Base):
 
     is_active = Column(Boolean, default=True, nullable=False)
     reminder_enabled = Column(Boolean, default=True, nullable=False)
+    peer_notify_enabled = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -144,8 +148,24 @@ class League(Base):
     fine_absent_amount = Column(Integer, default=0, nullable=False)
     fine_late_amount = Column(Integer, default=0, nullable=False)
 
+    # سهمیه‌های قابل‌تنظیم هر لیگ در هر چله
+    half_coupons_limit = Column(Integer, default=5, nullable=False)
+    one_min_coupons_limit = Column(Integer, default=1, nullable=False)
+
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def get_half_coupons_limit(self, default: int = 5) -> int:
+        """برگرداندن سقف سهمیه نصف میثاق لیگ"""
+        if self.half_coupons_limit is not None and int(self.half_coupons_limit) >= 0:
+            return int(self.half_coupons_limit)
+        return int(default)
+
+    def get_one_min_coupons_limit(self, default: int = 1) -> int:
+        """برگرداندن سقف سهمیه طلایی ۱ دقیقه‌ای لیگ"""
+        if self.one_min_coupons_limit is not None and int(self.one_min_coupons_limit) >= 0:
+            return int(self.one_min_coupons_limit)
+        return int(default)
 
 
 class LeagueFineManager(Base):

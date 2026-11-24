@@ -73,10 +73,12 @@ _ADMIN_FLOW_INTERRUPT_TEXTS = {
     "/join_group",
     "/cancel_my_league",
     "/reminder",
+    "/peer_notify",
     "🚀 شروع ثبت نام",
     "📝 ثبت مطالعه امروز",
     "🏆 جدول لیگ",
     "⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)",
+    "✏️ ویرایش مطالعه دیروز",
     "👤 حساب کاربری و سهمیه ها",
     "راهنما",
     "🔄 تغییر لیگ فعال",
@@ -123,6 +125,8 @@ class AdminStates(StatesGroup):
     leagedit_waiting_floor = State()
     leagedit_waiting_cycle = State()
     leagedit_waiting_date = State()
+    leagedit_waiting_half_quota = State()
+    leagedit_waiting_one_min_quota = State()
 
     # ویرایش کاربر
     usr_waiting_name = State()
@@ -277,6 +281,10 @@ def _build_admin_help_text(is_super: bool) -> str:
             "📋 *دستورات مدیریت لیگ‌ها و کاربران (بدون اسلش):*",
             "🔸 `al` : افزودن لیگ جدید",
             "🔸 `el` یا `dl` : ویرایش و حذف لیگ‌ها",
+            "🔸 `lq` : تغییر سهمیه‌های لیگ (نصف میثاق و ۱ دقیقه طلایی)",
+            "🔸 `ey` : فعال/غیرفعال کردن ویرایش مطالعه دیروز (مجموعه)",
+            "🔸 `pn` : فعال/غیرفعال کردن اعلان مطالعه هم‌لیگی‌ها (مجموعه)",
+            "🔸 `op` : فعال/غیرفعال کردن اختیاری بودن تعداد صفحات (مجموعه)",
             "🔸 `us` یا `eu` : مدیریت کاربران و پروفایل‌ها",
             "🔸 `st` : آمار کلی مجموعه",
             "🔸 `bc` : ارسال پیام همگانی (اطلاعیه / انگیزشی)",
@@ -297,7 +305,11 @@ def _get_league_edit_keyboard(league_id: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="⏱ ویرایش زمان میثاق",
                     callback_data=f"leagedit_floor_{league_id}",
-                )
+                ),
+                InlineKeyboardButton(
+                    text="🎫 ویرایش سهمیه‌ها",
+                    callback_data=f"leagedit_quotas_{league_id}",
+                ),
             ],
             [
                 InlineKeyboardButton(
@@ -1549,6 +1561,8 @@ async def _send_leagues_management_list(bot: Bot, chat_id: int | str, user_id: s
                     f"🏆 *لیگ: {escape_md(lg.name)}* (`{lg.id}`)\n"
                     f"🏢 مجموعه: {escape_md(grp_name)}\n"
                     f"⏱ میثاق روزانه: *{lg.floor}* دقیقه\n"
+                    f"🎫 سهمیه‌ها: نصف میثاق *{lg.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)}* | "
+                    f"طلایی *{lg.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)}*\n"
                     f"🔄 شماره چله فعلی: *{lg.cycle_number}*\n"
                     f"📅 تاریخ شروع چله: `{eff_start}` ({day_info})\n"
                     f"👥 تعداد اعضا: *{members_count}* نفر"
@@ -2433,8 +2447,8 @@ async def cb_execute_user_move_league(callback: CallbackQuery) -> None:
                 u.no_study_days = 0
                 u.absent_days_list = ""
                 u.late_days_list = ""
-                u.half_coupons = settings.DEFAULT_HALF_COUPONS
-                u.one_min_coupons = settings.DEFAULT_ONE_MIN_COUPONS
+                u.half_coupons = lg.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)
+                u.one_min_coupons = lg.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)
                 if u.user_floor is not None and u.user_floor < lg.floor:
                     u.user_floor = None
                 u.last_log_date = None
@@ -2643,8 +2657,8 @@ async def _execute_user_add_second_league_impl(callback: CallbackQuery) -> None:
             no_study_days=0,
             absent_days_list="",
             late_days_list="",
-            half_coupons=settings.DEFAULT_HALF_COUPONS,
-            one_min_coupons=settings.DEFAULT_ONE_MIN_COUPONS,
+            half_coupons=lg.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS),
+            one_min_coupons=lg.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS),
             is_active=True,
         )
         db.add(new_profile)
@@ -5010,3 +5024,435 @@ async def cmd_test_startup_notification(message: Message) -> None:
         message,
         f"✅ پیام فعال‌سازی ربات با تاریخ شمسی و ساعت ایران برای {count} نفر از ادمین‌ها ارسال گردید.",
     )
+
+
+# ===========================================================================
+# ۷.۹. مدیریت سهمیه‌های لیگ (lq) و تنظیمات ویژگی‌های مجموعه (ey, pn, op)
+# ===========================================================================
+def _apply_league_quota_change(
+    db: Session,
+    league: League,
+    kind: str,
+    new_val: int,
+) -> Tuple[int, int]:
+    """
+    تغییر سقف سهمیه نصف میثاق (kind='half') یا طلایی ۱ دقیقه‌ای (kind='one') برای یک لیگ
+    و همگام‌سازی سهمیه باقیمانده اعضای فعال لیگ بر اساس تفاضل (delta).
+    خروجی: (old_val, clamped_new_val)
+    """
+    clamped = max(0, min(40, int(new_val)))
+    if kind == "half":
+        old_val = league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)
+        league.half_coupons_limit = clamped
+    else:
+        old_val = league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)
+        league.one_min_coupons_limit = clamped
+
+    delta = clamped - old_val
+    if delta != 0:
+        active_users = (
+            db.query(User)
+            .filter(User.league_id == league.id, User.is_active == True)
+            .all()
+        )
+        for u in active_users:
+            if kind == "half":
+                u.half_coupons = max(0, min(clamped, int(u.half_coupons or 0) + delta))
+            else:
+                u.one_min_coupons = max(0, min(clamped, int(u.one_min_coupons or 0) + delta))
+    db.commit()
+    return old_val, clamped
+
+
+def _build_league_quota_card(db: Session, league: League) -> Tuple[str, InlineKeyboardMarkup]:
+    """ساخت متن و کیبورد شیشه‌ای تنظیم سهمیه‌های یک لیگ"""
+    grp = db.query(Group).filter(Group.id == league.group_id).first()
+    grp_name = grp.name if grp else "پیش‌فرض"
+    half_lim = league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)
+    one_lim = league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)
+
+    text = (
+        f"🎫 *تنظیم سهمیه‌های لیگ «{escape_md(league.name)}»*\n"
+        f"🏢 مجموعه: {escape_md(grp_name)}\n\n"
+        f"🔹 سهمیه نصف میثاق: *{half_lim}* روز\n"
+        f"🔸 سهمیه طلایی ۱ دقیقه‌ای: *{one_lim}* روز\n\n"
+        "با تغییر سهمیه، مقدار باقیمانده اعضای فعال این لیگ نیز متناسب با تفاضل به‌روزرسانی می‌شود:"
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="➖ نصف میثاق", callback_data=f"lq_adj:half:{league.id}:-1"
+                ),
+                InlineKeyboardButton(
+                    text=f"نصف میثاق: {half_lim}", callback_data=f"lq_set:half:{league.id}"
+                ),
+                InlineKeyboardButton(
+                    text="➕ نصف میثاق", callback_data=f"lq_adj:half:{league.id}:+1"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="➖ طلایی", callback_data=f"lq_adj:one:{league.id}:-1"
+                ),
+                InlineKeyboardButton(
+                    text=f"طلایی: {one_lim}", callback_data=f"lq_set:one:{league.id}"
+                ),
+                InlineKeyboardButton(
+                    text="➕ طلایی", callback_data=f"lq_adj:one:{league.id}:+1"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ ورود عدد نصف میثاق", callback_data=f"lq_set:half:{league.id}"
+                ),
+                InlineKeyboardButton(
+                    text="✏️ ورود عدد طلایی", callback_data=f"lq_set:one:{league.id}"
+                ),
+            ],
+        ]
+    )
+    return text, kb
+
+
+async def _send_league_quotas_list(bot: Bot, chat_id: int | str, user_id: str) -> None:
+    items: List[Tuple[str, Optional[InlineKeyboardMarkup]]] = []
+    with get_db() as db:
+        if not is_user_admin(db, user_id):
+            await safe_send_message(bot, chat_id, "⛔️ شما دسترسی به این بخش ندارید.")
+            return
+        group_ids = get_admin_group_ids(db, user_id)
+        leagues = (
+            db.query(League)
+            .filter(
+                League.group_id.in_(group_ids),
+                League.is_deleted == False,
+                League.is_active == True,
+            )
+            .order_by(League.id.asc())
+            .all()
+        )
+        if not leagues:
+            items.append(("📭 هیچ لیگ فعالی در مجموعه‌های شما یافت نشد.", None))
+        else:
+            for lg in leagues:
+                items.append(_build_league_quota_card(db, lg))
+    for txt, kb in items:
+        await safe_send_message(bot, chat_id, txt, reply_markup=kb)
+
+
+@admin_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "lq"))
+async def cmd_league_quotas(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await _send_league_quotas_list(message.bot, message.chat.id, str(message.from_user.id))
+
+
+@admin_router.callback_query(F.data == "adm_menu_league_quotas")
+async def cb_menu_league_quotas(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _send_league_quotas_list(
+        callback.bot, callback.message.chat.id, str(callback.from_user.id)
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("leagedit_quotas_"))
+async def cb_league_edit_quotas(callback: CallbackQuery, state: FSMContext) -> None:
+    league_id = callback.data.replace("leagedit_quotas_", "")
+    user_id = str(callback.from_user.id)
+    with get_db() as db:
+        lg = db.query(League).filter(League.id == league_id, League.is_deleted == False).first()
+        if not lg or not is_user_admin(db, user_id, lg.group_id):
+            await callback.answer("عدم دسترسی", show_alert=True)
+            return
+        txt, kb = _build_league_quota_card(db, lg)
+    await state.clear()
+    await safe_send_message(callback.bot, callback.message.chat.id, txt, reply_markup=kb)
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("lq_adj:"))
+async def cb_league_quota_adjust(callback: CallbackQuery) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4:
+        await callback.answer("درخواست نامعتبر", show_alert=True)
+        return
+    _, kind, league_id, delta_str = parts
+    if kind not in ("half", "one"):
+        await callback.answer("نوع سهمیه نامعتبر", show_alert=True)
+        return
+    try:
+        delta = int(delta_str)
+    except ValueError:
+        await callback.answer("مقدار نامعتبر", show_alert=True)
+        return
+
+    user_id = str(callback.from_user.id)
+    with get_db() as db:
+        lg = db.query(League).filter(League.id == league_id, League.is_deleted == False).first()
+        if not lg or not is_user_admin(db, user_id, lg.group_id):
+            await callback.answer("عدم دسترسی", show_alert=True)
+            return
+        curr = (
+            lg.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)
+            if kind == "half"
+            else lg.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)
+        )
+        new_val = max(0, min(40, curr + delta))
+        if new_val == curr:
+            await callback.answer("مقدار در مرز مجاز (۰ تا ۴۰) است.")
+            return
+        _apply_league_quota_change(db, lg, kind, new_val)
+        txt, kb = _build_league_quota_card(db, lg)
+
+    try:
+        await callback.message.edit_text(txt, reply_markup=kb, parse_mode="Markdown")
+    except Exception:
+        await safe_send_message(callback.bot, callback.message.chat.id, txt, reply_markup=kb)
+    await callback.answer("✅ سهمیه به‌روزرسانی شد.")
+
+
+@admin_router.callback_query(F.data.startswith("lq_set:"))
+async def cb_league_quota_set_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("درخواست نامعتبر", show_alert=True)
+        return
+    _, kind, league_id = parts
+    if kind not in ("half", "one"):
+        await callback.answer("نوع سهمیه نامعتبر", show_alert=True)
+        return
+
+    user_id = str(callback.from_user.id)
+    with get_db() as db:
+        lg = db.query(League).filter(League.id == league_id, League.is_deleted == False).first()
+        if not lg or not is_user_admin(db, user_id, lg.group_id):
+            await callback.answer("عدم دسترسی", show_alert=True)
+            return
+        l_name = lg.name
+        curr = (
+            lg.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)
+            if kind == "half"
+            else lg.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)
+        )
+
+    await state.update_data(edit_league_id=league_id)
+    if kind == "half":
+        await state.set_state(AdminStates.leagedit_waiting_half_quota)
+        label = "سهمیه نصف میثاق"
+    else:
+        await state.set_state(AdminStates.leagedit_waiting_one_min_quota)
+        label = "سهمیه طلایی ۱ دقیقه‌ای"
+
+    await safe_send_message(
+        callback.bot,
+        callback.message.chat.id,
+        f"🎫 ویرایش *{label}* لیگ *{escape_md(l_name)}* (فعلی: {curr} روز)\n"
+        "لطفاً تعداد جدید را بین 0 تا 40 وارد کنید:",
+        reply_markup=get_inline_cancel_keyboard(),
+    )
+    await callback.answer()
+
+
+async def _process_league_quota_input(
+    message: Message, state: FSMContext, kind: str
+) -> None:
+    raw = DateService.normalize_digits(message.text or "")
+    if not _is_ascii_digits(raw) or len(raw) > 2 or not (0 <= int(raw) <= 40):
+        await safe_reply(message, "❌ لطفاً عددی صحیح بین 0 تا 40 وارد کنید:")
+        return
+
+    new_val = int(raw)
+    data = await state.get_data()
+    league_id = data.get("edit_league_id")
+    user_id = str(message.from_user.id)
+
+    with get_db() as db:
+        lg = db.query(League).filter(League.id == league_id, League.is_deleted == False).first()
+        if not lg or not is_user_admin(db, user_id, lg.group_id):
+            await state.clear()
+            await safe_reply(message, "❌ لیگ یافت نشد یا دسترسی ندارید.")
+            return
+        _apply_league_quota_change(db, lg, kind, new_val)
+        txt, kb = _build_league_quota_card(db, lg)
+
+    await state.clear()
+    await safe_reply(message, f"✅ سهمیه با موفقیت تغییر یافت.\n\n{txt}", reply_markup=kb)
+
+
+@admin_router.message(AdminStates.leagedit_waiting_half_quota)
+async def process_league_new_half_quota(message: Message, state: FSMContext) -> None:
+    await _process_league_quota_input(message, state, "half")
+
+
+@admin_router.message(AdminStates.leagedit_waiting_one_min_quota)
+async def process_league_new_one_min_quota(message: Message, state: FSMContext) -> None:
+    await _process_league_quota_input(message, state, "one")
+
+
+# --- تنظیمات بولی مجموعه: ey (ویرایش دیروز)، pn (اعلان هم‌لیگی‌ها)، op (اختیاری کردن صفحات) ---
+_GROUP_FEATURE_META: Dict[str, Dict[str, str]] = {
+    "ey": {
+        "field": "allow_edit_yesterday",
+        "title": "✏️ ویرایش مطالعه دیروز",
+        "desc": "با فعال کردن این گزینه، کاربران این مجموعه می‌توانند مطالعه ثبت‌شده دیروز خود را نیز ویرایش کنند.",
+        "cb_prefix": "toggle_ey_",
+    },
+    "pn": {
+        "field": "peer_notify_enabled",
+        "title": "📣 اعلان مطالعه هم‌لیگی‌ها",
+        "desc": "با فعال کردن این گزینه، کاربران این مجموعه دستور /peer_notify را در حساب کاربری خود می‌بینند و می‌توانند اعلان انگیزشی ثبت مطالعه دیگران را روشن کنند.",
+        "cb_prefix": "toggle_pn_",
+    },
+    "op": {
+        "field": "optional_pages",
+        "title": "📄 اختیاری کردن تعداد صفحات",
+        "desc": "با فعال کردن این گزینه، کاربران این مجموعه می‌توانند بدون وارد کردن تعداد صفحات، مطالعه و امتیاز خود را ثبت کنند.",
+        "cb_prefix": "toggle_op_",
+    },
+}
+
+
+def _build_group_feature_card(
+    grp: Group, feature_key: str
+) -> Tuple[str, InlineKeyboardMarkup]:
+    meta = _GROUP_FEATURE_META[feature_key]
+    enabled = bool(getattr(grp, meta["field"], False))
+    status_txt = "✅ فعال" if enabled else "❌ غیرفعال"
+    btn_txt = "🔴 غیرفعال کردن" if enabled else "🟢 فعال کردن"
+    text = (
+        f"*{meta['title']}*\n"
+        f"🏢 مجموعه: *{escape_md(grp.name)}* (`{grp.id}`)\n"
+        f"📌 وضعیت فعلی: *{status_txt}*\n\n"
+        f"{meta['desc']}"
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=btn_txt,
+                    callback_data=f"{meta['cb_prefix']}{grp.id}",
+                )
+            ]
+        ]
+    )
+    return text, kb
+
+
+async def _send_group_feature_list(
+    bot: Bot, chat_id: int | str, user_id: str, feature_key: str
+) -> None:
+    items: List[Tuple[str, Optional[InlineKeyboardMarkup]]] = []
+    with get_db() as db:
+        if not is_user_admin(db, user_id):
+            await safe_send_message(bot, chat_id, "⛔️ شما دسترسی به این بخش ندارید.")
+            return
+        group_ids = get_admin_group_ids(db, user_id)
+        groups = (
+            db.query(Group)
+            .filter(Group.id.in_(group_ids), Group.is_deleted == False)
+            .order_by(Group.id.asc())
+            .all()
+        )
+        if not groups:
+            items.append(("📭 هیچ مجموعه فعالی برای شما یافت نشد.", None))
+        else:
+            for g in groups:
+                items.append(_build_group_feature_card(g, feature_key))
+    for txt, kb in items:
+        await safe_send_message(bot, chat_id, txt, reply_markup=kb)
+
+
+async def _handle_group_feature_toggle(
+    callback: CallbackQuery, feature_key: str
+) -> None:
+    meta = _GROUP_FEATURE_META[feature_key]
+    raw_gid = (callback.data or "").replace(meta["cb_prefix"], "")
+    try:
+        gid = int(raw_gid)
+    except ValueError:
+        await callback.answer("درخواست نامعتبر", show_alert=True)
+        return
+
+    user_id = str(callback.from_user.id)
+    with get_db() as db:
+        if not is_user_admin(db, user_id, gid):
+            await callback.answer("عدم دسترسی", show_alert=True)
+            return
+        grp = db.query(Group).filter(Group.id == gid, Group.is_deleted == False).first()
+        if not grp:
+            await callback.answer("مجموعه یافت نشد.", show_alert=True)
+            return
+        new_val = not bool(getattr(grp, meta["field"], False))
+        setattr(grp, meta["field"], new_val)
+        db.commit()
+        txt, kb = _build_group_feature_card(grp, feature_key)
+
+    try:
+        await callback.message.edit_text(txt, reply_markup=kb, parse_mode="Markdown")
+    except Exception:
+        await safe_send_message(callback.bot, callback.message.chat.id, txt, reply_markup=kb)
+    await callback.answer("✅ فعال شد." if new_val else "✅ غیرفعال شد.")
+
+
+# دستور دوحرفی و دکمه شیشه‌ای ey (ویرایش مطالعه دیروز)
+@admin_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "ey"))
+async def cmd_toggle_edit_yesterday_menu(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await _send_group_feature_list(message.bot, message.chat.id, str(message.from_user.id), "ey")
+
+
+@admin_router.callback_query(F.data == "adm_menu_edit_yesterday")
+async def cb_menu_edit_yesterday(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _send_group_feature_list(
+        callback.bot, callback.message.chat.id, str(callback.from_user.id), "ey"
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("toggle_ey_"))
+async def cb_toggle_edit_yesterday(callback: CallbackQuery) -> None:
+    await _handle_group_feature_toggle(callback, "ey")
+
+
+# دستور دوحرفی و دکمه شیشه‌ای pn (اعلان مطالعه هم‌لیگی‌ها)
+@admin_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "pn"))
+async def cmd_toggle_peer_notify_menu(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await _send_group_feature_list(message.bot, message.chat.id, str(message.from_user.id), "pn")
+
+
+@admin_router.callback_query(F.data == "adm_menu_peer_notify")
+async def cb_menu_peer_notify(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _send_group_feature_list(
+        callback.bot, callback.message.chat.id, str(callback.from_user.id), "pn"
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("toggle_pn_"))
+async def cb_toggle_peer_notify(callback: CallbackQuery) -> None:
+    await _handle_group_feature_toggle(callback, "pn")
+
+
+# دستور دوحرفی و دکمه شیشه‌ای op (اختیاری کردن تعداد صفحات)
+@admin_router.message(StateFilter(None), F.text.func(lambda t: t and t.strip().lower() == "op"))
+async def cmd_toggle_optional_pages_menu(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await _send_group_feature_list(message.bot, message.chat.id, str(message.from_user.id), "op")
+
+
+@admin_router.callback_query(F.data == "adm_menu_optional_pages")
+async def cb_menu_optional_pages(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _send_group_feature_list(
+        callback.bot, callback.message.chat.id, str(callback.from_user.id), "op"
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("toggle_op_"))
+async def cb_toggle_optional_pages(callback: CallbackQuery) -> None:
+    await _handle_group_feature_toggle(callback, "op")

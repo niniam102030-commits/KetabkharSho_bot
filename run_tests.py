@@ -1654,6 +1654,208 @@ async def run_all_tests() -> None:
 
     print("✅ [PASS] Scenario 19: Day-41 gift-point guard, GroupAdmin notifications, interactive DB merge priority & Docker cleanup verified.")
 
+    # -----------------------------------------------------------------------
+    # سناریو ۲۰: سهمیه‌های قابل‌تغییر لیگ (lq)، ویرایش مطالعه دیروز (ey)،
+    #            اعلان مطالعه هم‌لیگی‌ها (pn / /peer_notify) و اختیاری بودن صفحات (op)
+    # -----------------------------------------------------------------------
+    from admin_handlers import (
+        cmd_league_quotas,
+        cb_league_quota_adjust,
+        cb_league_quota_set_prompt,
+        process_league_new_half_quota,
+        cmd_toggle_edit_yesterday_menu,
+        cb_toggle_edit_yesterday,
+        cmd_toggle_peer_notify_menu,
+        cb_toggle_peer_notify,
+        cmd_toggle_optional_pages_menu,
+        cb_toggle_optional_pages,
+    )
+    from handlers import (
+        user_can_edit_yesterday,
+        handle_edit_study_yesterday,
+        cmd_toggle_peer_notify,
+        _fetch_user_profile_sync,
+    )
+    from database import set_active_user_id
+    from keyboards import EDIT_YESTERDAY_TEXT, SKIP_PAGES_TEXT
+
+    s20_bot = MockBot()
+    s20_admin_id = SUPER_ADMIN_ID
+    s20_peer_a = "88001122"
+    s20_peer_b = "88001133"
+    s20_state = make_fsm(storage, s20_bot.id, s20_admin_id)
+
+    with get_db() as db:
+        g20 = Group(name="مجموعه تست ویژگی‌های جدید", password="987654", is_deleted=False)
+        db.add(g20)
+        db.commit()
+        db.refresh(g20)
+        g20_id = g20.id
+        # پیش‌فرض هر سه قابلیت باید خاموش باشد
+        assert g20.allow_edit_yesterday is False, "ویرایش دیروز به صورت پیش‌فرض باید غیرفعال باشد"
+        assert g20.peer_notify_enabled is False, "اعلان هم‌لیگی به صورت پیش‌فرض باید غیرفعال باشد"
+        assert g20.optional_pages is False, "اختیاری بودن صفحات به صورت پیش‌فرض باید غیرفعال باشد"
+
+        start_sh20 = DateService.date_to_shamsi(DateService.today_date() - timedelta(days=3))
+        lg20 = League(
+            group_id=g20_id,
+            name="لیگ تست ۲۰",
+            floor=20,
+            start_shamsi=start_sh20,
+            current_day=4,
+            is_active=True,
+            is_deleted=False,
+            cycle_number=1,
+        )
+        db.add(lg20)
+        db.commit()
+        db.refresh(lg20)
+        lg20_id = lg20.id
+        cyc20 = get_or_create_active_cycle(db, lg20, default_start_shamsi=start_sh20)
+
+        u_a = User(
+            id=s20_peer_a,
+            telegram_id=s20_peer_a,
+            group_id=g20_id,
+            name="آرش کتابخوان",
+            first_name="آرش",
+            last_name="کتابخوان",
+            league_id=lg20_id,
+            points=10.0,
+            total_minutes=20,
+            total_pages=10,
+            half_coupons=3,  # ۲ عدد مصرف کرده از ۵
+            one_min_coupons=1,
+            is_active=True,
+            created_at=datetime.now(timezone.utc) - timedelta(days=3),
+        )
+        u_b = User(
+            id=s20_peer_b,
+            telegram_id=s20_peer_b,
+            group_id=g20_id,
+            name="بهرام مطالعه‌گر",
+            first_name="بهرام",
+            last_name="مطالعه‌گر",
+            league_id=lg20_id,
+            points=0.0,
+            half_coupons=5,
+            one_min_coupons=1,
+            is_active=True,
+            created_at=datetime.now(timezone.utc) - timedelta(days=3),
+        )
+        db.add_all([u_a, u_b])
+        db.flush()
+        # ثبت لاگ دیروز برای u_a (۲۰ دقیقه، ۱۰ امتیاز، بدون تاخیر)
+        db.add(
+            ActivityLog(
+                user_id=s20_peer_a,
+                league_id=lg20_id,
+                cycle_id=cyc20.id,
+                cycle_number=1,
+                league_day=3,
+                minutes=20,
+                pages=10,
+                points_earned=10.0,
+                half_coupon_used=0,
+                one_min_coupon_used=0,
+                log_date=DateService.yesterday_str(),
+                log_hour=14,
+            )
+        )
+        db.commit()
+        set_active_user_id(db, s20_peer_a, s20_peer_a)
+        set_active_user_id(db, s20_peer_b, s20_peer_b)
+
+    # ۱) تست lq: افزایش و کاهش سهمیه لیگ و همگام‌سازی سهمیه کاربران فعال
+    await cmd_league_quotas(MockMessage(s20_bot, s20_admin_id, "lq"), s20_state)
+    await cb_league_quota_adjust(MockCallbackQuery(s20_bot, s20_admin_id, f"lq_adj:half:{lg20_id}:+1"))
+    await cb_league_quota_adjust(MockCallbackQuery(s20_bot, s20_admin_id, f"lq_adj:one:{lg20_id}:+1"))
+    with get_db() as db:
+        lg_chk = db.query(League).filter(League.id == lg20_id).first()
+        ua_chk = db.query(User).filter(User.id == s20_peer_a).first()
+        assert lg_chk.half_coupons_limit == 6, f"سقف نصف میثاق باید ۶ شود: {lg_chk.half_coupons_limit}"
+        assert lg_chk.one_min_coupons_limit == 2, f"سقف طلایی باید ۲ شود: {lg_chk.one_min_coupons_limit}"
+        assert ua_chk.half_coupons == 4, f"سهمیه باقیمانده کاربر باید +۱ شود (۴): {ua_chk.half_coupons}"
+        assert ua_chk.one_min_coupons == 2, f"سهمیه طلایی کاربر باید ۲ شود: {ua_chk.one_min_coupons}"
+
+    # تنظیم عدد دلخواه سهمیه نصف میثاق به 8 از طریق FSM
+    await cb_league_quota_set_prompt(MockCallbackQuery(s20_bot, s20_admin_id, f"lq_set:half:{lg20_id}"), s20_state)
+    await process_league_new_half_quota(MockMessage(s20_bot, s20_admin_id, "8"), s20_state)
+    with get_db() as db:
+        lg_chk = db.query(League).filter(League.id == lg20_id).first()
+        ua_chk = db.query(User).filter(User.id == s20_peer_a).first()
+        assert lg_chk.half_coupons_limit == 8 and ua_chk.half_coupons == 6
+    _, prof_before_pn, _ = _fetch_user_profile_sync(s20_peer_a)
+    assert "6 از 8 روز" in prof_before_pn and "2 از 2 روز" in prof_before_pn, "پروفایل باید سقف جدید سهمیه‌ها را نمایش دهد"
+    assert "/peer_notify" not in prof_before_pn, "وقتی اعلان هم‌لیگی غیرفعال است نباید /peer_notify در پروفایل نمایش داده شود"
+
+    # ۲) تست ey (ویرایش مطالعه دیروز)
+    with get_db() as db:
+        ua_chk = db.query(User).filter(User.id == s20_peer_a).first()
+        assert user_can_edit_yesterday(db, ua_chk) is False, "وقتی ey غیرفعال است کاربر نباید بتواند دیروز را ویرایش کند"
+    await cmd_toggle_edit_yesterday_menu(MockMessage(s20_bot, s20_admin_id, "ey"), s20_state)
+    await cb_toggle_edit_yesterday(MockCallbackQuery(s20_bot, s20_admin_id, f"toggle_ey_{g20_id}"))
+    with get_db() as db:
+        ua_chk = db.query(User).filter(User.id == s20_peer_a).first()
+        assert user_can_edit_yesterday(db, ua_chk) is True, "پس از فعالسازی ey کاربر باید بتواند دیروز را ویرایش کند"
+
+    # ویرایش مطالعه دیروز u_a از ۲۰ دقیقه (۱۰ امتیاز) به ۱۰ دقیقه (نصف میثاق -> ۱۰ امتیاز کامل و مصرف ۱ سهمیه نصف)
+    u_a_state = make_fsm(storage, s20_bot.id, s20_peer_a)
+    await handle_edit_study_yesterday(MockMessage(s20_bot, s20_peer_a, EDIT_YESTERDAY_TEXT), u_a_state)
+    await process_study_minutes(MockMessage(s20_bot, s20_peer_a, "10"), u_a_state)
+    await process_study_pages(MockMessage(s20_bot, s20_peer_a, "5"), u_a_state)
+    with get_db() as db:
+        ua_chk = db.query(User).filter(User.id == s20_peer_a).first()
+        y_log = db.query(ActivityLog).filter(ActivityLog.user_id == s20_peer_a, ActivityLog.log_date == DateService.yesterday_str()).first()
+        assert ua_chk.points == 10.0 and ua_chk.total_minutes == 10 and ua_chk.total_pages == 5, (
+            f"ویرایش مطالعه دیروز نادرست محاسبه شد: pts={ua_chk.points}, mins={ua_chk.total_minutes}, pages={ua_chk.total_pages}"
+        )
+        assert ua_chk.half_coupons == 5, f"باید ۱ سهمیه نصف میثاق مصرف شود (۵): {ua_chk.half_coupons}"
+        assert y_log.minutes == 10 and y_log.pages == 5 and y_log.points_earned == 10.0
+
+    # ۳) تست pn و /peer_notify (اعلان مطالعه هم‌لیگی‌ها) و op (اختیاری کردن صفحات)
+    u_b_state = make_fsm(storage, s20_bot.id, s20_peer_b)
+    await cmd_toggle_peer_notify(MockMessage(s20_bot, s20_peer_b, "/peer_notify"), u_b_state)
+    with get_db() as db:
+        ub_chk = db.query(User).filter(User.id == s20_peer_b).first()
+        assert ub_chk.peer_notify_enabled is False, "تا قبل از فعالسازی ادمین، /peer_notify نباید روشن شود"
+
+    await cmd_toggle_peer_notify_menu(MockMessage(s20_bot, s20_admin_id, "pn"), s20_state)
+    await cb_toggle_peer_notify(MockCallbackQuery(s20_bot, s20_admin_id, f"toggle_pn_{g20_id}"))
+    _, prof_after_pn, _ = _fetch_user_profile_sync(s20_peer_b)
+    assert "/peer_notify" in prof_after_pn, "پس از فعالسازی ادمین، دستور /peer_notify باید در پروفایل دیده شود"
+
+    # کاربر B اعلان هم‌لیگی را روشن می‌کند
+    await cmd_toggle_peer_notify(MockMessage(s20_bot, s20_peer_b, "/peer_notify"), u_b_state)
+    with get_db() as db:
+        ub_chk = db.query(User).filter(User.id == s20_peer_b).first()
+        assert ub_chk.peer_notify_enabled is True, "کاربر B باید اعلان هم‌لیگی را روشن کرده باشد"
+
+    # ۴) فعالسازی op (اختیاری کردن تعداد صفحات)
+    await cmd_toggle_optional_pages_menu(MockMessage(s20_bot, s20_admin_id, "op"), s20_state)
+    await cb_toggle_optional_pages(MockCallbackQuery(s20_bot, s20_admin_id, f"toggle_op_{g20_id}"))
+
+    # کاربر A امروز مطالعه ثبت می‌کند و تعداد صفحات را رد (skip) می‌کند -> باید هم امتیاز ثبت شود و هم پیام به B برود!
+    notif_bot = MockBot()
+    u_a_today_state = make_fsm(storage, notif_bot.id, s20_peer_a)
+    await handle_log_study_today(MockMessage(notif_bot, s20_peer_a, "📝 ثبت مطالعه امروز"), u_a_today_state)
+    await process_study_minutes(MockMessage(notif_bot, s20_peer_a, "25"), u_a_today_state)
+    await process_study_pages(MockMessage(notif_bot, s20_peer_a, SKIP_PAGES_TEXT), u_a_today_state)
+    # اجازه اجرای تسک پس‌زمینه ارسال اعلان به هم‌لیگی‌ها
+    await asyncio.sleep(0.15)
+
+    with get_db() as db:
+        ua_chk = db.query(User).filter(User.id == s20_peer_a).first()
+        assert ua_chk.today_minutes == 25 and ua_chk.today_pages == 0 and ua_chk.today_points == 10.0, (
+            f"ثبت مطالعه با صفحات اختیاری نادرست بود: mins={ua_chk.today_minutes}, pages={ua_chk.today_pages}, pts={ua_chk.today_points}"
+        )
+    peer_msgs_to_b = [m for m in notif_bot.sent_messages if str(m["chat_id"]) == s20_peer_b]
+    peer_msgs_to_a = [m for m in notif_bot.sent_messages if str(m["chat_id"]) == s20_peer_a and "عقب" in m["text"]]
+    assert len(peer_msgs_to_b) == 1, f"باید دقیقاً ۱ اعلان انگیزشی برای کاربر B ارسال شود: {peer_msgs_to_b}"
+    assert len(peer_msgs_to_a) == 0, "کاربر ثبت‌کننده نباید اعلان هم‌لیگی برای خودش دریافت کند"
+
+    print("✅ [PASS] Scenario 20: Configurable league quotas (lq), edit yesterday (ey), peer study notifications (pn / /peer_notify) & optional pages (op) verified.")
+
 
 
 

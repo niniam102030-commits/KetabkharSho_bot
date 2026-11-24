@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import asyncio
 import logging
 from decimal import Decimal, ROUND_HALF_UP
@@ -63,6 +64,9 @@ from keyboards import (
     get_cancel_league_confirm,
     get_profile_switch_keyboard,
     get_cancel_or_back_keyboard,
+    get_optional_pages_keyboard,
+    EDIT_YESTERDAY_TEXT,
+    SKIP_PAGES_TEXT,
 )
 
 logger = logging.getLogger(__name__)
@@ -458,6 +462,66 @@ def user_can_log_late(db: Session, user: Optional[User]) -> bool:
     return existing_log is None
 
 
+def user_can_edit_yesterday(db: Session, user: Optional[User]) -> bool:
+    """
+    بررسی شرط فعال بودن دکمه «ویرایش مطالعه دیروز»:
+    ۱. ویژگی ویرایش مطالعه دیروز برای مجموعه کاربر فعال باشد (allow_edit_yesterday == True).
+    ۲. کاربر در لیگ فعال عضو باشد و لیگ شروع شده باشد و روز دیروز در بازه ۱ تا ۴۰ باشد.
+    ۳. کاربر برای تاریخ دیروز یا روز دیروز چله قبلاً یک لاگ مطالعه ثبت کرده باشد.
+    """
+    if not user or not user.is_active or not user.league_id or not user.group_id:
+        return False
+
+    group = (
+        db.query(Group)
+        .filter(Group.id == user.group_id, Group.is_deleted == False)
+        .first()
+    )
+    if not group or not group.allow_edit_yesterday:
+        return False
+
+    league = (
+        db.query(League)
+        .filter(
+            League.id == user.league_id,
+            League.is_deleted == False,
+            League.is_active == True,
+        )
+        .first()
+    )
+    if not league:
+        return False
+
+    cycle = get_or_create_active_cycle(db, league)
+    eff_start = cycle.start_shamsi or league.start_shamsi
+    if not DateService.league_has_started(eff_start):
+        return False
+
+    raw_current_day = DateService.calculate_raw_league_day(eff_start)
+    yesterday_day = raw_current_day - 1
+    if yesterday_day < 1 or yesterday_day > settings.LEAGUE_DURATION:
+        return False
+
+    yesterday_str = DateService.yesterday_str()
+    existing_log = (
+        db.query(ActivityLog)
+        .filter(
+            ActivityLog.user_id == user.id,
+            ActivityLog.league_id == league.id,
+            (ActivityLog.cycle_id == cycle.id)
+            | (
+                (ActivityLog.cycle_id == None)
+                & (ActivityLog.cycle_number == league.cycle_number)
+            ),
+            (ActivityLog.log_date == yesterday_str)
+            | (ActivityLog.league_day == yesterday_day),
+            ActivityLog.minutes > 0,
+        )
+        .first()
+    )
+    return existing_log is not None
+
+
 def build_user_main_menu(db: Session, telegram_id: str | int, active_user: Optional[User] = None):
     """ساخت کیبورد منوی اصلی متناسب با وضعیت فعلی کاربر"""
     tg_id = str(telegram_id).strip()
@@ -466,6 +530,11 @@ def build_user_main_menu(db: Session, telegram_id: str | int, active_user: Optio
     profiles = get_user_profiles(db, tg_id, only_active=True)
     is_adm = is_user_admin(db, tg_id)
     can_late = user_can_log_late(db, active_user) if active_user else False
+    can_edit_yest = (
+        (not can_late) and user_can_edit_yesterday(db, active_user)
+        if active_user
+        else False
+    )
     has_fines = False
     if active_user and active_user.is_active and active_user.league_id:
         has_fines = fine_service.league_has_fines(db, active_user.league_id)
@@ -476,6 +545,7 @@ def build_user_main_menu(db: Session, telegram_id: str | int, active_user: Optio
         can_log_late=can_late,
         has_fines=has_fines,
         is_fine_manager=is_fmgr,
+        can_edit_yesterday=can_edit_yest,
     )
 
 
@@ -939,8 +1009,8 @@ async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> No
             target_user.no_study_days = 0
             target_user.absent_days_list = ""
             target_user.late_days_list = ""
-            target_user.half_coupons = settings.DEFAULT_HALF_COUPONS
-            target_user.one_min_coupons = settings.DEFAULT_ONE_MIN_COUPONS
+            target_user.half_coupons = league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)
+            target_user.one_min_coupons = league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)
             target_user.user_floor = None
             target_user.last_log_date = None
             target_user.today_minutes = 0
@@ -985,8 +1055,8 @@ async def _cb_join_league_impl(callback: CallbackQuery, state: FSMContext) -> No
                 no_study_days=0,
                 absent_days_list="",
                 late_days_list="",
-                half_coupons=settings.DEFAULT_HALF_COUPONS,
-                one_min_coupons=settings.DEFAULT_ONE_MIN_COUPONS,
+                half_coupons=league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS),
+                one_min_coupons=league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS),
                 is_active=True,
             )
             db.add(target_user)
@@ -1153,13 +1223,20 @@ async def handle_log_study_today(message: Message, state: FSMContext) -> None:
         )
         if already_logged_today:
             can_late = user_can_log_late(db, user)
+            can_edit_yest = (not can_late) and user_can_edit_yesterday(db, user)
             msg_txt = (
                 f"📊 {escape_md(user.name)} عزیز!\n\n"
                 f"شما امروز{league_text} {user.today_minutes} دقیقه ثبت کرده‌اید.\n"
                 f"چه اقدامی مدنظر دارید؟"
             )
             msg_txt = MessageService.apply_terms(db, user.group_id, msg_txt)
-            await safe_answer(message, msg_txt, reply_markup=get_study_edit_menu(can_log_late=can_late))
+            await safe_answer(
+                message,
+                msg_txt,
+                reply_markup=get_study_edit_menu(
+                    can_log_late=can_late, can_edit_yesterday=can_edit_yest
+                ),
+            )
             return
 
         prompt_txt = (
@@ -1342,6 +1419,110 @@ async def handle_log_study_yesterday(message: Message, state: FSMContext) -> Non
     )
 
 
+_PEER_NOTIFY_TEMPLATES: List[str] = [
+    "🔥 *{name}* همین الان مطالعه‌اش را در لیگ «{league}» ثبت کرد! حواست باشه عقب نمونی 💪📚",
+    "📚 *{name}* امروز به میثاقش عمل کرد و مطالعه‌اش رو ثبت کرد! نوبت توئه قهرمان 🏆",
+    "⚡️ حرکت جدید در لیگ «{league}»! *{name}* ثبت مطالعه کرد؛ تو هم همین امروز امتیازت رو بگیر 🚀",
+    "🌟 *{name}* یک قدم دیگه توی لیگ «{league}» جلو افتاد! بجنب که از رقابت جا نمونی 📖✨",
+    "🏃‍♂️ *{name}* مطالعه‌اش رو ثبت کرد و زنجیره‌اش رو حفظ کرد! وقتشه تو هم کتابت رو دست بگیری 🔥",
+    "📣 خبر داغ از لیگ «{league}»: *{name}* ثبت مطالعه کرد! حواست به رتبه‌ات توی جدول باشه 😉📊",
+    "🎯 *{name}* کار امروزش رو تمام کرد و مطالعه‌اش رو ثبت کرد! تو چطور؟ منتظر ثبت تو هستیم 📚💫",
+    "💪 رقیبت *{name}* همین الان مطالعه ثبت کرد! نذار فاصله بیفته، همین حالا چند دقیقه بخون ⏱📖",
+]
+
+
+async def _send_peer_study_notifications(
+    bot: Bot, notifications: List[Tuple[str, str]]
+) -> None:
+    """ارسال پس‌زمینه‌ای و ایمن اعلان‌های انگیزشی ثبت مطالعه هم‌لیگی‌ها"""
+    if not notifications:
+        return
+    throttle = BroadcastThrottle(msg_delay=0.05)
+    for peer_tg_id, text_msg in notifications:
+        try:
+            await safe_send(bot, peer_tg_id, text_msg)
+            await throttle.tick()
+        except Exception as exc:
+            logger.debug(f"ارسال اعلان هم‌لیگی به {peer_tg_id} ناموفق بود: {exc}")
+
+
+@user_router.message(F.text == EDIT_YESTERDAY_TEXT)
+async def handle_edit_study_yesterday(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    tg_id = str(message.from_user.id)
+    today_str = DateService.today_str()
+    yesterday_str = DateService.yesterday_str()
+
+    with get_db() as db:
+        user = get_active_user(db, tg_id)
+        if not user or not user_can_edit_yesterday(db, user):
+            kb = build_user_main_menu(db, tg_id, user)
+            err_txt = MessageService.apply_terms(
+                db,
+                user.group_id if user else 1,
+                "⚠️ امکان ویرایش مطالعه دیروز برای شما فعال نیست.",
+            )
+            await safe_answer(message, err_txt, reply_markup=kb)
+            return
+
+        league = db.query(League).filter(League.id == user.league_id).first()
+        cycle = get_or_create_active_cycle(db, league)
+        raw_current_day = DateService.calculate_raw_league_day(
+            cycle.start_shamsi or league.start_shamsi
+        )
+        yesterday_day = max(1, min(settings.LEAGUE_DURATION, raw_current_day - 1))
+        existing_yest_log = (
+            db.query(ActivityLog)
+            .filter(
+                ActivityLog.user_id == user.id,
+                ActivityLog.league_id == league.id,
+                (ActivityLog.cycle_id == cycle.id)
+                | (
+                    (ActivityLog.cycle_id == None)
+                    & (ActivityLog.cycle_number == league.cycle_number)
+                ),
+                (ActivityLog.log_date == yesterday_str)
+                | (ActivityLog.league_day == yesterday_day),
+                ActivityLog.minutes > 0,
+            )
+            .first()
+        )
+        if not existing_yest_log:
+            kb = build_user_main_menu(db, tg_id, user)
+            await safe_answer(
+                message,
+                "⚠️ ثبت مطالعه‌ای برای دیروز یافت نشد.",
+                reply_markup=kb,
+            )
+            return
+
+        profiles = get_user_profiles(db, tg_id, only_active=True)
+        league_text = (
+            f" (در لیگ «{escape_md(league.name)}»)"
+            if (league and len(profiles) > 1)
+            else ""
+        )
+        effective_floor = user.get_effective_floor(league.floor if league else 10)
+        prompt_txt = (
+            f"✏️ *ویرایش مطالعه دیروز*\n\n"
+            f"⏱ {escape_md(user.name)} عزیز، کل زمان مطالعه دیروز{league_text} شما چند دقیقه بوده است؟\n"
+            f"(این عدد جایگزین {existing_yest_log.minutes} دقیقه قبلی دیروز می‌شود | میثاق شما: {effective_floor} دقیقه)\n\n"
+            f"لطفاً فقط عدد بفرستید:"
+        )
+        prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
+        user_id = user.id
+
+    await state.update_data(
+        study_mode="edit_yesterday", study_user_id=user_id, study_init_date=today_str
+    )
+    await state.set_state(StudyStates.waiting_for_minutes)
+    await safe_answer(
+        message,
+        prompt_txt,
+        reply_markup=get_cancel_or_back_keyboard(show_back=False),
+    )
+
+
 async def _dispatch_menu_interruption(message: Message, state: FSMContext, text_val: str) -> bool:
     """بررسی اینکه آیا کاربر در وسط استیت ثبت مطالعه یکی از دکمه‌های منوی اصلی یا دستورات را زده است"""
     if text_val == "📝 ثبت مطالعه امروز":
@@ -1349,6 +1530,9 @@ async def _dispatch_menu_interruption(message: Message, state: FSMContext, text_
         return True
     if text_val == "⏳ ثبت مطالعه دیروز (با کسر ۵۰٪ امتیاز)":
         await handle_log_study_yesterday(message, state)
+        return True
+    if text_val == EDIT_YESTERDAY_TEXT:
+        await handle_edit_study_yesterday(message, state)
         return True
     if text_val == "🏆 جدول لیگ":
         await handle_league_leaderboard(message, state)
@@ -1374,6 +1558,9 @@ async def _dispatch_menu_interruption(message: Message, state: FSMContext, text_
         return True
     if text_val == "/reminder":
         await cmd_toggle_reminder(message, state)
+        return True
+    if text_val == "/peer_notify":
+        await cmd_toggle_peer_notify(message, state)
         return True
     if text_val in ("/history", "history"):
         await state.clear()
@@ -1441,12 +1628,26 @@ async def process_study_minutes(message: Message, state: FSMContext) -> None:
             )
             return
         user_display = escape_md(user.name) if user else "کاربر"
+        grp = (
+            db.query(Group).filter(Group.id == user.group_id).first()
+            if (user and user.group_id)
+            else None
+        )
+        optional_pages = bool(grp and grp.optional_pages)
 
-    await state.update_data(study_minutes=minutes)
+    await state.update_data(study_minutes=minutes, optional_pages=optional_pages)
     await state.set_state(StudyStates.waiting_for_pages)
-    await safe_answer(
-        message, f"📄 حالا {user_display} عزیز بفرمایید چند صفحه خواندید؟"
-    )
+    if optional_pages:
+        await safe_answer(
+            message,
+            f"📄 حالا {user_display} عزیز بفرمایید چند صفحه خواندید؟\n"
+            f"(ثبت تعداد صفحات اختیاری است؛ می‌توانید عدد بفرستید یا دکمه «{SKIP_PAGES_TEXT}» را بزنید)",
+            reply_markup=get_optional_pages_keyboard(),
+        )
+    else:
+        await safe_answer(
+            message, f"📄 حالا {user_display} عزیز بفرمایید چند صفحه خواندید؟"
+        )
 
 
 @user_router.message(StudyStates.waiting_for_pages)
@@ -1454,15 +1655,24 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
     txt_clean = (message.text or "").strip()
     if await _dispatch_menu_interruption(message, state, txt_clean):
         return
-    raw_pages = DateService.normalize_digits(txt_clean)
-    if not (raw_pages.isascii() and raw_pages.isdigit()) or len(raw_pages) > 4 or not (0 <= int(raw_pages) <= 5000):
-        await safe_answer(
-            message,
-            "❌ لطفاً تعداد صفحات را به صورت یک عدد صحیح بین 0 تا 5000 وارد کنید:",
-        )
-        return
-
-    pages = int(raw_pages)
+    state_preview = await state.get_data()
+    is_optional_pages_state = bool(state_preview.get("optional_pages", False))
+    if is_optional_pages_state and txt_clean == SKIP_PAGES_TEXT:
+        pages = 0
+    else:
+        raw_pages = DateService.normalize_digits(txt_clean)
+        if not (raw_pages.isascii() and raw_pages.isdigit()) or len(raw_pages) > 4 or not (0 <= int(raw_pages) <= 5000):
+            hint = (
+                f" یا دکمه «{SKIP_PAGES_TEXT}» را بزنید:"
+                if is_optional_pages_state
+                else ":"
+            )
+            await safe_answer(
+                message,
+                f"❌ لطفاً تعداد صفحات را به صورت یک عدد صحیح بین 0 تا 5000 وارد کنید{hint}",
+            )
+            return
+        pages = int(raw_pages)
     tg_id = str(message.from_user.id)
 
     async with _get_user_lock(tg_id):
@@ -1546,7 +1756,130 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                 )
                 return
 
-            if mode == "late":
+            peer_notifications: List[Tuple[str, str]] = []
+            group_obj = (
+                db.query(Group).filter(Group.id == user.group_id).first()
+                if user.group_id
+                else None
+            )
+            optional_pages_flag = bool(group_obj and group_obj.optional_pages)
+            half_limit = league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)
+            one_limit = league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)
+
+            if mode == "edit_yesterday":
+                if not user_can_edit_yesterday(db, user):
+                    kb = build_user_main_menu(db, tg_id, user)
+                    err_msg = MessageService.apply_terms(
+                        db,
+                        user.group_id,
+                        "⚠️ امکان ویرایش مطالعه دیروز برای شما فعال نیست.",
+                    )
+                    await state.clear()
+                    await safe_answer(message, err_msg, reply_markup=kb)
+                    return
+
+                target_league_day = max(
+                    1, min(settings.LEAGUE_DURATION, raw_current_day - 1)
+                )
+                existing_yest_log = (
+                    db.query(ActivityLog)
+                    .filter(
+                        ActivityLog.user_id == user.id,
+                        ActivityLog.league_id == league.id,
+                        (ActivityLog.cycle_id == cycle.id)
+                        | (
+                            (ActivityLog.cycle_id == None)
+                            & (ActivityLog.cycle_number == league.cycle_number)
+                        ),
+                        (ActivityLog.log_date == yesterday_str)
+                        | (ActivityLog.league_day == target_league_day),
+                        ActivityLog.minutes > 0,
+                    )
+                    .first()
+                )
+                if not existing_yest_log:
+                    kb = build_user_main_menu(db, tg_id, user)
+                    await state.clear()
+                    await safe_answer(
+                        message, "⚠️ ثبت مطالعه‌ای برای دیروز یافت نشد.", reply_markup=kb
+                    )
+                    return
+
+                # بازگردانی امتیاز، زمان، صفحات و سهمیه‌های مصرف‌شده دیروز
+                user.points = max(
+                    0.0,
+                    round(
+                        float(user.points or 0.0)
+                        - float(existing_yest_log.points_earned or 0.0),
+                        1,
+                    ),
+                )
+                user.total_minutes = max(
+                    0,
+                    int(user.total_minutes or 0) - int(existing_yest_log.minutes or 0),
+                )
+                user.total_pages = max(
+                    0,
+                    int(user.total_pages or 0) - int(existing_yest_log.pages or 0),
+                )
+                user.half_coupons = min(
+                    half_limit,
+                    max(
+                        0,
+                        int(user.half_coupons or 0)
+                        + int(existing_yest_log.half_coupon_used or 0),
+                    ),
+                )
+                user.one_min_coupons = min(
+                    one_limit,
+                    max(
+                        0,
+                        int(user.one_min_coupons or 0)
+                        + int(existing_yest_log.one_min_coupon_used or 0),
+                    ),
+                )
+
+                pts, half_used, one_used, status_msg = ScoringService.calculate_points(
+                    minutes=input_minutes,
+                    floor=effective_floor,
+                    half_coupons=user.half_coupons,
+                    one_min_coupons=user.one_min_coupons,
+                )
+                was_late = target_league_day in AbsenceService.parse_days_list(
+                    user.late_days_list
+                )
+                if was_late:
+                    pts = float(
+                        (Decimal(str(pts)) / Decimal(2)).quantize(
+                            Decimal("0.1"), rounding=ROUND_HALF_UP
+                        )
+                    )
+                    status_msg += (
+                        f"\n⏳ (به دلیل ثبت با تاخیر دیروز، ۵۰٪ امتیاز محاسبه شد: {pts} امتیاز)"
+                    )
+
+                user.points = round(float(user.points or 0.0) + pts, 1)
+                user.total_minutes = int(user.total_minutes or 0) + input_minutes
+                user.total_pages = int(user.total_pages or 0) + pages
+                user.half_coupons = max(0, int(user.half_coupons or 0) - half_used)
+                user.one_min_coupons = max(0, int(user.one_min_coupons or 0) - one_used)
+
+                existing_yest_log.minutes = input_minutes
+                existing_yest_log.pages = pages
+                existing_yest_log.points_earned = pts
+                existing_yest_log.half_coupon_used = half_used
+                existing_yest_log.one_min_coupon_used = one_used
+                db.commit()
+
+                AbsenceService.reconcile_streaks(db, user=user, league=league)
+                db.refresh(user)
+
+                cum_minutes = input_minutes
+                cum_pages = pages
+                day_label = "دیروز"
+                header_msg = "✏️ *مطالعه دیروز شما با موفقیت ویرایش شد!*"
+
+            elif mode == "late":
                 # بررسی مجدد مجاز بودن ثبت دیروز جهت جلوگیری از ثبت تکراری یا عبور از نیمه‌شب
                 if not user_can_log_late(db, user):
                     kb = build_user_main_menu(db, tg_id, user)
@@ -1657,11 +1990,11 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                         0, int(user.total_pages or 0) - int(user.today_pages or 0)
                     )
                     user.half_coupons = min(
-                        settings.DEFAULT_HALF_COUPONS,
+                        half_limit,
                         max(0, int(user.half_coupons or 0) + int(user.today_half_used or 0)),
                     )
                     user.one_min_coupons = min(
-                        settings.DEFAULT_ONE_MIN_COUPONS,
+                        one_limit,
                         max(0, int(user.one_min_coupons or 0) + int(user.today_one_min_used or 0)),
                     )
 
@@ -1754,10 +2087,31 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
             days_left = max(0, settings.LEAGUE_DURATION - current_day)
             league_title = f"لیگ «{escape_md(league.name)}»"
 
+            # آماده‌سازی اعلان هم‌لیگی‌ها فقط در ثبت جدید امروز و در صورت فعال بودن در مجموعه
+            if mode == "fresh" and group_obj and group_obj.peer_notify_enabled:
+                actor_name = escape_md(user.get_display_name())
+                league_name_md = escape_md(league.name)
+                seen_peers: Set[str] = {tg_id}
+                for peer in all_league_users:
+                    p_tg = str(peer.telegram_id or "").strip()
+                    if not p_tg or p_tg in seen_peers or not peer.peer_notify_enabled:
+                        continue
+                    seen_peers.add(p_tg)
+                    raw_tmpl = random.choice(_PEER_NOTIFY_TEMPLATES).format(
+                        name=actor_name, league=league_name_md
+                    )
+                    notif_text = MessageService.apply_terms(db, user.group_id, raw_tmpl)
+                    peer_notifications.append((p_tg, notif_text))
+
+            pages_line = (
+                f"📄 صفحات {day_label}: ثبت نشد\n"
+                if (optional_pages_flag and cum_pages == 0)
+                else f"📄 صفحات {day_label}: {cum_pages} صفحه\n"
+            )
             card_body = (
                 f"{header_msg}\n\n"
                 f"⏱ زمان {day_label}: {cum_minutes} دقیقه\n"
-                f"📄 صفحات {day_label}: {cum_pages} صفحه\n"
+                f"{pages_line}"
                 f"🏆 چله {cycle.cycle_number} | روز {current_day} از {settings.LEAGUE_DURATION}\n"
                 f"🔥 زنجیره شما: {user.streak} روز\n"
                 f"🏆 رتبه شما در {league_title}: {my_rank}\n"
@@ -1769,6 +2123,10 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
 
         await state.clear()
         await safe_answer(message, final_text, reply_markup=main_kb)
+        if peer_notifications:
+            asyncio.create_task(
+                _send_peer_study_notifications(message.bot, peer_notifications)
+            )
 
 
 # ===========================================================================
@@ -1846,6 +2204,19 @@ def _fetch_user_profile_sync(tg_id: str) -> Tuple[Optional[str], Optional[str], 
 
         absent_days_text = user.absent_days_list if user.absent_days_list else "ندارد"
         late_days_text = user.late_days_list if user.late_days_list else "ندارد"
+        half_limit = league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)
+        one_limit = league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)
+        grp = (
+            db.query(Group).filter(Group.id == user.group_id).first()
+            if user.group_id
+            else None
+        )
+        peer_notify_line = ""
+        if grp and grp.peer_notify_enabled:
+            pn_state = "روشن 🔔" if user.peer_notify_enabled else "خاموش 🔕"
+            peer_notify_line = (
+                f"📣 اعلان مطالعه هم‌لیگی‌ها ({pn_state}): برای خاموش/روشن کردن، دستور /peer_notify را بفرستید.\n"
+            )
 
         profile_text = (
             f"👤 *شناسنامه مطالعه شما در لیگ {escape_md(league.name)}*:\n"
@@ -1861,9 +2232,10 @@ def _fetch_user_profile_sync(tg_id: str) -> Tuple[Optional[str], Optional[str], 
             f"⚠️ *ثبت‌های دیرهنگام*: روزهای: {late_days_text}\n"
             f"{days_left_line}\n\n"
             f"🎫 فرصت‌ها و سهمیه‌های باقیمانده این دوره:\n"
-            f"🔹 سهمیه نصف میثاق: {user.half_coupons} از {settings.DEFAULT_HALF_COUPONS} روز\n"
-            f"🔸 سهمیه طلایی ۱ دقیقه‌ای: {user.one_min_coupons} از {settings.DEFAULT_ONE_MIN_COUPONS} روز\n\n"
+            f"🔹 سهمیه نصف میثاق: {user.half_coupons} از {half_limit} روز\n"
+            f"🔸 سهمیه طلایی ۱ دقیقه‌ای: {user.one_min_coupons} از {one_limit} روز\n\n"
             f"🔔 برای خاموش/روشن کردن یادآوری شبانه، دستور /reminder را بفرستید.\n"
+            f"{peer_notify_line}"
             f"⚠️ جهت انصراف، دستور /cancel_my_league را بفرستید."
         )
         profile_text = MessageService.apply_terms(db, user.group_id, profile_text)
@@ -2054,6 +2426,58 @@ async def cmd_toggle_reminder(message: Message, state: FSMContext) -> None:
     await safe_answer(message, txt, reply_markup=kb)
 
 
+@user_router.message(Command("peer_notify"))
+async def cmd_toggle_peer_notify(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    tg_id = str(message.from_user.id)
+    with get_db() as db:
+        profiles = get_user_profiles(db, tg_id, only_active=True)
+        if not profiles:
+            await safe_answer(
+                message, "⚠️ ابتدا باید ثبت‌نام کنید.", reply_markup=get_start_menu()
+            )
+            return
+
+        group_ids = {p.group_id for p in profiles if p.group_id is not None}
+        enabled_gids = {
+            g.id
+            for g in db.query(Group)
+            .filter(
+                Group.id.in_(group_ids),
+                Group.is_deleted == False,
+                Group.peer_notify_enabled == True,
+            )
+            .all()
+        } if group_ids else set()
+
+        eligible_profiles = [p for p in profiles if p.group_id in enabled_gids]
+        kb = build_user_main_menu(db, tg_id)
+        if not eligible_profiles:
+            await safe_answer(
+                message,
+                "⚠️ قابلیت اعلان مطالعه هم‌لیگی‌ها توسط ادمین مجموعه شما فعال نشده است.",
+                reply_markup=kb,
+            )
+            return
+
+        new_value = not all(bool(p.peer_notify_enabled) for p in eligible_profiles)
+        for p in eligible_profiles:
+            p.peer_notify_enabled = new_value
+        db.commit()
+
+    if new_value:
+        txt = (
+            "📣 اعلان مطالعه هم‌لیگی‌ها *روشن* شد! از این پس وقتی هم‌لیگی‌هایتان مطالعه ثبت کنند به شما اطلاع می‌دهیم تا عقب نمانید 💪\n"
+            "برای خاموش کردن، دوباره /peer_notify را بفرستید."
+        )
+    else:
+        txt = (
+            "🔕 اعلان مطالعه هم‌لیگی‌ها *خاموش* شد.\n"
+            "برای روشن کردن مجدد، دوباره /peer_notify را بفرستید."
+        )
+    await safe_answer(message, txt, reply_markup=kb)
+
+
 @user_router.callback_query(
     (F.data == "confirm_cancel_league") | F.data.startswith("confirm_cancel_league:")
 )
@@ -2162,8 +2586,8 @@ def reset_league_members_for_new_start(db: Session, league: League, cycle: Optio
         u.no_study_days = 0
         u.absent_days_list = ""
         u.late_days_list = ""
-        u.half_coupons = settings.DEFAULT_HALF_COUPONS
-        u.one_min_coupons = settings.DEFAULT_ONE_MIN_COUPONS
+        u.half_coupons = league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)
+        u.one_min_coupons = league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)
         u.last_log_date = None
         u.today_minutes = 0
         u.today_pages = 0
@@ -2268,8 +2692,14 @@ def cleanse_prestart_activity_and_scores(db: Session, league: League, cycle: Opt
             u.points = max(0.0, round(float(u.points or 0.0) - st["points"], 1))
             u.total_minutes = max(0, int(u.total_minutes or 0) - st["minutes"])
             u.total_pages = max(0, int(u.total_pages or 0) - st["pages"])
-            u.half_coupons = min(settings.DEFAULT_HALF_COUPONS, int(u.half_coupons or 0) + st["half"])
-            u.one_min_coupons = min(settings.DEFAULT_ONE_MIN_COUPONS, int(u.one_min_coupons or 0) + st["one"])
+            u.half_coupons = min(
+                league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS),
+                int(u.half_coupons or 0) + st["half"],
+            )
+            u.one_min_coupons = min(
+                league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS),
+                int(u.one_min_coupons or 0) + st["one"],
+            )
             cleaned_count += 1
 
         if not already_cleaned_start and start_date_obj:
@@ -2314,8 +2744,8 @@ def cleanse_prestart_activity_and_scores(db: Session, league: League, cycle: Opt
                         u.today_half_used = 0
                         u.today_one_min_used = 0
                         u.last_log_date = None
-                        u.half_coupons = settings.DEFAULT_HALF_COUPONS
-                        u.one_min_coupons = settings.DEFAULT_ONE_MIN_COUPONS
+                        u.half_coupons = league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)
+                        u.one_min_coupons = league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)
                         set_system_state(db, f"streak_offset_{u.id}", "0", commit=False)
                         cleaned_count += 1
 
@@ -2728,11 +3158,11 @@ def _complete_and_rollover_cycle(
                 0, int(u.total_pages or 0) - int(p_log.pages or 0)
             )
             u.half_coupons = min(
-                settings.DEFAULT_HALF_COUPONS,
+                league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS),
                 int(u.half_coupons or 0) + int(p_log.half_coupon_used or 0),
             )
             u.one_min_coupons = min(
-                settings.DEFAULT_ONE_MIN_COUPONS,
+                league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS),
                 int(u.one_min_coupons or 0) + int(p_log.one_min_coupon_used or 0),
             )
         today_log = today_logs_map.get(u.id)
@@ -2758,7 +3188,12 @@ def _complete_and_rollover_cycle(
     league_floor_snapshot = league.floor
     final_table_text = format_league_leaderboard(db, league)
     users_snapshot = [
-        ReportService._extract_row_dict(u, league_floor=league_floor_snapshot)
+        ReportService._extract_row_dict(
+            u,
+            league_floor=league_floor_snapshot,
+            half_coupons_limit=league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS),
+            one_min_coupons_limit=league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS),
+        )
         for u in users
     ]
     final_excel_path = ReportService.generate_excel(
@@ -2790,8 +3225,14 @@ def _complete_and_rollover_cycle(
                 no_study_days=int(u.no_study_days or 0),
                 absent_days_list=u.absent_days_list or "",
                 late_days_list=u.late_days_list or "",
-                half_coupons_used=max(0, settings.DEFAULT_HALF_COUPONS - half_rem),
-                one_min_coupons_used=max(0, settings.DEFAULT_ONE_MIN_COUPONS - one_rem),
+                half_coupons_used=max(
+                    0,
+                    league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS) - half_rem,
+                ),
+                one_min_coupons_used=max(
+                    0,
+                    league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS) - one_rem,
+                ),
                 half_coupons_remaining=half_rem,
                 one_min_coupons_remaining=one_rem,
             )
@@ -2827,8 +3268,8 @@ def _complete_and_rollover_cycle(
         u.no_study_days = 0
         u.absent_days_list = ""
         u.late_days_list = ""
-        u.half_coupons = settings.DEFAULT_HALF_COUPONS
-        u.one_min_coupons = settings.DEFAULT_ONE_MIN_COUPONS
+        u.half_coupons = league.get_half_coupons_limit(settings.DEFAULT_HALF_COUPONS)
+        u.one_min_coupons = league.get_one_min_coupons_limit(settings.DEFAULT_ONE_MIN_COUPONS)
 
         if early_log:
             eff_fl = u.get_effective_floor(league.floor)
