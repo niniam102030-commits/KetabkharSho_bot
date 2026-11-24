@@ -28,5 +28,10 @@ code_backups/
 reports/
 *.xlsx
 AAAFIX*.py
-graphify-out/cache/
+graphify-out
+graphify-out/
+pack
+pack/
+run_tests.py
+run_bot.bat
 *.tmp

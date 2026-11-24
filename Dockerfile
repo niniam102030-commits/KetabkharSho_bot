@@ -16,12 +16,11 @@ ENV PYTHONUNBUFFERED=1 \
 # تعیین دایرکتوری کاری در کانتینر
 WORKDIR /app
 
-# نصب ابزارهای پایه، داده‌های زمانی IANA و gosu برای اجرای امن با کاربر غیرروت
+# نصب ابزارهای پایه و داده‌های زمانی IANA
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     ca-certificates \
     curl \
-    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # ارتقای ابزارهای پکیج‌منیجر پایتون به آخرین نسخه
@@ -47,23 +46,27 @@ import openpyxl; \
 print(f'>>> تست موفق: aiogram نسخه {aiogram.__version__} و تمام وابستگی‌ها به درستی نصب شدند.'); \
 "
 
-# کپی سورس کد پروژه به داخل کانتینر
-COPY . .
+# ایجاد کاربر غیرروت با شناسه ثابت (UID/GID=10001) پیش از کپی کد و تنظیم دایرکتوری‌های داده
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --home-dir /app app \
+    && mkdir -p /app/data /app/logs /app/data/backups /app/data/reports \
+    && chown -R app:app /app
+
+# کپی سورس کد پروژه به داخل کانتینر با مالکیت کاربر غیرروت
+COPY --chown=app:app . .
 
 # ثبت شناسه کامیت در محیط کانتینر برای نمایش در اعلان استارتاپ و بکاپ‌ها
 ARG GIT_COMMIT=""
 ENV GIT_COMMIT=${GIT_COMMIT}
 
-# ایجاد دایرکتوری‌های داده و لاگ، کاربر غیر روت و entrypoint برای تنظیم دسترسی حجم‌های موجود بدون حذف داده
+# تضمین مالکیت دایرکتوری‌های پیش‌فرض برای کاربر غیرروت
 RUN mkdir -p /app/data /app/logs /app/data/backups /app/data/reports \
-    && groupadd --system app \
-    && useradd --system --gid app --home-dir /app app \
-    && chown -R app:app /app \
-    && cp /app/docker/entrypoint.sh /usr/local/bin/entrypoint.sh \
-    && sed -i 's/\r$//' /usr/local/bin/entrypoint.sh \
-    && chmod +x /usr/local/bin/entrypoint.sh
+    && chown -R app:app /app/data /app/logs
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+USER app
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD python -c "import os, pathlib; assert any('main.py' in p.read_text(errors='ignore') for p in pathlib.Path('/proc').glob('[0-9]*/cmdline')); assert os.access('/app/data', os.W_OK)" || exit 1
 
 # دستور اجرای ربات
 CMD ["python", "main.py"]

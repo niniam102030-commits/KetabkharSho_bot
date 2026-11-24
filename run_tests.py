@@ -1673,11 +1673,12 @@ async def run_all_tests() -> None:
     from handlers import (
         user_can_edit_yesterday,
         handle_edit_study_yesterday,
+        _find_yesterday_activity_log,
         cmd_toggle_peer_notify,
         _fetch_user_profile_sync,
     )
     from database import set_active_user_id
-    from keyboards import EDIT_YESTERDAY_TEXT, SKIP_PAGES_TEXT
+    from keyboards import EDIT_YESTERDAY_TEXT, SKIP_PAGES_TEXT, KEEP_PAGES_TEXT
 
     s20_bot = MockBot()
     s20_admin_id = SUPER_ADMIN_ID
@@ -1895,7 +1896,98 @@ async def run_all_tests() -> None:
     msgs_to_a_after_b = [m for m in hybrid_bot.sent_messages if str(m["chat_id"]) == s20_peer_a]
     assert len(msgs_to_a_after_b) == 0, f"کاربری که امروز ثبت کرده نباید اعلان هم‌لیگی بگیرد: {msgs_to_a_after_b}"
 
-    print("✅ [PASS] Scenario 20: Configurable league quotas (lq), edit yesterday (ey), peer study notifications (pn / /peer_notify), optional pages (op) & hybrid 3-option minutes verified.")
+    # ۶) تست حفظ صفحات در ویرایش امروز و ویرایش دیروز هنگام زدن دکمه رد کردن (KEEP_PAGES_TEXT / SKIP_PAGES_TEXT)
+    # و امکان صفر کردن صریح صفحات با تایپ "0"
+    with get_db() as db:
+        ua_prep = db.query(User).filter(User.id == s20_peer_a).first()
+        ua_prep.today_pages = 12
+        ua_prep.total_pages = int(ua_prep.total_pages or 0) + 12
+        t_log_a = (
+            db.query(ActivityLog)
+            .filter(ActivityLog.user_id == s20_peer_a, ActivityLog.log_date == DateService.today_str())
+            .first()
+        )
+        if t_log_a:
+            t_log_a.pages = 12
+        # درج یک لاگ قدیمی با league_day=3 (تعارض ساختگی با روز دیروز) برای تست قطعیت _find_yesterday_activity_log
+        db.add(
+            ActivityLog(
+                user_id=s20_peer_a,
+                league_id=lg20_id,
+                cycle_id=cyc20.id,
+                cycle_number=1,
+                league_day=3,
+                minutes=99,
+                pages=99,
+                points_earned=10.0,
+                half_coupon_used=0,
+                one_min_coupon_used=0,
+                log_date=(DateService.today_date() - timedelta(days=2)).strftime("%Y-%m-%d"),
+                log_hour=10,
+            )
+        )
+        db.commit()
+
+    # ۶-الف) ویرایش امروز با زدن KEEP_PAGES_TEXT باید ۱۲ صفحه را حفظ کند
+    edit_bot = MockBot()
+    ua_edit_today_state = make_fsm(storage, edit_bot.id, s20_peer_a)
+    await handle_edit_study_today(MockMessage(edit_bot, s20_peer_a, "🔄 ویرایش مطالعه امروز"), ua_edit_today_state)
+    await process_study_minutes(MockMessage(edit_bot, s20_peer_a, "30"), ua_edit_today_state)
+    last_pages_btns = [btn.text for row in edit_bot.sent_messages[-1]["reply_markup"].keyboard for btn in row]
+    assert KEEP_PAGES_TEXT in last_pages_btns, f"دکمه حفظ صفحات قبلی در ویرایش امروز دیده نشد: {last_pages_btns}"
+    await process_study_pages(MockMessage(edit_bot, s20_peer_a, KEEP_PAGES_TEXT), ua_edit_today_state)
+    with get_db() as db:
+        ua_chk = db.query(User).filter(User.id == s20_peer_a).first()
+        assert ua_chk.today_minutes == 30 and ua_chk.today_pages == 12, (
+            f"با زدن حفظ صفحات، صفحات امروز باید ۱۲ بماند: mins={ua_chk.today_minutes}, pages={ua_chk.today_pages}"
+        )
+
+    # ۶-ب) ویرایش دیروز: قطعیت یافتن لاگ دقیق دیروز (۱۰ دقیقه، ۵ صفحه) و حفظ ۵ صفحه با KEEP_PAGES_TEXT
+    with get_db() as db:
+        lg20_obj = db.query(League).filter(League.id == lg20_id).first()
+        cyc20_obj = get_or_create_active_cycle(db, lg20_obj)
+        picked_log = _find_yesterday_activity_log(
+            db, s20_peer_a, lg20_obj, cyc20_obj, DateService.yesterday_str(), 3
+        )
+        assert picked_log is not None and picked_log.log_date == DateService.yesterday_str() and picked_log.minutes == 10, (
+            f"لاگ دیروز باید دقیقاً با تاریخ دیروز انتخاب شود، نه لاگ متعارض: {picked_log and (picked_log.log_date, picked_log.minutes)}"
+        )
+
+    ua_edit_yest_state = make_fsm(storage, edit_bot.id, s20_peer_a)
+    await handle_edit_study_yesterday(MockMessage(edit_bot, s20_peer_a, EDIT_YESTERDAY_TEXT), ua_edit_yest_state)
+    await process_study_minutes(MockMessage(edit_bot, s20_peer_a, "22"), ua_edit_yest_state)
+    await process_study_pages(MockMessage(edit_bot, s20_peer_a, KEEP_PAGES_TEXT), ua_edit_yest_state)
+    with get_db() as db:
+        y_log_after = (
+            db.query(ActivityLog)
+            .filter(ActivityLog.user_id == s20_peer_a, ActivityLog.log_date == DateService.yesterday_str())
+            .first()
+        )
+        assert y_log_after.minutes == 22 and y_log_after.pages == 5, (
+            f"صفحات دیروز باید ۵ حفظ شود: mins={y_log_after.minutes}, pages={y_log_after.pages}"
+        )
+
+    # ۶-ج) تایپ صریح "0" در ویرایش دیروز باید صفحات را به ۰ تغییر دهد
+    ua_zero_yest_state = make_fsm(storage, edit_bot.id, s20_peer_a)
+    await handle_edit_study_yesterday(MockMessage(edit_bot, s20_peer_a, EDIT_YESTERDAY_TEXT), ua_zero_yest_state)
+    await process_study_minutes(MockMessage(edit_bot, s20_peer_a, "22"), ua_zero_yest_state)
+    await process_study_pages(MockMessage(edit_bot, s20_peer_a, "0"), ua_zero_yest_state)
+    with get_db() as db:
+        y_log_zero = (
+            db.query(ActivityLog)
+            .filter(ActivityLog.user_id == s20_peer_a, ActivityLog.log_date == DateService.yesterday_str())
+            .first()
+        )
+        assert y_log_zero.pages == 0, f"تایپ صریح 0 باید صفحات دیروز را ۰ کند: {y_log_zero.pages}"
+
+    # ۷) بررسی زیرساخت دیپلوی، کانتینر غیرروت و حذف entrypoint قدیمی
+    dockerfile_txt = Path("Dockerfile").read_text(encoding="utf-8")
+    compose_txt = Path("docker-compose.yml").read_text(encoding="utf-8")
+    assert "USER app" in dockerfile_txt and "HEALTHCHECK" in dockerfile_txt, "Dockerfile باید USER app و HEALTHCHECK داشته باشد"
+    assert "${BOT_IMAGE_TAG:?" in compose_txt and "pull_policy: missing" in compose_txt, "docker-compose.yml باید تگ اجباری و pull_policy: missing داشته باشد"
+    assert not Path("docker/entrypoint.sh").exists(), "فایل docker/entrypoint.sh باید حذف شده باشد"
+
+    print("✅ [PASS] Scenario 20: Configurable league quotas (lq), edit yesterday (ey), peer study notifications (pn / /peer_notify), optional pages (op), hybrid 3-option minutes & deploy hardening verified.")
 
 
 

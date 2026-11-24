@@ -27,8 +27,9 @@ logs/
 # Temporary fix files
 AAAFIX*.py
 
-# Graphify cache
-graphify-out/cache/
+# Graphify & AI pack artifacts
+graphify-out/
+pack/
 *.tmp
 
 # IDE & OS files

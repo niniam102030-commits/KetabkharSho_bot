@@ -68,6 +68,7 @@ from keyboards import (
     get_study_minutes_keyboard,
     EDIT_YESTERDAY_TEXT,
     SKIP_PAGES_TEXT,
+    KEEP_PAGES_TEXT,
 )
 
 logger = logging.getLogger(__name__)
@@ -463,6 +464,51 @@ def user_can_log_late(db: Session, user: Optional[User]) -> bool:
     return existing_log is None
 
 
+def _find_yesterday_activity_log(
+    db: Session,
+    user_id: str,
+    league: League,
+    cycle: Cycle,
+    yesterday_str: str,
+    yesterday_day: int,
+) -> Optional[ActivityLog]:
+    """
+    یافتن قطعی و غیرتصادفی لاگ مطالعه دیروز کاربر در چله فعال:
+    ابتدا تطبیق دقیق بر اساس تاریخ دیروز (yesterday_str) بررسی می‌شود و تنها در صورت نبودن،
+    به شماره روز دیروز با شرط log_date < امروز (ترتیب نزولی شناسه) رجوع می‌شود.
+    """
+    base_filter = (
+        ActivityLog.user_id == user_id,
+        ActivityLog.league_id == league.id,
+        (ActivityLog.cycle_id == cycle.id)
+        | (
+            (ActivityLog.cycle_id == None)
+            & (ActivityLog.cycle_number == league.cycle_number)
+        ),
+        ActivityLog.minutes > 0,
+    )
+    exact_log = (
+        db.query(ActivityLog)
+        .filter(*base_filter, ActivityLog.log_date == yesterday_str)
+        .order_by(ActivityLog.id.desc())
+        .first()
+    )
+    if exact_log is not None:
+        return exact_log
+
+    today_str = DateService.today_str()
+    return (
+        db.query(ActivityLog)
+        .filter(
+            *base_filter,
+            ActivityLog.league_day == yesterday_day,
+            ActivityLog.log_date < today_str,
+        )
+        .order_by(ActivityLog.id.desc())
+        .first()
+    )
+
+
 def user_can_edit_yesterday(db: Session, user: Optional[User]) -> bool:
     """
     بررسی شرط فعال بودن دکمه «ویرایش مطالعه دیروز»:
@@ -504,21 +550,8 @@ def user_can_edit_yesterday(db: Session, user: Optional[User]) -> bool:
         return False
 
     yesterday_str = DateService.yesterday_str()
-    existing_log = (
-        db.query(ActivityLog)
-        .filter(
-            ActivityLog.user_id == user.id,
-            ActivityLog.league_id == league.id,
-            (ActivityLog.cycle_id == cycle.id)
-            | (
-                (ActivityLog.cycle_id == None)
-                & (ActivityLog.cycle_number == league.cycle_number)
-            ),
-            (ActivityLog.log_date == yesterday_str)
-            | (ActivityLog.league_day == yesterday_day),
-            ActivityLog.minutes > 0,
-        )
-        .first()
+    existing_log = _find_yesterday_activity_log(
+        db, user.id, league, cycle, yesterday_str, yesterday_day
     )
     return existing_log is not None
 
@@ -1554,21 +1587,8 @@ async def handle_edit_study_yesterday(message: Message, state: FSMContext) -> No
             cycle.start_shamsi or league.start_shamsi
         )
         yesterday_day = max(1, min(settings.LEAGUE_DURATION, raw_current_day - 1))
-        existing_yest_log = (
-            db.query(ActivityLog)
-            .filter(
-                ActivityLog.user_id == user.id,
-                ActivityLog.league_id == league.id,
-                (ActivityLog.cycle_id == cycle.id)
-                | (
-                    (ActivityLog.cycle_id == None)
-                    & (ActivityLog.cycle_number == league.cycle_number)
-                ),
-                (ActivityLog.log_date == yesterday_str)
-                | (ActivityLog.league_day == yesterday_day),
-                ActivityLog.minutes > 0,
-            )
-            .first()
+        existing_yest_log = _find_yesterday_activity_log(
+            db, user.id, league, cycle, yesterday_str, yesterday_day
         )
         if not existing_yest_log:
             kb = build_user_main_menu(db, tg_id, user)
@@ -1594,6 +1614,7 @@ async def handle_edit_study_yesterday(message: Message, state: FSMContext) -> No
         )
         prompt_txt = MessageService.apply_terms(db, user.group_id, prompt_txt)
         user_id = user.id
+        edit_yest_log_id = existing_yest_log.id
         mins_kb, quick_map = _build_minutes_quick_options(
             db, user, league, mode="edit_yesterday", existing_yest_log=existing_yest_log
         )
@@ -1603,6 +1624,7 @@ async def handle_edit_study_yesterday(message: Message, state: FSMContext) -> No
         study_user_id=user_id,
         study_init_date=today_str,
         quick_minutes_map=quick_map,
+        edit_yest_log_id=edit_yest_log_id,
     )
     await state.set_state(StudyStates.waiting_for_minutes)
     await safe_answer(
@@ -1729,15 +1751,59 @@ async def process_study_minutes(message: Message, state: FSMContext) -> None:
             else None
         )
         optional_pages = bool(grp and grp.optional_pages)
+        existing_pages = 0
+        if optional_pages and user:
+            if mode == "edit" and user.last_log_date == today_str:
+                existing_pages = int(user.today_pages or 0)
+            elif mode == "edit_yesterday" and user.league_id:
+                lg = db.query(League).filter(League.id == user.league_id).first()
+                if lg:
+                    cyc = get_or_create_active_cycle(db, lg)
+                    edit_yest_log_id = data.get("edit_yest_log_id")
+                    yest_log = None
+                    if edit_yest_log_id:
+                        yest_log = (
+                            db.query(ActivityLog)
+                            .filter(
+                                ActivityLog.id == edit_yest_log_id,
+                                ActivityLog.user_id == user.id,
+                                ActivityLog.league_id == lg.id,
+                            )
+                            .first()
+                        )
+                    if yest_log is None:
+                        raw_day = DateService.calculate_raw_league_day(
+                            cyc.start_shamsi or lg.start_shamsi
+                        )
+                        yest_day = max(1, min(settings.LEAGUE_DURATION, raw_day - 1))
+                        yest_log = _find_yesterday_activity_log(
+                            db, user.id, lg, cyc, DateService.yesterday_str(), yest_day
+                        )
+                    if yest_log is not None:
+                        existing_pages = int(yest_log.pages or 0)
 
-    await state.update_data(study_minutes=minutes, optional_pages=optional_pages)
+    keep_existing_pages = optional_pages and mode in ("edit", "edit_yesterday") and existing_pages > 0
+    await state.update_data(
+        study_minutes=minutes,
+        optional_pages=optional_pages,
+        keep_existing_pages=keep_existing_pages,
+    )
     await state.set_state(StudyStates.waiting_for_pages)
     if optional_pages:
+        if keep_existing_pages:
+            pages_prompt = (
+                f"📄 حالا {user_display} عزیز بفرمایید چند صفحه خواندید؟\n"
+                f"(صفحات ثبت‌شده قبلی شما {existing_pages} صفحه است؛ برای حفظ همین تعداد دکمه «{KEEP_PAGES_TEXT}» را بزنید یا عدد جدید — مثلاً 0 — وارد کنید)"
+            )
+        else:
+            pages_prompt = (
+                f"📄 حالا {user_display} عزیز بفرمایید چند صفحه خواندید؟\n"
+                f"(ثبت تعداد صفحات اختیاری است؛ می‌توانید عدد بفرستید یا دکمه «{SKIP_PAGES_TEXT}» را بزنید)"
+            )
         await safe_answer(
             message,
-            f"📄 حالا {user_display} عزیز بفرمایید چند صفحه خواندید؟\n"
-            f"(ثبت تعداد صفحات اختیاری است؛ می‌توانید عدد بفرستید یا دکمه «{SKIP_PAGES_TEXT}» را بزنید)",
-            reply_markup=get_optional_pages_keyboard(),
+            pages_prompt,
+            reply_markup=get_optional_pages_keyboard(keep_existing=keep_existing_pages),
         )
     else:
         await safe_answer(
@@ -1754,13 +1820,19 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
         return
     state_preview = await state.get_data()
     is_optional_pages_state = bool(state_preview.get("optional_pages", False))
-    if is_optional_pages_state and txt_clean == SKIP_PAGES_TEXT:
+    keep_existing_flag = bool(state_preview.get("keep_existing_pages", False))
+    skip_pages_pressed = is_optional_pages_state and txt_clean in (
+        SKIP_PAGES_TEXT,
+        KEEP_PAGES_TEXT,
+    )
+    if skip_pages_pressed:
         pages = 0
     else:
         raw_pages = DateService.normalize_digits(txt_clean)
         if not (raw_pages.isascii() and raw_pages.isdigit()) or len(raw_pages) > 4 or not (0 <= int(raw_pages) <= 5000):
+            skip_btn_label = KEEP_PAGES_TEXT if keep_existing_flag else SKIP_PAGES_TEXT
             hint = (
-                f" یا دکمه «{SKIP_PAGES_TEXT}» را بزنید:"
+                f" یا دکمه «{skip_btn_label}» را بزنید:"
                 if is_optional_pages_state
                 else ":"
             )
@@ -1878,22 +1950,28 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                 target_league_day = max(
                     1, min(settings.LEAGUE_DURATION, raw_current_day - 1)
                 )
-                existing_yest_log = (
-                    db.query(ActivityLog)
-                    .filter(
-                        ActivityLog.user_id == user.id,
-                        ActivityLog.league_id == league.id,
-                        (ActivityLog.cycle_id == cycle.id)
-                        | (
-                            (ActivityLog.cycle_id == None)
-                            & (ActivityLog.cycle_number == league.cycle_number)
-                        ),
-                        (ActivityLog.log_date == yesterday_str)
-                        | (ActivityLog.league_day == target_league_day),
-                        ActivityLog.minutes > 0,
+                edit_yest_log_id = data.get("edit_yest_log_id")
+                existing_yest_log = None
+                if edit_yest_log_id:
+                    existing_yest_log = (
+                        db.query(ActivityLog)
+                        .filter(
+                            ActivityLog.id == edit_yest_log_id,
+                            ActivityLog.user_id == user.id,
+                            ActivityLog.league_id == league.id,
+                            (ActivityLog.cycle_id == cycle.id)
+                            | (
+                                (ActivityLog.cycle_id == None)
+                                & (ActivityLog.cycle_number == league.cycle_number)
+                            ),
+                            ActivityLog.minutes > 0,
+                        )
+                        .first()
                     )
-                    .first()
-                )
+                if existing_yest_log is None:
+                    existing_yest_log = _find_yesterday_activity_log(
+                        db, user.id, league, cycle, yesterday_str, target_league_day
+                    )
                 if not existing_yest_log:
                     kb = build_user_main_menu(db, tg_id, user)
                     await state.clear()
@@ -1901,6 +1979,9 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                         message, "⚠️ ثبت مطالعه‌ای برای دیروز یافت نشد.", reply_markup=kb
                     )
                     return
+
+                if skip_pages_pressed:
+                    pages = int(existing_yest_log.pages or 0)
 
                 # بازگردانی امتیاز، زمان، صفحات و سهمیه‌های مصرف‌شده دیروز
                 user.points = max(
@@ -2065,6 +2146,9 @@ async def process_study_pages(message: Message, state: FSMContext) -> None:
                     user.today_points = 0.0
                     user.today_half_used = 0
                     user.today_one_min_used = 0
+
+                if mode == "edit" and skip_pages_pressed and user.last_log_date == today_str:
+                    pages = int(user.today_pages or 0)
 
                 if mode == "append" and user.last_log_date == today_str:
                     cum_minutes = min(1440, int(user.today_minutes or 0) + input_minutes)

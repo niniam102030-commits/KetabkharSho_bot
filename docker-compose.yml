@@ -1,7 +1,7 @@
 services:
   ketabkharsho-bot:
-    image: ghcr.io/niniam102030-commits/ketabkharsho_bot:${BOT_IMAGE_TAG:-latest}
-    pull_policy: always
+    image: ghcr.io/niniam102030-commits/ketabkharsho_bot:${BOT_IMAGE_TAG:?BOT_IMAGE_TAG must be set to a commit SHA or release tag}
+    pull_policy: missing
     container_name: ketabkharsho_bot
     restart: unless-stopped
     env_file:

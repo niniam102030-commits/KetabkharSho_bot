@@ -23,6 +23,7 @@ VIEW_FINES_TEXT = "💰 مشاهده جریمه‌ها"
 PAY_FINES_TEXT = "💳 پرداخت جریمه"
 EDIT_YESTERDAY_TEXT = "✏️ ویرایش مطالعه دیروز"
 SKIP_PAGES_TEXT = "⏭ رد کردن (بدون ثبت صفحه)"
+KEEP_PAGES_TEXT = "⏭ رد کردن (حفظ صفحات قبلی)"
 
 
 def get_main_menu(
@@ -319,11 +320,12 @@ def get_cancel_or_back_keyboard(show_back: bool = True) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=[row], resize_keyboard=True)
 
 
-def get_optional_pages_keyboard() -> ReplyKeyboardMarkup:
+def get_optional_pages_keyboard(keep_existing: bool = False) -> ReplyKeyboardMarkup:
     """کیبورد مرحله ورود صفحات زمانی که ثبت صفحات برای مجموعه اختیاری است"""
+    btn_text = KEEP_PAGES_TEXT if keep_existing else SKIP_PAGES_TEXT
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=SKIP_PAGES_TEXT)],
+            [KeyboardButton(text=btn_text)],
             [KeyboardButton(text=CANCEL_TEXT)],
         ],
         resize_keyboard=True,
