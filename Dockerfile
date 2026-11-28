@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     ca-certificates \
     curl \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # ارتقای ابزارهای پکیج‌منیجر پایتون به آخرین نسخه
@@ -63,12 +64,18 @@ ENV GIT_COMMIT=${GIT_COMMIT}
 RUN mkdir -p /app/data /app/logs /app/data/backups /app/data/reports \
     && chown -R app:app /app/data /app/logs
 
-USER app
+# کانتینر با روت شروع می‌شود؛ entrypoint مالکیت حجم‌های data/logs را اصلاح می‌کند
+# و بلافاصله با gosu به کاربر غیرروت app سوئیچ می‌کند (ربات هرگز با روت اجرا نمی‌شود).
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh \
+    && chmod +x /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # هلث‌چک: فقط خط فرمان PID 1 (خود ربات) بررسی می‌شود، نه همه پردازه‌ها؛
 # اسکن همه /proc باعث می‌شد خودِ پروب هلث‌چک (که رشته main.py در کدش هست) همیشه پاس شود.
+# پروب با کاربر app اجرا می‌شود تا دسترسی نوشتن دقیقاً از دید خود ربات سنجیده شود.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import os; cmdline = open('/proc/1/cmdline', 'rb').read().decode(errors='ignore'); assert 'main.py' in cmdline; assert os.access('/app/data', os.W_OK); assert os.access('/app/logs', os.W_OK)" || exit 1
+    CMD gosu app python -c "import os; cmdline = open('/proc/1/cmdline', 'rb').read().decode(errors='ignore'); assert 'main.py' in cmdline; assert os.access('/app/data', os.W_OK); assert os.access('/app/logs', os.W_OK)" || exit 1
 
 # دستور اجرای ربات
 CMD ["python", "main.py"]
