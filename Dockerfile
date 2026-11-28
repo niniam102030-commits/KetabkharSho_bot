@@ -16,7 +16,7 @@ ENV PYTHONUNBUFFERED=1 \
 # تعیین دایرکتوری کاری در کانتینر
 WORKDIR /app
 
-# نصب ابزارهای پایه و داده‌های زمانی IANA
+# نصب ابزارهای پایه، داده‌های زمانی IANA و gosu برای اجرای امن با کاربر غیرروت
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     ca-certificates \
@@ -47,35 +47,23 @@ import openpyxl; \
 print(f'>>> تست موفق: aiogram نسخه {aiogram.__version__} و تمام وابستگی‌ها به درستی نصب شدند.'); \
 "
 
-# ایجاد کاربر غیرروت با شناسه ثابت (UID/GID=10001) پیش از کپی کد و تنظیم دایرکتوری‌های داده
-RUN groupadd --system --gid 10001 app \
-    && useradd --system --uid 10001 --gid app --home-dir /app app \
-    && mkdir -p /app/data /app/logs /app/data/backups /app/data/reports \
-    && chown -R app:app /app
-
-# کپی سورس کد پروژه به داخل کانتینر با مالکیت کاربر غیرروت
-COPY --chown=app:app . .
+# کپی سورس کد پروژه به داخل کانتینر
+COPY . .
 
 # ثبت شناسه کامیت در محیط کانتینر برای نمایش در اعلان استارتاپ و بکاپ‌ها
 ARG GIT_COMMIT=""
 ENV GIT_COMMIT=${GIT_COMMIT}
 
-# تضمین مالکیت دایرکتوری‌های پیش‌فرض برای کاربر غیرروت
+# ایجاد دایرکتوری‌های داده و لاگ، کاربر غیر روت و entrypoint برای تنظیم دسترسی حجم‌های موجود بدون حذف داده
 RUN mkdir -p /app/data /app/logs /app/data/backups /app/data/reports \
-    && chown -R app:app /app/data /app/logs
-
-# کانتینر با روت شروع می‌شود؛ entrypoint مالکیت حجم‌های data/logs را اصلاح می‌کند
-# و بلافاصله با gosu به کاربر غیرروت app سوئیچ می‌کند (ربات هرگز با روت اجرا نمی‌شود).
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh \
+    && groupadd --system app \
+    && useradd --system --gid app --home-dir /app app \
+    && chown -R app:app /app \
+    && cp /app/docker/entrypoint.sh /usr/local/bin/entrypoint.sh \
+    && sed -i 's/\r$//' /usr/local/bin/entrypoint.sh \
     && chmod +x /usr/local/bin/entrypoint.sh
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
-# هلث‌چک: فقط خط فرمان PID 1 (خود ربات) بررسی می‌شود، نه همه پردازه‌ها؛
-# اسکن همه /proc باعث می‌شد خودِ پروب هلث‌چک (که رشته main.py در کدش هست) همیشه پاس شود.
-# پروب با کاربر app اجرا می‌شود تا دسترسی نوشتن دقیقاً از دید خود ربات سنجیده شود.
-HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=3 \
-    CMD gosu app python -c "import os; cmdline = open('/proc/1/cmdline', 'rb').read().decode(errors='ignore'); assert 'main.py' in cmdline; assert os.access('/app/data', os.W_OK); assert os.access('/app/logs', os.W_OK)" || exit 1
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # دستور اجرای ربات
 CMD ["python", "main.py"]

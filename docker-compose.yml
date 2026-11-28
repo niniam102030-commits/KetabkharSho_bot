@@ -1,7 +1,5 @@
 services:
   ketabkharsho-bot:
-    # پیش‌فرض latest برای دیپلوی خودکار کولیفای (Coolify) لازم است؛ کولیفای BOT_IMAGE_TAG ست نمی‌کند
-    # و گارد :? دیپلوی خودکار را متوقف می‌کرد. مسیر دستی deploy.sh همچنان BOT_IMAGE_TAG را با SHA دقیق ست می‌کند.
     image: ghcr.io/niniam102030-commits/ketabkharsho_bot:${BOT_IMAGE_TAG:-latest}
     pull_policy: always
     container_name: ketabkharsho_bot
