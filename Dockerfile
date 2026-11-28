@@ -65,8 +65,10 @@ RUN mkdir -p /app/data /app/logs /app/data/backups /app/data/reports \
 
 USER app
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD python -c "import os, pathlib; assert any('main.py' in p.read_text(errors='ignore') for p in pathlib.Path('/proc').glob('[0-9]*/cmdline')); assert os.access('/app/data', os.W_OK)" || exit 1
+# هلث‌چک: فقط خط فرمان PID 1 (خود ربات) بررسی می‌شود، نه همه پردازه‌ها؛
+# اسکن همه /proc باعث می‌شد خودِ پروب هلث‌چک (که رشته main.py در کدش هست) همیشه پاس شود.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=3 \
+    CMD python -c "import os; cmdline = open('/proc/1/cmdline', 'rb').read().decode(errors='ignore'); assert 'main.py' in cmdline; assert os.access('/app/data', os.W_OK); assert os.access('/app/logs', os.W_OK)" || exit 1
 
 # دستور اجرای ربات
 CMD ["python", "main.py"]

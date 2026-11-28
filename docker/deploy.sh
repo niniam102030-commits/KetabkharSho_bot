@@ -22,7 +22,23 @@ echo "=================================================="
 echo "📁 2. آماده‌سازی دایرکتوری‌های داده و دسترسی کاربر غیرروت (10001)..."
 echo "=================================================="
 mkdir -p data data/backups data/reports logs
-chown -R 10001:10001 data logs 2>/dev/null || true
+if ! chown -R 10001:10001 data logs 2>/dev/null; then
+  echo "⚠️ تغییر مالکیت مستقیم ممکن نشد؛ تلاش با sudo..."
+  if command -v sudo >/dev/null 2>&1; then
+    if ! sudo chown -R 10001:10001 data logs; then
+      echo "❌ تغییر مالکیت data و logs به کاربر 10001 ناموفق بود؛ دیپلوی متوقف شد."
+      exit 1
+    fi
+  else
+    echo "❌ sudo در دسترس نیست و مالکیت data/logs قابل اصلاح نیست؛ اسکریپت را با کاربر root اجرا کنید."
+    exit 1
+  fi
+fi
+if [ "$(stat -c '%u' data)" != "10001" ] || [ "$(stat -c '%u' logs)" != "10001" ]; then
+  echo "❌ مالکیت data/logs هنوز 10001 نیست؛ کانتینر غیرروت امکان نوشتن ندارد. دیپلوی متوقف شد."
+  exit 1
+fi
+echo "✅ مالکیت data و logs برای کاربر 10001 تأیید شد."
 
 echo ""
 echo "=================================================="
@@ -56,7 +72,7 @@ echo ""
 echo "=================================================="
 echo "🩺 5. بررسی سلامت واقعی کانتینر (Healthcheck)..."
 echo "=================================================="
-MAX_HEALTH_WAIT=45
+MAX_HEALTH_WAIT=120
 HEALTH_ELAPSED=0
 while [ "$HEALTH_ELAPSED" -lt "$MAX_HEALTH_WAIT" ]; do
   HEALTH_STATUS=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' ketabkharsho_bot 2>/dev/null || echo "missing")
@@ -81,7 +97,23 @@ fi
 
 echo ""
 echo "=================================================="
-echo "🧹 6. پاکسازی ایمیج‌های موقت و بدون استفاده..."
+echo "🔎 6. تطبیق نسخه اجراشده با نسخه هدف (GIT_COMMIT)..."
+echo "=================================================="
+if [[ "$TARGET_TAG" =~ ^[0-9a-f]{40}$ ]]; then
+  RUNNING_COMMIT=$(docker inspect --format='{{range .Config.Env}}{{println .}}{{end}}' ketabkharsho_bot 2>/dev/null | grep '^GIT_COMMIT=' | cut -d= -f2- || true)
+  if [ "$RUNNING_COMMIT" != "$TARGET_TAG" ]; then
+    echo "❌ نسخه اجراشده (${RUNNING_COMMIT:-نامشخص}) با نسخه هدف (${TARGET_TAG}) یکی نیست؛ دیپلوی ناموفق تلقی شد."
+    docker compose logs --tail=100 ketabkharsho-bot
+    exit 1
+  fi
+  echo "✅ نسخه اجراشده دقیقاً همان نسخه هدف است (${RUNNING_COMMIT})."
+else
+  echo "ℹ️ تگ هدف SHA کامل نیست (${TARGET_TAG})؛ تطبیق GIT_COMMIT رد شد."
+fi
+
+echo ""
+echo "=================================================="
+echo "🧹 7. پاکسازی ایمیج‌های موقت و بدون استفاده..."
 echo "=================================================="
 docker image prune -f
 
