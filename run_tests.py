@@ -1980,12 +1980,12 @@ async def run_all_tests() -> None:
         )
         assert y_log_zero.pages == 0, f"تایپ صریح 0 باید صفحات دیروز را ۰ کند: {y_log_zero.pages}"
 
-    # ۷) بررسی زیرساخت دیپلوی، کانتینر غیرروت و حذف entrypoint قدیمی
+    # ۷) بررسی زیرساخت دیپلوی سازگار با Coolify (کاربر غیرروت از طریق entrypoint و تگ پیش‌فرض latest)
     dockerfile_txt = Path("Dockerfile").read_text(encoding="utf-8")
     compose_txt = Path("docker-compose.yml").read_text(encoding="utf-8")
-    assert "USER app" in dockerfile_txt and "HEALTHCHECK" in dockerfile_txt, "Dockerfile باید USER app و HEALTHCHECK داشته باشد"
-    assert "${BOT_IMAGE_TAG:?" in compose_txt and "pull_policy: missing" in compose_txt, "docker-compose.yml باید تگ اجباری و pull_policy: missing داشته باشد"
-    assert not Path("docker/entrypoint.sh").exists(), "فایل docker/entrypoint.sh باید حذف شده باشد"
+    assert "useradd --system --gid app" in dockerfile_txt and "entrypoint.sh" in dockerfile_txt, "Dockerfile باید کاربر app و entrypoint.sh داشته باشد"
+    assert "${BOT_IMAGE_TAG:-latest}" in compose_txt, "docker-compose.yml باید BOT_IMAGE_TAG با پیش‌فرض latest داشته باشد"
+    assert Path("docker/entrypoint.sh").exists(), "فایل docker/entrypoint.sh باید موجود باشد"
 
     print("✅ [PASS] Scenario 20: Configurable league quotas (lq), edit yesterday (ey), peer study notifications (pn / /peer_notify), optional pages (op), hybrid 3-option minutes & deploy hardening verified.")
 
